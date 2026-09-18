@@ -24,6 +24,7 @@
 | 看真實語料的品質實測 | [P0 品質報告](docs/benchmarks/p0-quality-report.md) |
 | 交給 Sol 或其他模型開始開發 | [06 開發交接](docs/06-handoff.md) |
 | 理解類似系統聽寫的預覽與上下文修訂 | [07 串流修訂規劃](docs/07-contextual-streaming.md) |
+| 開 OBS 直播字幕外掛的 repo | [08 OBS 外掛規格](docs/08-obs-plugin.md) |
 
 建議先閱讀 01 的「範圍」，再把 06 最後的開發提示交给實作模型。API 定義以 04 為準；不確定事項以 05 的驗證關卡為準。
 
