@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Literal
 
@@ -32,16 +33,40 @@ class SegmenterConfig:
 
     min_speech_ms: int = 160
     end_silence_ms: int = 500
-    pre_roll_ms: int = 200
+    #: Mandarin onsets ramp slowly (the ㄓ in 「這」, the ㄇ in 「明」). Measured
+    #: on real recordings: 200 ms lost the first word, 600 ms recovered it.
+    pre_roll_ms: int = 600
     tail_ms: int = 200
-    max_segment_ms: int = 8_000
+    max_segment_ms: int = 12_000
     threshold: float = 0.5
     #: Hysteresis: once speech is running it takes a lower score to keep it,
     #: so a brief dip inside a word does not close the segment.
     neg_threshold: float = 0.35
+    #: Once speech is confirmed, walk back over windows still above this score
+    #: to find where the utterance actually began, then apply the pre-roll.
+    onset_threshold: float = 0.2
+    #: Calibrated on real speech: at 8 s a long sentence was cut mid-phrase and
+    #: the model completed it anyway, so the same words came out on both sides
+    #: of the split. Most speakers pause well before 12 s, so the cap now rarely
+    #: fires and a natural silence closes the segment instead.
+    #:
+    #: A hard split lands mid-word and the model then transcribes the same word
+    #: on both sides. Look for the quietest window in this much audio before the
+    #: cap and cut there instead.
+    split_search_ms: int = 1_200
+    #: If nothing quiet turns up at the cap, wait this much longer rather than
+    #: cutting mid-word. Only after the grace does the hard cut apply, so the
+    #: real upper bound on a segment is max_segment_ms + split_grace_ms.
+    split_grace_ms: int = 2_000
 
     def samples(self, milliseconds: int) -> int:
         return milliseconds * 16
+
+    @property
+    def hard_cap_ms(self) -> int:
+        """The real upper bound a client can rely on."""
+
+        return self.max_segment_ms + self.split_grace_ms
 
 
 class ContinuousSegmenter:
@@ -73,6 +98,9 @@ class ContinuousSegmenter:
         self._last_speech_end = start_sample
         self._trailing_silence = 0
         self._committed_end = start_sample
+        #: (window_start, probability) for recent windows, used to backtrack to
+        #: the true onset and to choose a quiet hard-split point.
+        self._recent: deque[tuple[int, float]] = deque(maxlen=512)
 
     @property
     def next_sample(self) -> int:
@@ -110,6 +138,7 @@ class ContinuousSegmenter:
                 self._buffer[offset : offset + VAD_WINDOW_SAMPLES * 2], dtype="<i2"
             ).astype(np.float32) / 32768.0
             probability = self._vad.probability(window, self._vad_session)
+            self._recent.append((self._cursor, probability))
             events.extend(self._step(probability, self._cursor, self._cursor + VAD_WINDOW_SAMPLES))
             self._cursor += VAD_WINDOW_SAMPLES
         self._trim()
@@ -170,15 +199,60 @@ class ContinuousSegmenter:
                 return events
 
         assert self._segment_start is not None
-        if end - self._segment_start >= config.samples(config.max_segment_ms):
-            events.append(self._close("max_duration", end=end))
+        spoken = end - self._segment_start
+        if spoken >= config.samples(config.max_segment_ms):
+            point = self._quiet_split_point(end)
+            forced = spoken >= config.samples(config.hard_cap_ms)
+            if point >= end and not forced:
+                # Still mid-word: keep going for now rather than cutting a word
+                # in half and having the model transcribe it on both sides.
+                return events
+            split = self._close("max_duration", end=point)
+            events.append(split)
             # An endless talker keeps speaking across the split, so the next
             # segment starts exactly where this one ended: no gap, no overlap.
             self._state = "speech"
-            self._segment_start = end
-            self._last_speech_end = end
+            self._segment_start = split.end_sample
+            self._last_speech_end = max(split.end_sample, end)
             self._trailing_silence = 0
         return events
+
+    def _quiet_split_point(self, cap: int) -> int:
+        """Pick the quietest recent window instead of cutting mid-word."""
+
+        assert self._segment_start is not None
+        config = self._config
+        # Keep at least half the target length on this side, so a quiet spot
+        # near the start of the segment cannot carve off a sliver.
+        earliest = max(
+            self._segment_start + config.samples(config.max_segment_ms // 2),
+            cap - config.samples(config.split_search_ms),
+        )
+        candidates = [
+            (probability, window_start)
+            for window_start, probability in self._recent
+            if earliest <= window_start < cap
+        ]
+        if not candidates:
+            return cap
+        probability, window_start = min(candidates)
+        if probability >= config.neg_threshold:
+            # Nothing quiet enough to cut cleanly; the hard cap still applies.
+            return cap
+        return window_start
+
+    def _onset(self) -> int:
+        """Walk back from the candidate over windows that still look like speech."""
+
+        assert self._candidate_start is not None
+        onset = self._candidate_start
+        for window_start, probability in reversed(self._recent):
+            if window_start >= onset:
+                continue
+            if probability < self._config.onset_threshold:
+                break
+            onset = window_start
+        return onset
 
     def _confirm(self, end: int) -> SpeechStarted:
         assert self._candidate_start is not None
@@ -186,7 +260,7 @@ class ContinuousSegmenter:
         start = max(
             self._buffer_start,
             self._committed_end,
-            self._candidate_start - config.samples(config.pre_roll_ms),
+            self._onset() - config.samples(config.pre_roll_ms),
         )
         self._state = "speech"
         self._segment_start = start
@@ -221,7 +295,11 @@ class ContinuousSegmenter:
         elif self._state == "pending" and self._candidate_start is not None:
             keep_from = self._candidate_start - config.samples(config.pre_roll_ms)
         else:
-            keep_from = self._next_sample - config.samples(config.pre_roll_ms)
+            # Speech is only confirmed after min_speech_ms, so the pre-roll has
+            # to survive that long or the first word is already gone.
+            keep_from = self._next_sample - config.samples(
+                config.pre_roll_ms + config.min_speech_ms + config.split_search_ms // 6
+            )
         keep_from = max(self._buffer_start, min(keep_from, self._cursor))
         drop = (keep_from - self._buffer_start) * 2
         if drop > 0:

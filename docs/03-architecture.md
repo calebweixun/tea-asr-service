@@ -83,10 +83,10 @@ WS 每 frame 建議 20–100ms，最大 200ms＝6,400 PCM bytes；VAD adapter �
 | profile | 切段方式 | 初始參數（待 P0/P2 校準） |
 |---|---|---|
 | utterance | client `commit`／`stop` | 最多30秒；VAD只判斷是否有聲音，不切碎手動句子 |
-| continuous | server VAD | 最短語音160ms、句尾靜音500ms、pre-roll200ms、最大8秒 |
+| continuous | server VAD | 最短語音160ms、句尾靜音500ms、pre-roll**600ms**、最大**12秒**＋2秒grace |
 | batch（v0.2） | server 檔案 VAD | 句尾靜音700ms、最大20秒；最大仍不超過30秒 |
 
-無限說話時達 max segment 即 hard split；v0.1 不重疊辨識窗口，以免文字重複，結果帶 `boundary="max_duration"`。切界精度／漏字需納入實測；未通過時調整切點策略，不能靠文字模糊去重把真的重複詞刪掉。pre-roll 不得跨越已提交的樣本邊界。純靜音不排 GPU；短於 min speech 的明確語音在手動 commit 時保留並標記短片段，不一律丟棄「好」「對」。
+無限說話時達 max segment 即 hard split；v0.1 不重疊辨識窗口，以免文字重複，結果帶 `boundary="max_duration"`。切界精度／漏字需納入實測；未通過時調整切點策略，不能靠文字模糊去重把真的重複詞刪掉。**實測後已調整**：達上限先找最近1.2秒內最安靜的window切，找不到就再等2秒grace，切點至少保留目標長度的一半；pre-roll與最大長度的校準依據見 [P2切段報告](benchmarks/p2-segmentation-report.md)。pre-roll 不得跨越已提交的樣本邊界。純靜音不排 GPU；短於 min speech 的明確語音在手動 commit 時保留並標記短片段，不一律丟棄「好」「對」。
 
 ## 排程與容量
 

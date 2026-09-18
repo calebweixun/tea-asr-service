@@ -182,7 +182,11 @@ class StreamSession:
             min_interval_ms=int(PREVIEW_MIN_INTERVAL_S * 1000),
             max_preview_audio_ms=PREVIEW_MAX_AUDIO_SAMPLES // 16,
             endpoint_silence_ms=REVISABLE_END_SILENCE_MS if continuous else None,
-            max_segment_ms=8_000 if continuous else MAX_UTTERANCE_PCM_BYTES // 2 // 16,
+            max_segment_ms=(
+                SegmenterConfig().hard_cap_ms
+                if continuous
+                else MAX_UTTERANCE_PCM_BYTES // 2 // 16
+            ),
             context_biasing=False,
         )
 

@@ -100,7 +100,7 @@ uv run python examples/mic_stream.py --device 2 --revisable
 say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o /tmp/demo.aiff && ffmpeg -y -i /tmp/demo.aiff -ar 16000 -ac 1 /tmp/demo.wav && uv run python examples/stream_wav.py /tmp/demo.wav
 ```
 
-體驗時會看到的已知限制：一直講不停會在 8 秒處硬切（`boundary="max_duration"`）、utterance 單段最多 30 秒、辨識結果仍夾帶私用區字元（會以 `private_use_characters` warning 標示，不會靜默刪掉）。VAD 參數（句尾靜音 500 ms、最短語音 160 ms、pre-roll 200 ms）是 docs/03 的初始值，還沒用真實語料校準。
+體驗時會看到的已知限制：一直講不停會在 12 秒附近硬切（`boundary="max_duration"`，會先找安靜點）、utterance 單段最多 30 秒、辨識結果仍夾帶私用區字元（會以 `private_use_characters` warning 標示，不會靜默刪掉）。VAD 參數（句尾靜音 500 ms、最短語音 160 ms、pre-roll 600 ms、最大 12 秒）已用真實口語校準過一次，但只有單一語者與單一麥克風。
 
 服務只監聽 `127.0.0.1:8327`（電話鍵盤上的 T-E-A；刻意避開 8765 那類 AI 工具常用的 port）。首次啟動會在 `~/Library/Application Support/TEA ASR/token` 建立權限0600的token。短音訊端點與WS utterance session都接受最多30秒、16 kHz mono PCM s16le；詳見 [API契約](docs/04-api.md)，機器可讀版本在 [docs/api/](docs/api/)（`uv run tea-asr export-schemas` 重新產生，測試會檢查是否過期）。本機結果見 [P0報告](docs/benchmarks/p0-report.md)。
 
@@ -110,7 +110,7 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 |---|---|---|
 | P0 模型可行性 | 效能通過、品質未通過 | 真實語料CER 4.92%（200筆），但私用區字元leak在73.5%的句子重現，見 [品質報告](docs/benchmarks/p0-quality-report.md) |
 | P1 短音訊API | 已實作 | HTTP transcription、健康探針、capabilities、status、bounded scheduler、typed errors、OpenAPI／WS schema |
-| P2 即時音訊 | 已實作 | WS utterance與continuous皆可用：Silero VAD自動斷句、pre-roll、句尾靜音、8秒hard split、有序片段管線；推論不阻塞收音。長跑與多路壓力測試尚未做 |
+| P2 即時音訊 | 已實作並校準 | WS utterance與continuous皆可用：Silero VAD自動斷句、有序片段管線、推論不阻塞收音。切段參數已用真實口語校準，真人MER 3.97%，見 [P2切段報告](docs/benchmarks/p2-segmentation-report.md)。長跑與多路壓力測試尚未做 |
 | P2a 串流修訂 | 實作但未驗收 | utterance與continuous都支援；需 `TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1` 才啟用。未啟用時 `partial_transcripts=false` 且 revisable 請求回 `unsupported_option`。延遲與錯改率尚未量測 |
 | P3 服務管理 | 大致完成 | LaunchAgent install/uninstall/status、singleton lock、port 檢查、idle unload 與重新載入、TOML 設定、JSON log 輪替、關閉時 drain。sleep/wake 尚未實測 |
 | P4 長檔案與保存 | 未開始 | `/v1/jobs` 不存在，回404 |
