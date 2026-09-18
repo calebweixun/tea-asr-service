@@ -43,6 +43,36 @@ uv run tea-asr transcribe path/to/16k-mono.wav
 uv run python examples/stream_wav.py path/to/16k-mono.wav
 ```
 
+## 想先體驗效果
+
+目前只有 `examples/` 下的參考 client，沒有選單列 app 或輸入法；最接近日常使用的是麥克風即時 demo（需要 `brew install ffmpeg`）：
+
+```bash
+uv run python examples/mic_stream.py --list-devices
+```
+
+```bash
+uv run python examples/mic_stream.py --device 2
+```
+
+對著麥克風說話，按 Enter 結束，終端機會印出定稿。若想看「邊說邊出字、依後文修訂」，服務要以實驗旗標啟動，client 再要求 revisable：
+
+```bash
+TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1 uv run tea-asr serve
+```
+
+```bash
+uv run python examples/mic_stream.py --device 2 --revisable
+```
+
+沒有麥克風也可以用合成語音試：
+
+```bash
+say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o /tmp/demo.aiff && ffmpeg -y -i /tmp/demo.aiff -ar 16000 -ac 1 /tmp/demo.wav && uv run python examples/stream_wav.py /tmp/demo.wav
+```
+
+體驗時會看到的已知限制：單段最多 30 秒、沒有 VAD 所以要自己決定段落邊界、辨識結果仍夾帶私用區字元（會以 `private_use_characters` warning 標示，不會靜默刪掉）。
+
 服務只監聽 `127.0.0.1:8765`。首次啟動會在 `~/Library/Application Support/TEA ASR/token` 建立權限0600的token。短音訊端點與WS utterance session都接受最多30秒、16 kHz mono PCM s16le；詳見 [API契約](docs/04-api.md)，機器可讀版本在 [docs/api/](docs/api/)（`uv run tea-asr export-schemas` 重新產生，測試會檢查是否過期）。本機結果見 [P0報告](docs/benchmarks/p0-report.md)。
 
 ## 實作進度

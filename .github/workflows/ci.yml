@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # Apple Silicon: mlx-audio has no wheels for other platforms, and the
+    # project pins arm64 Python 3.12.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync locked dependencies
+        run: uv sync --extra dev --frozen
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Test
+        # tests/hardware is excluded by testpaths: it needs the real
+        # checkpoint, and CI must never download weights.
+        run: uv run pytest -q
+
+      - name: Wire schemas are up to date
+        run: |
+          uv run tea-asr export-schemas
+          git diff --exit-code docs/api
