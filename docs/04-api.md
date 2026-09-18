@@ -175,7 +175,7 @@ session.start增加可選 `transcript_mode="final_only"|"revisable"`，省略等
 {"type":"session.start","request_id":"start-1","profile":"continuous","audio":{"sample_rate":16000,"channels":1,"format":"pcm_s16le"},"language":"Chinese","durable":false,"transcript_mode":"revisable"}
 ```
 
-session.started增加transcript_mode與 `preview_policy`：`min_audio_ms=800`、`min_interval_ms=800`、`max_preview_audio_ms=8000`，continuous另有 `endpoint_silence_ms=900`、`max_segment_ms=8000`；utterance `max_segment_ms=30000`、endpoint_silence_ms=null。limits反映實際調校後配置，不把示例數值硬稱保證。
+session.started增加transcript_mode與 `preview_policy`。**校準後的實際值**：`min_audio_ms=800`、`min_interval_ms=800`、`max_preview_audio_ms=15000`；continuous另有 `endpoint_silence_ms=900`、`max_segment_ms=14000`（12秒上限＋2秒grace）；utterance `max_segment_ms=30000`、`endpoint_silence_ms=null`。這些欄位由server的實際設定產生，client應照收到的值走，不要寫死文件裡的數字。
 
 preview_policy還含 `context_biasing=false`。若啟用獨立實驗，session.start允許 `context={"use_previous_finals":true,"hotwords":["TEA-ASR"]}`，兩欄必填、無其他欄位；僅在context_biasing=true時接受。省略context表示完全不使用文字提示。hotwords上限32詞、每詞32 code points；超限422等價error，內部prompt總token上限與凍結規則依07。`hotwords` feature只有真正驗證後才能true；context中帶非空hotwords而其feature=false時拒絕。
 
