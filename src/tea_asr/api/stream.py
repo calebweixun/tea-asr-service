@@ -49,6 +49,10 @@ FLOW_WINDOW_REFILL_SAMPLES = 80_000
 FLOW_WINDOW_LOW_WATER_SAMPLES = 40_000
 CONTROL_DEDUP_LIMIT = 256
 
+#: Longest wait for queued segments to finish after session.stop. A stuck
+#: consumer must not hold the connection open forever.
+DRAIN_TIMEOUT_S = 120.0
+
 #: docs/03: at most 16 segments may be waiting on one session.
 MAX_PENDING_SEGMENTS = 16
 
@@ -256,6 +260,20 @@ class StreamSession:
                 if self._state.cancelled:
                     continue
                 await self._transcribe_segment(closed)
+            except Exception as exc:  # noqa: BLE001 - one bad segment must not
+                # kill the consumer; the rest of the session still has to finish.
+                self._state.failed_segments.append(closed.segment.index)
+                self._writer.emit(
+                    SegmentError(
+                        session_id=self._state.session_id,
+                        event_id=0,
+                        segment_id=closed.segment.segment_id,
+                        segment_index=closed.segment.index,
+                        code="internal_error",
+                        message=type(exc).__name__,
+                        retryable=False,
+                    )
+                )
             finally:
                 self._pending.task_done()
 
@@ -650,7 +668,25 @@ class StreamSession:
                 raise ApiError("protocol_error", "session.stop 的 through_seq 與已收音訊不符。")
             self._dedup(control.request_id, kind, str(expected))
             await self._close_open_audio(control.request_id, "stop")
-            await self._pending.join()
+            try:
+                await asyncio.wait_for(self._pending.join(), timeout=DRAIN_TIMEOUT_S)
+            except TimeoutError:
+                # Report what did not finish instead of hanging the connection.
+                while not self._pending.empty():
+                    pending = self._pending.get_nowait()
+                    state.failed_segments.append(pending.segment.index)
+                    self._writer.emit(
+                        SegmentError(
+                            session_id=state.session_id,
+                            event_id=0,
+                            segment_id=pending.segment.segment_id,
+                            segment_index=pending.segment.index,
+                            code="inference_timeout",
+                            message="片段在 session 結束前未完成。",
+                            retryable=True,
+                        )
+                    )
+                    self._pending.task_done()
             self._writer.emit(
                 SessionStopped(
                     session_id=state.session_id,

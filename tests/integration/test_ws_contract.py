@@ -495,3 +495,37 @@ def test_preview_revisions_are_strictly_increasing(supervisor: FakeSupervisor) -
         for revisions in by_segment.values():
             assert revisions == sorted(revisions)
             assert len(set(revisions)) == len(revisions)
+
+
+def test_an_unexpected_segment_failure_does_not_wedge_the_session(
+    supervisor: FakeSupervisor,
+) -> None:
+    """A bad segment must not take the consumer down with it."""
+
+    class Exploding(FakeSupervisor):
+        async def transcribe(self, pcm: bytes, *, language: str = "Chinese") -> dict:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("something nobody predicted")
+            return await FakeSupervisor.transcribe(self, pcm, language=language)
+
+    exploding = Exploding()
+    with build_client(exploding, vad=FakeVad()) as http, (
+        http.websocket_connect("/v1/stream", headers=AUTH)
+    ) as socket:
+        socket.receive_json()
+        socket.send_json(CONTINUOUS)
+        socket.receive_json()
+        seq = send_continuous(
+            socket,
+            [("silence", 3), ("tone", 8), ("silence", 12), ("tone", 8), ("silence", 12)],
+        )
+        socket.send_json({"type": "session.stop", "request_id": "s1", "through_seq": seq - 1})
+        events = drain_until(socket, "session.stopped")
+
+        failures = [event for event in events if event["type"] == "segment.error"]
+        finals = [event for event in events if event["type"] == "transcript.final"]
+        assert failures, "the broken segment should be reported"
+        assert failures[0]["code"] == "internal_error"
+        assert finals, "the session must keep working after a bad segment"
+        assert events[-1]["status"] == "completed_with_errors"
