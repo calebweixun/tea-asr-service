@@ -1,0 +1,2 @@
+"""Isolated MLX inference worker."""
+
