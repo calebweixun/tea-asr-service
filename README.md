@@ -113,7 +113,7 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 
 | 階段 | 狀態 | 說明 |
 |---|---|---|
-| P0 模型可行性 | 效能通過、品質未通過 | 真實語料CER 4.92%（200筆），但私用區字元leak在73.5%的句子重現，見 [品質報告](docs/benchmarks/p0-quality-report.md) |
+| P0 模型可行性 | 效能通過、品質未通過 | 真實語料CER 4.92%（200筆）、真人口語MER 3.97%，但私用區字元leak在七成以上的句子重現。定位成因需與上游BF16做A/B，目前卡在磁碟空間，見 [品質報告](docs/benchmarks/p0-quality-report.md) |
 | P1 短音訊API | 已實作 | HTTP transcription、健康探針、capabilities、status、bounded scheduler、typed errors、OpenAPI／WS schema |
 | P2 即時音訊 | 已實作並校準 | WS utterance與continuous皆可用：Silero VAD自動斷句、有序片段管線、推論不阻塞收音。切段參數已用真實口語校準，真人MER 3.97%，見 [P2切段報告](docs/benchmarks/p2-segmentation-report.md)。長跑與多路壓力測試尚未做 |
 | P2a 串流修訂 | 已驗收，預設開啟 | 首次可見延遲 p95 0.91 秒、final 與 final-only 完全一致、混合負載不互相阻塞，見 [P2a 報告](docs/benchmarks/p2a-preview-report.md)。`TEA_ASR_REVISABLE_PREVIEW=0` 可關閉 |

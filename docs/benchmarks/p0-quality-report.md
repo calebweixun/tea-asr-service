@@ -60,11 +60,23 @@ byte-level token序列（例如 U+E371 對應 ids `[170, 235, 109]`，即UTF-8 `
 
 checkpoint隨附資料宣告sentinel leak為0，與本次實測不符。
 
-## 尚未做的比較
+## 尚未做的比較（目前卡在磁碟空間）
 
 未與上游 `JacobLinCool/TEA-ASR-1.1`（BF16）在同一語料比較，因此**無法判定leak是MLX 4bit量化造成、
-還是上游模型本身就有**。這個比較需要安裝PyTorch，與本專案「不引進Torch」的依賴決策衝突，
-應在獨立環境執行。這是解除P0品質封鎖前必須補的證據。
+還是上游模型本身就有**。這是解除P0品質封鎖前必須補的證據。
+
+這個比較需要在獨立環境安裝PyTorch（約2.5 GB）並下載BF16權重（約4 GB），合計約7 GB。
+2026-09-19查核時本機只剩5.8 GiB可用空間，執行下去會把磁碟塞滿，因此**沒有執行**。
+要補這項證據，先騰出至少8 GB，然後：
+
+```bash
+uv venv /tmp/bf16-ab --python 3.12
+uv pip install --python /tmp/bf16-ab torch transformers==5.12.1 soundfile
+# 用同一份 test split 跑 JacobLinCool/TEA-ASR-1.1，統計私用區字元出現率
+```
+
+若上游BF16乾淨，問題出在MLX 4bit轉換，應向轉換作者回報；若上游也有，則是模型本身，
+應向模型作者回報。在這個問題釐清前，服務維持保留原文並回warning，不靜默移除。
 
 ## 結論與後續
 
