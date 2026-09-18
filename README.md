@@ -21,6 +21,7 @@
 | 確認技術棧、程序、排程與部署 | [03 架構決策](docs/03-architecture.md) |
 | 實作 client 或 server 通訊 | [04 API 契約](docs/04-api.md) |
 | 執行模型驗證、效能與可靠性驗收 | [05 驗證計畫](docs/05-validation.md) |
+| 看真實語料的品質實測 | [P0 品質報告](docs/benchmarks/p0-quality-report.md) |
 | 交給 Sol 或其他模型開始開發 | [06 開發交接](docs/06-handoff.md) |
 | 理解類似系統聽寫的預覽與上下文修訂 | [07 串流修訂規劃](docs/07-contextual-streaming.md) |
 
@@ -81,7 +82,7 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 
 | 階段 | 狀態 | 說明 |
 |---|---|---|
-| P0 模型可行性 | 效能通過、品質未通過 | 私用區字元leak未解；真實語料corpus尚未建立 |
+| P0 模型可行性 | 效能通過、品質未通過 | 真實語料CER 4.92%（200筆），但私用區字元leak在73.5%的句子重現，見 [品質報告](docs/benchmarks/p0-quality-report.md) |
 | P1 短音訊API | 已實作 | HTTP transcription、健康探針、capabilities、status、bounded scheduler、typed errors、OpenAPI／WS schema |
 | P2 即時音訊 | 已實作 | WS utterance與continuous皆可用：Silero VAD自動斷句、pre-roll、句尾靜音、8秒hard split、有序片段管線；推論不阻塞收音。長跑與多路壓力測試尚未做 |
 | P2a 串流修訂 | 實作但未驗收 | utterance與continuous都支援；需 `TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1` 才啟用。未啟用時 `partial_transcripts=false` 且 revisable 請求回 `unsupported_option`。延遲與錯改率尚未量測 |
