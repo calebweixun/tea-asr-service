@@ -4,6 +4,7 @@ import argparse
 import json
 import platform
 import sys
+import time
 import urllib.error
 import urllib.request
 import wave
@@ -32,7 +33,8 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8327"
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tea-asr")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("doctor", help="檢查本機環境是否符合需求")
+    doctor = commands.add_parser("doctor", help="檢查本機環境與執行中的服務")
+    doctor.add_argument("--url", default=DEFAULT_BASE_URL)
     commands.add_parser("model-prepare", help="下載並固定模型 snapshot")
 
     serve = commands.add_parser("serve", help="啟動本機服務")
@@ -86,7 +88,47 @@ def _token() -> str:
     return token_file.read_text().strip()
 
 
-def _doctor() -> int:
+def _probe_service(url: str) -> dict:
+    """Ask the running service what it actually is, rather than assuming."""
+
+    try:
+        token = _token()
+    except (FileNotFoundError, OSError) as exc:
+        return {"reachable": False, "reason": f"找不到 token：{exc}"}
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        status = _request(f"{url}/v1/status", headers=headers)
+        capabilities = _request(f"{url}/v1/capabilities", headers=headers)
+    except OSError as exc:
+        return {"reachable": False, "reason": str(exc)}
+    if "error" in status:
+        return {"reachable": True, "error": status["error"]}
+
+    probe: dict = {}
+    if status.get("model_state") == "ready":
+        started = time.monotonic()
+        result = _request(
+            f"{url}/v1/transcriptions?sample_rate=16000&channels=1&format=pcm_s16le",
+            data=b"\x00\x00" * 16_000,
+            headers={**headers, "Content-Type": "application/octet-stream"},
+        )
+        probe = {
+            "round_trip_ms": round((time.monotonic() - started) * 1000),
+            "ok": "error" not in result,
+        }
+    return {
+        "reachable": True,
+        "model_state": status.get("model_state"),
+        "worker_generation": status.get("worker_generation"),
+        "queue": status.get("queue"),
+        "protocol_version": capabilities.get("protocol_version"),
+        "profiles": capabilities.get("profiles"),
+        "partial_transcripts": capabilities.get("features", {}).get("partial_transcripts"),
+        "one_second_probe": probe,
+    }
+
+
+def _doctor(url: str) -> int:
     try:
         model_path: str | None = str(locate_prepared_model(TEA_ASR_1_1_MLX_4BIT))
     except (LocalEntryNotFoundError, OSError):
@@ -107,9 +149,11 @@ def _doctor() -> int:
         "model_path": model_path,
         "vad_revision": VAD_REVISION,
         "vad_prepared": vad_ok,
+        "service": _probe_service(url),
     }
     print(json.dumps(checks, ensure_ascii=False, indent=2))
-    return 0 if checks["python_ok"] and checks["apple_silicon"] else 1
+    healthy = checks["python_ok"] and checks["apple_silicon"] and model_path is not None and vad_ok
+    return 0 if healthy else 1
 
 
 def _export_schemas(out: Path) -> int:
@@ -131,7 +175,7 @@ def _export_schemas(out: Path) -> int:
 def main() -> int:
     args = _parser().parse_args()
     if args.command == "doctor":
-        return _doctor()
+        return _doctor(args.url)
     if args.command == "export-schemas":
         return _export_schemas(args.out)
     if args.command == "status":
