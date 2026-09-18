@@ -152,6 +152,9 @@ uv build
 
 產物在 `dist/`。模型與 VAD 資產不在 wheel 裡，裝好後仍要跑 `tea-asr model-prepare`。
 
+這個 wheel 已在乾淨的 venv 裡實測過：安裝後 `tea-asr doctor` 可以正常執行並連上服務
+（2026-09-19，arm64 Python 3.12）。
+
 ## 設計基準
 
 研究日期：2026-09-18。原始專案 [DSDALAB/lcsy-asr-csinputmethod](https://github.com/DSDALAB/lcsy-asr-csinputmethod) 固定於 `018777c41e929f17cee41ad25eae49625fe4f452`。
