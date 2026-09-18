@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import secrets
-from dataclasses import dataclass
+import tomllib
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -22,6 +23,18 @@ class AppPaths:
     @property
     def token_file(self) -> Path:
         return self.support / "token"
+
+    @property
+    def config_file(self) -> Path:
+        return self.support / "config.toml"
+
+    @property
+    def lock_file(self) -> Path:
+        return self.support / "service.lock"
+
+    @property
+    def log_file(self) -> Path:
+        return self.logs / "service.log"
 
 
 def load_or_create_token(paths: AppPaths | None = None) -> str:
@@ -54,6 +67,12 @@ class ServiceConfig:
 
     revisable_preview: bool = False
     max_total_connections: int = 4
+    #: Stop the worker after this long with no work, freeing Metal memory.
+    #: 0 disables unloading.
+    idle_unload_s: int = 15 * 60
+    keep_warm: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8765
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> ServiceConfig:
@@ -61,6 +80,37 @@ class ServiceConfig:
         return cls(
             revisable_preview=source.get("TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW") == "1",
         )
+
+    @classmethod
+    def load(
+        cls, paths: AppPaths | None = None, env: dict[str, str] | None = None
+    ) -> ServiceConfig:
+        """File first, then environment, so a shell override always wins."""
+
+        paths = paths or AppPaths.macos_default()
+        config = cls()
+        if paths.config_file.exists():
+            try:
+                data = tomllib.loads(paths.config_file.read_text())
+            except (OSError, tomllib.TOMLDecodeError) as exc:
+                raise RuntimeError(f"設定檔無法解析：{paths.config_file}: {exc}") from exc
+            service = data.get("service", {})
+            unknown = set(service) - {field for field in cls.__dataclass_fields__}
+            if unknown:
+                raise RuntimeError(
+                    f"設定檔有不認得的欄位：{', '.join(sorted(unknown))}"
+                )
+            config = replace(config, **service)
+        source = os.environ if env is None else env
+        if source.get("TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW") == "1":
+            config = replace(config, revisable_preview=True)
+        if source.get("TEA_ASR_KEEP_WARM") == "1":
+            config = replace(config, keep_warm=True)
+        return config
+
+    @property
+    def unload_after_s(self) -> int:
+        return 0 if self.keep_warm else self.idle_unload_s
 
     @property
     def protocol_version(self) -> str:

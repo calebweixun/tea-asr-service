@@ -45,6 +45,32 @@ uv run tea-asr transcribe path/to/16k-mono.wav
 uv run python examples/stream_wav.py path/to/16k-mono.wav
 ```
 
+要讓它登入時自動啟動（只有明確執行 install 才會建立登入項目）：
+
+```bash
+uv run tea-asr service install
+```
+
+```bash
+uv run tea-asr service status
+```
+
+```bash
+uv run tea-asr service uninstall
+```
+
+設定放 `~/Library/Application Support/TEA ASR/config.toml`，欄位打錯會直接報錯而不是被忽略：
+
+```toml
+[service]
+port = 8766
+idle_unload_s = 900   # 閒置這麼久就卸載模型釋放記憶體；0 或 keep_warm 可關閉
+keep_warm = false
+```
+
+**預設 port 8765 在這台機器上與其他程式衝突過**，所以上面示範改用 8766。
+服務啟動時會檢查 port 與 singleton lock，第二份實例會被拒絕並告訴你是誰占著。
+
 ## 想先體驗效果
 
 目前只有 `examples/` 下的參考 client，沒有選單列 app 或輸入法；最接近日常使用的是麥克風即時 demo（需要 `brew install ffmpeg`）：
@@ -87,7 +113,7 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 | P1 短音訊API | 已實作 | HTTP transcription、健康探針、capabilities、status、bounded scheduler、typed errors、OpenAPI／WS schema |
 | P2 即時音訊 | 已實作 | WS utterance與continuous皆可用：Silero VAD自動斷句、pre-roll、句尾靜音、8秒hard split、有序片段管線；推論不阻塞收音。長跑與多路壓力測試尚未做 |
 | P2a 串流修訂 | 實作但未驗收 | utterance與continuous都支援；需 `TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1` 才啟用。未啟用時 `partial_transcripts=false` 且 revisable 請求回 `unsupported_option`。延遲與錯改率尚未量測 |
-| P3 服務管理 | 未開始 | 無 LaunchAgent、無 idle unload、無 singleton lock |
+| P3 服務管理 | 大致完成 | LaunchAgent install/uninstall/status、singleton lock、port 檢查、idle unload 與重新載入、TOML 設定、JSON log 輪替、關閉時 drain。sleep/wake 尚未實測 |
 | P4 長檔案與保存 | 未開始 | `/v1/jobs` 不存在，回404 |
 | P5 client | 未開始 | 只有 `examples/` 下的參考 client |
 

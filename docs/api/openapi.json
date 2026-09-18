@@ -259,6 +259,14 @@
       "StatusResponse": {
         "additionalProperties": false,
         "properties": {
+          "active_sessions": {
+            "title": "Active Sessions",
+            "type": "integer"
+          },
+          "idle_s": {
+            "title": "Idle S",
+            "type": "integer"
+          },
           "last_error": {
             "anyOf": [
               {
@@ -308,6 +316,8 @@
           "worker_generation",
           "worker_load_ms",
           "last_error",
+          "idle_s",
+          "active_sessions",
           "queue"
         ],
         "title": "StatusResponse",

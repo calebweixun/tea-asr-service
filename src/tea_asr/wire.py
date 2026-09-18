@@ -110,6 +110,8 @@ class StatusResponse(ServerModel):
     worker_generation: int
     worker_load_ms: int | None
     last_error: str | None
+    idle_s: int
+    active_sessions: int
     queue: QueueStatus
 
 

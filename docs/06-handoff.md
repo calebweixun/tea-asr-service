@@ -97,6 +97,14 @@ tea-asr-service/
 
 **工作：** 安裝流程、模型下載進度、設定路徑、診斷訊息、idle unload/keep_warm、rotation、singleton、LaunchAgent install/uninstall、sleep/wake。
 
+**狀態：大致完成，sleep/wake未實測。** `tea-asr service install/uninstall/status` 以絕對路徑建立 LaunchAgent，
+只有明確 install 才會動登入設定；`KeepAlive` 僅在 crash 時重啟，避免「已有實例」的正常退出被無限重啟。
+singleton 採 flock lock file ＋ port 檢查，第二份實例會被拒絕並回報持有者的 PID 與 port（已實測 LaunchAgent
+與手動同時啟動只會有一份模型）。閒置逾時卸載 worker 後 `model_state=idle_unloaded`，第一個請求觸發重新載入
+並回 503 `model_loading`（已實測，重新載入 1.7 秒、worker generation 遞增）。設定走 TOML，未知欄位直接報錯。
+log 為 JSON lines 並輪替，明確過濾 token、PCM 與逐字稿。關閉時停止收件並最多 drain 30 秒。
+**尚未做：** sleep/wake 後的 worker health 檢查與時間軸缺口標示。
+
 **完成條件：** 從新環境照文件可完成prepare→serve→client轉錄；退出／卸載不留worker；手動與登入啟動不重複；離線重啟可辨識。service命令不得靜默變更使用者登入設定，只有明確執行install才建立agent。
 
 ## P4｜長檔案、保存與恢復

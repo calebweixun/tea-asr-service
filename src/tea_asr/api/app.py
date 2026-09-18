@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -13,6 +16,7 @@ from fastapi.responses import JSONResponse
 from tea_asr.api.stream import private_use_warnings, run_stream
 from tea_asr.config import ServiceConfig, load_or_create_token
 from tea_asr.errors import ApiError
+from tea_asr.logs import event
 from tea_asr.model_spec import TEA_ASR_1_1_MLX_4BIT
 from tea_asr.scheduler import Scheduler
 from tea_asr.vad import VAD_SHA256, SileroVad, locate_vad
@@ -46,6 +50,23 @@ def _load_vad() -> SileroVad | None:
         return None
 
 
+logger = logging.getLogger("tea_asr.api")
+
+
+class Activity:
+    """Tracks whether the model is still earning its memory."""
+
+    def __init__(self) -> None:
+        self.last_used = time.monotonic()
+        self.sessions = 0
+
+    def touch(self) -> None:
+        self.last_used = time.monotonic()
+
+    def idle_for(self) -> float:
+        return 0.0 if self.sessions else time.monotonic() - self.last_used
+
+
 class InferenceSupervisor(Protocol):
     state: str
     last_error: str | None
@@ -70,19 +91,62 @@ def create_app(
     worker = supervisor or WorkerSupervisor(model_path)
     scheduler = Scheduler(worker)
     vad = _load_vad() if vad_model is _AUTO_VAD else vad_model
+    activity = Activity()
+    loading = asyncio.Lock()
+
+    async def ensure_loaded() -> None:
+        """Bring the worker back after an idle unload.
+
+        The caller still gets `model_loading` rather than being held for
+        minutes inside one request (docs/04).
+        """
+
+        if loading.locked():
+            return
+        async with loading:
+            if worker.state in {"ready", "loading"}:
+                return
+            try:
+                await worker.start()
+                event(logger, "model.reloaded", state=worker.state)
+            except ApiError as exc:
+                event(logger, "model.reload_failed", code=exc.code)
+
+    async def idle_watcher() -> None:
+        unload_after = settings.unload_after_s
+        if unload_after <= 0:
+            return
+        while True:
+            await asyncio.sleep(min(30, max(5, unload_after // 10)))
+            if worker.state != "ready":
+                continue
+            if scheduler.waiting_tasks or activity.idle_for() < unload_after:
+                continue
+            await worker.stop()
+            worker.state = "idle_unloaded"
+            event(logger, "model.idle_unloaded", idle_s=round(activity.idle_for()))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.worker = worker
         app.state.scheduler = scheduler
         app.state.config = settings
+        app.state.activity = activity
         try:
             await worker.start()
         except ApiError:
             # Keep the API alive so health and status can explain the failure.
             pass
+        watcher = asyncio.create_task(idle_watcher())
+        event(logger, "service.started", model_state=worker.state, continuous=vad is not None)
         yield
+        watcher.cancel()
+        # Stop admitting work, then let what is already running finish.
+        deadline = time.monotonic() + 30
+        while scheduler.waiting_tasks and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
         await worker.stop()
+        event(logger, "service.stopped")
 
     app = FastAPI(
         title="TEA ASR Service",
@@ -149,6 +213,8 @@ def create_app(
             worker_generation=worker.generation,
             worker_load_ms=worker.load_ms,
             last_error=worker.last_error,
+            idle_s=round(activity.idle_for()),
+            active_sessions=activity.sessions,
             queue=QueueStatus(
                 waiting_tasks=scheduler.waiting_tasks,
                 waiting_samples=scheduler.waiting_samples,
@@ -159,14 +225,22 @@ def create_app(
 
     @app.websocket("/v1/stream")
     async def stream(websocket: WebSocket) -> None:
-        await run_stream(
-            websocket,
-            scheduler,
-            auth_token=auth_token,
-            config=settings,
-            model_state=worker.state,
-            vad=vad,
-        )
+        if worker.state == "idle_unloaded":
+            asyncio.create_task(ensure_loaded())
+        activity.sessions += 1
+        activity.touch()
+        try:
+            await run_stream(
+                websocket,
+                scheduler,
+                auth_token=auth_token,
+                config=settings,
+                model_state=worker.state,
+                vad=vad,
+            )
+        finally:
+            activity.sessions -= 1
+            activity.touch()
 
     @app.post("/v1/transcriptions", dependencies=[Depends(authorize)])
     async def transcribe(
@@ -196,11 +270,16 @@ def create_app(
             )
 
         if worker.state != "ready":
+            if worker.state == "idle_unloaded":
+                asyncio.create_task(ensure_loaded())
             raise ApiError(
-                "model_loading" if worker.state == "loading" else "model_unavailable",
+                "model_loading"
+                if worker.state in {"loading", "idle_unloaded"}
+                else "model_unavailable",
                 f"模型目前狀態為 {worker.state}。",
                 request_id=request_id,
             )
+        activity.touch()
 
         response, queue_ms = await scheduler.transcribe(
             bytes(body), language="Chinese", kind="interactive"

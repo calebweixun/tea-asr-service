@@ -11,9 +11,18 @@ from pathlib import Path
 
 from huggingface_hub.errors import LocalEntryNotFoundError
 
-from .config import AppPaths
+from .config import AppPaths, ServiceConfig
+from .logs import setup_logging
 from .model_manager import locate_prepared_model, prepare_model
 from .model_spec import TEA_ASR_1_1_MLX_4BIT
+from .service import (
+    ServiceAlreadyRunningError,
+    SingletonLock,
+    agent_status,
+    install_agent,
+    port_in_use,
+    uninstall_agent,
+)
 from .vad import VAD_REVISION, VAD_SHA256, locate_vad, prepare_vad, sha256
 from .wire import MAX_UTTERANCE_PCM_BYTES, SAMPLE_RATE, ws_event_schema
 
@@ -27,8 +36,16 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("model-prepare", help="下載並固定模型 snapshot")
 
     serve = commands.add_parser("serve", help="啟動本機服務")
-    serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", default=8765, type=int)
+    serve.add_argument("--host", default=None)
+    serve.add_argument("--port", default=None, type=int)
+
+    service = commands.add_parser("service", help="管理登入時自動啟動的 LaunchAgent")
+    actions = service.add_subparsers(dest="action", required=True)
+    install = actions.add_parser("install", help="建立並載入 LaunchAgent")
+    install.add_argument("--host", default=None)
+    install.add_argument("--port", default=None, type=int)
+    actions.add_parser("uninstall", help="卸載並移除 LaunchAgent")
+    actions.add_parser("status", help="顯示 LaunchAgent 與執行中實例的狀態")
 
     status = commands.add_parser("status", help="查詢執行中服務的狀態")
     status.add_argument("--url", default=DEFAULT_BASE_URL)
@@ -138,17 +155,59 @@ def main() -> int:
         )
         print(json.dumps(body, ensure_ascii=False, indent=2))
         return 1 if "error" in body else 0
+    if args.command == "service":
+        paths = AppPaths.macos_default()
+        settings = ServiceConfig.load(paths)
+        if args.action == "status":
+            print(json.dumps(agent_status(paths), ensure_ascii=False, indent=2))
+            return 0
+        if args.action == "uninstall":
+            removed = uninstall_agent()
+            print("已移除 LaunchAgent。" if removed else "沒有已安裝的 LaunchAgent。")
+            return 0
+        host = args.host or settings.host
+        port = args.port or settings.port
+        target = install_agent(paths, host=host, port=port)
+        print(f"已安裝並載入：{target}")
+        print("登入時會自動啟動；要移除請執行 tea-asr service uninstall。")
+        return 0
+
     if args.command == "serve":
         import uvicorn
 
         from .api.app import create_app
 
+        paths = AppPaths.macos_default()
+        settings = ServiceConfig.load(paths)
+        host = args.host or settings.host
+        port = args.port or settings.port
         try:
             model_path = locate_prepared_model(TEA_ASR_1_1_MLX_4BIT)
         except (LocalEntryNotFoundError, OSError) as exc:
             print(f"模型尚未準備：{exc}\n請先執行：tea-asr model-prepare", file=sys.stderr)
             return 2
-        uvicorn.run(create_app(model_path), host=args.host, port=args.port, workers=1)
+
+        lock = SingletonLock(paths.lock_file)
+        try:
+            lock.acquire(port)
+        except ServiceAlreadyRunningError as exc:
+            print(f"{exc}\n每台機器只跑一份服務與一份模型。", file=sys.stderr)
+            return 3
+        if port_in_use(host, port):
+            lock.release()
+            print(
+                f"{host}:{port} 已被占用，可能有另一份服務在跑。",
+                file=sys.stderr,
+            )
+            return 3
+        log_file = setup_logging(paths)
+        print(f"log：{log_file}")
+        try:
+            uvicorn.run(
+                create_app(model_path, config=settings), host=host, port=port, workers=1
+            )
+        finally:
+            lock.release()
         return 0
     if args.command == "model-prepare":
         print(prepare_model(TEA_ASR_1_1_MLX_4BIT))
