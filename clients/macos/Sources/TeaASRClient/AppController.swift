@@ -66,7 +66,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         autoInsertEntry.target = self
         menu.addItem(autoInsertEntry)
 
-        previewEntry.title = "要求串流預覽（實驗性）"
+        previewEntry.title = "會議記錄顯示即時預覽"
         previewEntry.action = #selector(togglePreview)
         previewEntry.target = self
         menu.addItem(previewEntry)
@@ -194,7 +194,9 @@ final class AppController: NSObject, NSApplicationDelegate {
             alert("無法開始錄音", error.localizedDescription)
             return
         }
-        client.connect()
+        // Dictation only ever inserts finals, so a preview there would cost
+        // inference nobody sees.
+        client.connect(wantsPreview: newMode == .meeting && settings.revisablePreview)
         render()
     }
 

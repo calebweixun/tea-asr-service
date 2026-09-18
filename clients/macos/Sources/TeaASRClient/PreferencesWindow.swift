@@ -7,7 +7,7 @@ final class PreferencesWindow: NSWindowController, NSWindowDelegate {
     private let hostField = NSTextField(string: "")
     private let portField = NSTextField(string: "")
     private let autoInsert = NSButton(checkboxWithTitle: "定稿後自動貼進前景 app", target: nil, action: nil)
-    private let preview = NSButton(checkboxWithTitle: "要求串流預覽（實驗性，服務需啟用）", target: nil, action: nil)
+    private let preview = NSButton(checkboxWithTitle: "會議記錄顯示即時預覽", target: nil, action: nil)
     private let serviceStatus = NSTextField(labelWithString: "尚未檢查")
     private let accessStatus = NSTextField(labelWithString: "")
 

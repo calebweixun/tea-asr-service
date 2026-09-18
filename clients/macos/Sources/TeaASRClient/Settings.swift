@@ -31,10 +31,11 @@ struct Settings {
         nonmutating set { defaults.set(newValue, forKey: Key.autoInsert) }
     }
 
-    /// Ask for streaming preview. The server refuses unless it was started with
-    /// the experimental flag, and the client falls back to final-only.
+    /// Show live preview text while speaking. Only meeting mode uses it:
+    /// dictation never types a partial, so asking for one would just spend
+    /// inference the user cannot see.
     var revisablePreview: Bool {
-        get { defaults.object(forKey: Key.revisablePreview) as? Bool ?? false }
+        get { defaults.object(forKey: Key.revisablePreview) as? Bool ?? true }
         nonmutating set { defaults.set(newValue, forKey: Key.revisablePreview) }
     }
 

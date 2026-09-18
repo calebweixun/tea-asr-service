@@ -17,7 +17,6 @@ enum SelfTest {
         }
 
         let settings = Settings()
-        if forcePreview { settings.revisablePreview = true }
         print("服務：\(settings.streamURL.absoluteString)")
         print("音訊：\(String(format: "%.2f", Double(pcm.count / 2) / 16_000)) 秒\n")
 
@@ -53,7 +52,7 @@ enum SelfTest {
         }
         client.onNotice = { print("  ! \($0)") }
 
-        client.connect()
+        client.connect(wantsPreview: forcePreview)
 
         DispatchQueue.global().async {
             // Give the handshake a moment before the first frame.

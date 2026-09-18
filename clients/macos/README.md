@@ -47,8 +47,7 @@ uv run tea-asr serve
 .build/release/TeaASRClient --selftest /path/to/16k-mono.wav
 ```
 
-加 `--no-realtime` 會用最快速度送，通常會撞到服務的流量窗口；
-加 `--preview` 要求串流預覽（服務要以 `TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1` 啟動才會被接受）。
+加 `--no-realtime` 會用最快速度送，通常會撞到服務的流量窗口；加 `--preview` 要求串流預覽。
 
 ## 設定
 
@@ -60,6 +59,7 @@ uv run tea-asr serve
 ## 設計上的取捨
 
 - **只有 `final` 會被貼出去。** partial 只更新會議視窗自己的那一行，不會去刪使用者已經打的字。
+- **只有會議模式要求串流預覽。** 聽寫永遠只貼定稿，要預覽等於花推論算沒人看得到的東西。
 - **流量窗口滿了就中止，不丟音訊。** 丟 frame 會讓時間軸悄悄壓縮，
   server 看到的會是一段從未發生過的連續錄音；[docs/04](../../docs/04-api.md) 禁止這種事。
 - **重採樣用 AVAudioConverter**，不是自己寫的線性內插（[docs/03](../../docs/03-architecture.md) 的要求）。

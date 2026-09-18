@@ -27,6 +27,7 @@ final class ASRClient: NSObject {
     /// keeps producing, so an unbounded queue would grow without limit.
     private var backlog: [Data] = []
     private let backlogLimit = 150  // 15 s at 100 ms per frame
+    private var wantsPreview = false
 
     private let queue = DispatchQueue(label: "tea-asr.client")
 
@@ -47,8 +48,11 @@ final class ASRClient: NSObject {
         super.init()
     }
 
-    func connect() {
-        queue.async { self.reallyConnect() }
+    func connect(wantsPreview: Bool) {
+        queue.async {
+            self.wantsPreview = wantsPreview
+            self.reallyConnect()
+        }
     }
 
     private func reallyConnect() {
@@ -180,7 +184,7 @@ final class ASRClient: NSObject {
                 fail("模型尚未就緒（\(hello.modelState)）。")
                 return
             }
-            startSession(wantsPreview: settings.revisablePreview && hello.protocolVersion == "1.1")
+            startSession(preview: wantsPreview && hello.protocolVersion == "1.1")
         case "session.started":
             guard let started = try? decoder.decode(Wire.SessionStarted.self, from: data) else {
                 return
@@ -217,7 +221,7 @@ final class ASRClient: NSObject {
         }
     }
 
-    private func startSession(wantsPreview: Bool) {
+    private func startSession(preview: Bool) {
         send(json: [
             "type": "session.start",
             "request_id": "mac-start",
@@ -225,7 +229,7 @@ final class ASRClient: NSObject {
             "audio": ["sample_rate": 16_000, "channels": 1, "format": "pcm_s16le"],
             "language": "Chinese",
             "durable": false,
-            "transcript_mode": wantsPreview ? "revisable" : "final_only",
+            "transcript_mode": preview ? "revisable" : "final_only",
         ])
     }
 
