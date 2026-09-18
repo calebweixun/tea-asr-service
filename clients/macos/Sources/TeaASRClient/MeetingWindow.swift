@@ -4,8 +4,9 @@ import AppKit
 final class MeetingWindow: NSWindowController, NSWindowDelegate {
     private let textView = NSTextView()
     private let statusLabel = NSTextField(labelWithString: "準備中…")
-    private var lines: [(start: Double, text: String)] = []
+    private var lines: [(spokenAt: Date, text: String)] = []
     private var partialRange: NSRange?
+    private var gaps: [(at: Date, reason: String)] = []
     private let startedAt = Date()
 
     /// Written after every final so a crash or a forgotten window does not lose
@@ -79,10 +80,10 @@ final class MeetingWindow: NSWindowController, NSWindowDelegate {
     var autosavePath: String { autosaveURL.path }
 
     /// A tentative line, replaced wholesale on every revision.
-    func showPartial(_ text: String, startSample: Int) {
+    func showPartial(_ text: String, spokenAt: Date) {
         clearPartial()
         guard !text.isEmpty else { return }
-        let rendered = "\(timestamp(startSample))  \(text)\n"
+        let rendered = "\(timestamp(spokenAt))  \(text)\n"
         let attributed = NSAttributedString(
             string: rendered,
             attributes: [
@@ -96,13 +97,12 @@ final class MeetingWindow: NSWindowController, NSWindowDelegate {
         scrollToEnd()
     }
 
-    func appendFinal(_ text: String, startSample: Int) {
+    func appendFinal(_ text: String, spokenAt: Date) {
         clearPartial()
         guard !text.isEmpty else { return }
-        let start = Double(startSample) / 16_000
-        lines.append((start, text))
+        lines.append((spokenAt, text))
         let attributed = NSAttributedString(
-            string: "\(timestamp(startSample))  \(text)\n",
+            string: "\(timestamp(spokenAt))  \(text)\n",
             attributes: [
                 .foregroundColor: NSColor.labelColor,
                 .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
@@ -130,8 +130,24 @@ final class MeetingWindow: NSWindowController, NSWindowDelegate {
         textView.scrollToEndOfDocument(nil)
     }
 
-    private func timestamp(_ startSample: Int) -> String {
-        let seconds = Int(Double(startSample) / 16_000)
+    /// A gap the recording could not cover, made visible rather than hidden.
+    func appendGap(_ reason: String) {
+        clearPartial()
+        let attributed = NSAttributedString(
+            string: "\(timestamp(Date()))  —— \(reason) ——\n",
+            attributes: [
+                .foregroundColor: NSColor.systemOrange,
+                .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+            ]
+        )
+        textView.textStorage?.append(attributed)
+        scrollToEnd()
+        gaps.append((Date(), reason))
+        autosave()
+    }
+
+    private func timestamp(_ moment: Date) -> String {
+        let seconds = max(0, Int(moment.timeIntervalSince(startedAt)))
         return String(format: "[%02d:%02d]", seconds / 60, seconds % 60)
     }
 
@@ -151,9 +167,11 @@ final class MeetingWindow: NSWindowController, NSWindowDelegate {
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
         var out = "# 會議記錄 \(formatter.string(from: startedAt))\n\n"
         out += "> 由 TEA ASR 本機辨識產生，未經人工校訂。\n\n"
-        for line in lines {
-            let seconds = Int(line.start)
-            out += String(format: "- **[%02d:%02d]** %@\n", seconds / 60, seconds % 60, line.text)
+        var entries: [(Date, String)] = lines.map { ($0.spokenAt, $0.text) }
+        entries += gaps.map { ($0.at, "*—— \($0.reason) ——*") }
+        for (moment, text) in entries.sorted(by: { $0.0 < $1.0 }) {
+            let seconds = max(0, Int(moment.timeIntervalSince(startedAt)))
+            out += String(format: "- **[%02d:%02d]** %@\n", seconds / 60, seconds % 60, text)
         }
         return out
     }

@@ -42,6 +42,11 @@ final class ASRClient: NSObject {
     var onPartial: ((Wire.Transcript) -> Void)?
     var onFinal: ((Wire.Transcript) -> Void)?
     var onNotice: ((String) -> Void)?
+    /// The service says the sample clock broke (usually the machine slept).
+    /// Recoverable by starting a fresh session, so it is not a failure.
+    var onTimelineGap: ((String) -> Void)?
+    /// A session became live; the wall clock of its sample 0.
+    var onSessionOrigin: ((Date) -> Void)?
 
     private(set) var state: State = .idle {
         didSet {
@@ -219,6 +224,8 @@ final class ASRClient: NSObject {
             }
             sendUntilSample = UInt64(started.sendUntilSample)
             self.started = true
+            let origin = Date()
+            DispatchQueue.main.async { [weak self] in self?.onSessionOrigin?(origin) }
             state = .listening(
                 protocolVersion: started.transcriptMode == "revisable" ? "1.1" : "1.0",
                 preview: started.transcriptMode == "revisable"
@@ -241,6 +248,14 @@ final class ASRClient: NSObject {
             notify("片段辨識失敗：\(item.code ?? "unknown")")
         case "error":
             guard let item = try? decoder.decode(Wire.ErrorEvent.self, from: data) else { return }
+            if item.code == "timeline_gap" {
+                // Keep the state: going idle here would look like a clean stop
+                // to the caller, which is exactly what this is not.
+                teardown(keepState: true)
+                let message = item.message
+                DispatchQueue.main.async { [weak self] in self?.onTimelineGap?(message) }
+                return
+            }
             fail("\(item.code)：\(item.message)")
         case "session.stopped", "session.cancelled":
             teardown()

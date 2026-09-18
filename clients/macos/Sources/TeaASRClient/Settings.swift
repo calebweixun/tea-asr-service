@@ -3,6 +3,7 @@ import Foundation
 /// User-visible configuration. The bearer token is read from the service's own
 /// file rather than stored here, so it never ends up in a preferences plist.
 struct Settings {
+    // swiftlint:disable:next identifier_name
     private enum Key {
         static let host = "serverHost"
         static let port = "serverPort"
@@ -39,8 +40,11 @@ struct Settings {
         nonmutating set { defaults.set(newValue, forKey: Key.revisablePreview) }
     }
 
+    /// Set by `--url` in self-test runs; otherwise derived from host and port.
+    var overrideStreamURL: URL?
+
     var streamURL: URL {
-        URL(string: "ws://\(host):\(port)/v1/stream")!
+        overrideStreamURL ?? URL(string: "ws://\(host):\(port)/v1/stream")!
     }
 
     var tokenFile: URL {

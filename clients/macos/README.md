@@ -47,7 +47,8 @@ uv run tea-asr serve
 .build/release/TeaASRClient --selftest /path/to/16k-mono.wav
 ```
 
-加 `--no-realtime` 會用最快速度送，通常會撞到服務的流量窗口；加 `--preview` 要求串流預覽。
+加 `--no-realtime` 會用最快速度送，通常會撞到服務的流量窗口；加 `--preview` 要求串流預覽；
+`--url ws://127.0.0.1:PORT/v1/stream` 可以指向別的服務（測試用）。
 
 ## 設定
 
@@ -65,6 +66,9 @@ uv run tea-asr serve
 - **重採樣用 AVAudioConverter**，不是自己寫的線性內插（[docs/03](../../docs/03-architecture.md) 的要求）。
 - **剪貼簿會還原**：貼上後把原本的內容放回去，長時間聽寫不會一直吃掉你的剪貼簿。
 - **不做 VAD 或斷句**：那是服務的職責，兩邊各做一份只會讓 sample clock 對不上。
+- **時間軸缺口會自動續錄**：機器睡醒後服務會中止 session（v0.1 沒有 resume），
+  client 自動開新 session 繼續錄，並在會議逐字稿裡用橘色標出那道缺口，而不是假裝沒發生。
+  會議時間戳用絕對時間計算，所以換 session 之後仍在同一條時間軸上。
 
 ## 尚未做
 

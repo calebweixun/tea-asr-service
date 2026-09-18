@@ -25,6 +25,9 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var meeting: MeetingWindow?
     private var preferences: PreferencesWindow?
     private var hotKeyRef: EventHotKeyRef?
+    /// Wall clock of the current session's sample 0, so a session restarted after
+    /// a timeline gap still lands on one continuous meeting timeline.
+    private var sessionOrigin = Date()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -223,14 +226,28 @@ final class AppController: NSObject, NSApplicationDelegate {
                 self.render()
             }
         }
+        client.onSessionOrigin = { [weak self] origin in
+            guard let self else { return }
+            // sample 0 of this session was captured `startSample` ago.
+            self.sessionOrigin = origin
+        }
+        client.onTimelineGap = { [weak self] reason in
+            guard let self else { return }
+            self.meeting?.appendGap(reason)
+            guard self.mode != .idle else { return }
+            // Keep recording: a closed lid should not silently end a meeting.
+            self.client.connect(wantsPreview: self.mode == .meeting && self.settings.revisablePreview)
+            self.render()
+        }
         client.onPartial = { [weak self] item in
-            self?.meeting?.showPartial(item.text, startSample: item.startSample)
+            guard let self else { return }
+            self.meeting?.showPartial(item.text, spokenAt: self.spokenAt(item.startSample))
         }
         client.onFinal = { [weak self] item in
             guard let self else { return }
             switch self.mode {
             case .meeting:
-                self.meeting?.appendFinal(item.text, startSample: item.startSample)
+                self.meeting?.appendFinal(item.text, spokenAt: self.spokenAt(item.startSample))
             case .dictation:
                 if self.settings.autoInsert, TextInjector.isTrusted {
                     TextInjector.insert(item.text)
@@ -245,6 +262,10 @@ final class AppController: NSObject, NSApplicationDelegate {
         client.onNotice = { [weak self] message in
             self?.meeting?.setStatus(message)
         }
+    }
+
+    private func spokenAt(_ startSample: Int) -> Date {
+        sessionOrigin.addingTimeInterval(Double(startSample) / 16_000)
     }
 
     // MARK: - Hot key

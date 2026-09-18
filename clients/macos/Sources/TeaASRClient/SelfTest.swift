@@ -6,7 +6,9 @@ import Foundation
 /// flow window, the session state machine — without needing microphone or
 /// accessibility permissions, so the client can be checked on a fresh machine.
 enum SelfTest {
-    static func run(path: String, realtime: Bool, forcePreview: Bool) -> Never {
+    static func run(
+        path: String, realtime: Bool, forcePreview: Bool, urlOverride: String?
+    ) -> Never {
         let url = URL(fileURLWithPath: path)
         let pcm: Data
         do {
@@ -16,7 +18,10 @@ enum SelfTest {
             exit(2)
         }
 
-        let settings = Settings()
+        var settings = Settings()
+        if let urlOverride, let parsed = URL(string: urlOverride) {
+            settings.overrideStreamURL = parsed
+        }
         print("服務：\(settings.streamURL.absoluteString)")
         print("音訊：\(String(format: "%.2f", Double(pcm.count / 2) / 16_000)) 秒\n")
 
@@ -53,6 +58,11 @@ enum SelfTest {
             print(String(format: "  ✓ [%.2f-%.2f] %@", start, end, item.text))
         }
         client.onNotice = { print("  ! \($0)") }
+        client.onTimelineGap = { reason in
+            // Mirrors the app: a gap is recoverable, so start a fresh session.
+            print("  ⟲ 時間軸缺口（\(reason)），重新建立 session")
+            client.connect(wantsPreview: forcePreview)
+        }
 
         client.connect(wantsPreview: forcePreview)
 
