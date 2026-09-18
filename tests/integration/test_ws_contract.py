@@ -3,12 +3,13 @@ from __future__ import annotations
 import struct
 from typing import Any
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from tea_asr.worker.supervisor import WorkerError
-from tests.conftest import AUTH, FakeSupervisor, build_client
+from tests.conftest import AUTH, FakeSupervisor, FakeVad, build_client
 
 START = {
     "type": "session.start",
@@ -317,3 +318,132 @@ def test_preview_replaces_text_and_final_wins(preview_client: TestClient) -> Non
         assert final["segment_id"] == partial["segment_id"]
         assert final["revision"] > partial["revision"]
         assert final["end_sample"] == 16_000
+
+
+# --- continuous profile -----------------------------------------------------
+
+CONTINUOUS = {**START, "profile": "continuous"}
+
+
+def tone_frame(seq: int, start_sample: int) -> bytes:
+    pcm = np.full(FRAME_SAMPLES, 8000, dtype="<i2").tobytes()
+    return struct.pack("<QQ", seq, start_sample) + pcm
+
+
+def send_continuous(socket: Any, pattern: list[tuple[str, int]], first_seq: int = 0) -> int:
+    """Send `(kind, frames)` pairs where kind is "tone" or "silence"."""
+
+    seq = first_seq
+    for kind, count in pattern:
+        for _ in range(count):
+            builder = tone_frame if kind == "tone" else frame
+            socket.send_bytes(builder(seq, seq * FRAME_SAMPLES))
+            seq += 1
+    return seq
+
+
+def test_continuous_is_refused_without_a_vad_asset(client: TestClient) -> None:
+    with client as http, http.websocket_connect("/v1/stream", headers=AUTH) as socket:
+        socket.receive_json()
+        socket.send_json(CONTINUOUS)
+        error = socket.receive_json()
+        assert error["code"] == "unsupported_option"
+        assert "VAD" in error["message"]
+
+
+def test_capabilities_advertise_continuous_only_with_a_vad(
+    continuous_client: TestClient,
+) -> None:
+    with continuous_client as http:
+        body = http.get("/v1/capabilities", headers=AUTH).json()
+        assert body["profiles"] == ["utterance", "continuous"]
+        assert body["limits"]["max_continuous_sessions"] == 1
+
+
+def test_vad_closes_a_segment_on_silence_without_any_client_commit(
+    continuous_client: TestClient,
+) -> None:
+    with continuous_client as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as socket:
+        socket.receive_json()
+        socket.send_json(CONTINUOUS)
+        started = socket.receive_json()
+        assert started["profile"] == "continuous"
+
+        # 1 s of speech then 1 s of silence: the server must segment by itself.
+        send_continuous(socket, [("silence", 3), ("tone", 10), ("silence", 12)])
+        events = drain_until(socket, "transcript.final")
+        by_type = {event["type"]: event for event in events}
+        assert by_type["speech.started"]["segment_index"] == 0
+        assert by_type["segment.queued"]["boundary"] == "silence"
+        final = by_type["transcript.final"]
+        assert final["segment_index"] == 0
+        assert final["segment_id"] == by_type["speech.started"]["segment_id"]
+        assert final["end_sample"] > final["start_sample"]
+        # No audio.committed: the client never asked for this segment.
+        assert "audio.committed" not in by_type
+
+
+def test_continuous_produces_ordered_segments_across_pauses(
+    continuous_client: TestClient,
+) -> None:
+    with continuous_client as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as socket:
+        socket.receive_json()
+        socket.send_json(CONTINUOUS)
+        socket.receive_json()
+        seq = send_continuous(
+            socket,
+            [("silence", 3), ("tone", 8), ("silence", 12), ("tone", 8), ("silence", 12)],
+        )
+        socket.send_json(
+            {"type": "session.stop", "request_id": "s1", "through_seq": seq - 1}
+        )
+        events = drain_until(socket, "session.stopped")
+        finals = [event for event in events if event["type"] == "transcript.final"]
+        assert len(finals) == 2
+        assert [final["segment_index"] for final in finals] == [0, 1]
+        assert finals[0]["end_sample"] <= finals[1]["start_sample"]
+        assert events[-1]["status"] == "completed"
+
+
+def test_continuous_rejects_audio_commit(continuous_client: TestClient) -> None:
+    with continuous_client as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as socket:
+        socket.receive_json()
+        socket.send_json(CONTINUOUS)
+        socket.receive_json()
+        seq = send_continuous(socket, [("tone", 4)])
+        socket.send_json(
+            {"type": "audio.commit", "request_id": "c1", "through_seq": seq - 1}
+        )
+        error = drain_until(socket, "error")[-1]
+        assert error["code"] == "unsupported_option"
+
+
+def test_continuous_keeps_receiving_audio_while_inference_runs(
+    supervisor: FakeSupervisor,
+) -> None:
+    supervisor.delay_s = 0.2
+    with build_client(supervisor, vad=FakeVad()) as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as socket:
+        socket.receive_json()
+        socket.send_json(CONTINUOUS)
+        socket.receive_json()
+        seq = send_continuous(socket, [("silence", 2), ("tone", 8), ("silence", 12)])
+        # While the first segment is still being transcribed, more audio is
+        # accepted and acknowledged: the receive loop is not blocked.
+        seq = send_continuous(socket, [("tone", 8), ("silence", 12)], first_seq=seq)
+        socket.send_json(
+            {"type": "session.stop", "request_id": "s1", "through_seq": seq - 1}
+        )
+        events = drain_until(socket, "session.stopped")
+        acks = [event for event in events if event["type"] == "audio.ack"]
+        finals = [event for event in events if event["type"] == "transcript.final"]
+        assert len(finals) == 2
+        assert acks, "audio was acknowledged while the model was busy"
+        assert events[-1]["status"] == "completed"

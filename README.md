@@ -2,7 +2,7 @@
 
 在 Apple Silicon Mac 上運行的本機語音辨識服務，讓輸入工具、字幕工具、OBS 與會議紀錄共用一份模型。
 
-**目前狀態：P0效能可行、品質驗收尚未通過；P1的HTTP與WebSocket utterance切片已在真模型上跑通。** 指定模型已在M4 Pro真實載入與推論，私用區字元問題仍未解決。VAD、continuous profile與正式client尚未開始；P2a串流預覽已有實作但未通過驗收，預設關閉。
+**目前狀態：P0效能可行、品質驗收尚未通過；P1與P2的即時轉錄已在真模型上跑通。** 指定模型已在M4 Pro真實載入與推論，私用區字元問題仍未解決。Silero VAD已接上，continuous profile可由server自動斷句；正式client尚未開始，P2a串流預覽已有實作但未通過驗收，預設關閉。
 
 ## 先看這裡
 
@@ -55,7 +55,9 @@ uv run python examples/mic_stream.py --list-devices
 uv run python examples/mic_stream.py --device 2
 ```
 
-對著麥克風說話，按 Enter 結束，終端機會印出定稿。若想看「邊說邊出字、依後文修訂」，服務要以實驗旗標啟動，client 再要求 revisable：
+對著麥克風一句一句講，停頓一下 server 就會自己斷句並印出該段定稿——不用按任何鍵。按 Enter 結束整個 session；加 `--utterance` 則改回自己標記段落。
+
+若想看「邊說邊出字、依後文修訂」，服務要以實驗旗標啟動，client 再要求 revisable：
 
 ```bash
 TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1 uv run tea-asr serve
@@ -71,7 +73,7 @@ uv run python examples/mic_stream.py --device 2 --revisable
 say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o /tmp/demo.aiff && ffmpeg -y -i /tmp/demo.aiff -ar 16000 -ac 1 /tmp/demo.wav && uv run python examples/stream_wav.py /tmp/demo.wav
 ```
 
-體驗時會看到的已知限制：單段最多 30 秒、沒有 VAD 所以要自己決定段落邊界、辨識結果仍夾帶私用區字元（會以 `private_use_characters` warning 標示，不會靜默刪掉）。
+體驗時會看到的已知限制：一直講不停會在 8 秒處硬切（`boundary="max_duration"`）、utterance 單段最多 30 秒、辨識結果仍夾帶私用區字元（會以 `private_use_characters` warning 標示，不會靜默刪掉）。VAD 參數（句尾靜音 500 ms、最短語音 160 ms、pre-roll 200 ms）是 docs/03 的初始值，還沒用真實語料校準。
 
 服務只監聽 `127.0.0.1:8765`。首次啟動會在 `~/Library/Application Support/TEA ASR/token` 建立權限0600的token。短音訊端點與WS utterance session都接受最多30秒、16 kHz mono PCM s16le；詳見 [API契約](docs/04-api.md)，機器可讀版本在 [docs/api/](docs/api/)（`uv run tea-asr export-schemas` 重新產生，測試會檢查是否過期）。本機結果見 [P0報告](docs/benchmarks/p0-report.md)。
 
@@ -81,8 +83,8 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 |---|---|---|
 | P0 模型可行性 | 效能通過、品質未通過 | 私用區字元leak未解；真實語料corpus尚未建立 |
 | P1 短音訊API | 已實作 | HTTP transcription、健康探針、capabilities、status、bounded scheduler、typed errors、OpenAPI／WS schema |
-| P2 即時音訊 | 部分 | WS utterance session（binary frame、sample clock、flow window、commit/stop/cancel）可用；continuous profile與VAD未實作，回 `unsupported_option` |
-| P2a 串流修訂 | 實作但未驗收 | 需 `TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1` 才啟用；未啟用時 `partial_transcripts=false` 且 revisable 請求回 `unsupported_option` |
+| P2 即時音訊 | 已實作 | WS utterance與continuous皆可用：Silero VAD自動斷句、pre-roll、句尾靜音、8秒hard split、有序片段管線；推論不阻塞收音。長跑與多路壓力測試尚未做 |
+| P2a 串流修訂 | 實作但未驗收 | utterance與continuous都支援；需 `TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1` 才啟用。未啟用時 `partial_transcripts=false` 且 revisable 請求回 `unsupported_option`。延遲與錯改率尚未量測 |
 | P3 服務管理 | 未開始 | 無 LaunchAgent、無 idle unload、無 singleton lock |
 | P4 長檔案與保存 | 未開始 | `/v1/jobs` 不存在，回404 |
 | P5 client | 未開始 | 只有 `examples/` 下的參考 client |

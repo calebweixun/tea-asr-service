@@ -73,8 +73,8 @@ tea-asr-service/
 
 **工作：** WS狀態機、binary seq header、sample clock、utterance commit、continuous VAD、排程、公平性、flow window、取消與slow reader。建立 `stream_wav.py` 以真實時間送frame，不需先取得麥克風權限。
 
-**狀態：部分完成。** WS狀態機、binary seq header、sample clock、flow window、commit/stop/cancel、audio.ack、segment終局事件、bounded outgoing queue與慢client偵測已實作，`stream_wav.py` 可用。
-**尚未實作：** VAD、continuous profile、排程公平性與一小時長跑測試；continuous 目前明確回 `unsupported_option`，`models.lock.json` 的VAD資產仍未固定。
+**狀態：已實作，長跑未測。** WS狀態機、binary seq header、sample clock、flow window、commit/stop/cancel、audio.ack、segment終局事件、bounded outgoing queue與慢client偵測已完成。Silero VAD以ONNX Runtime接上（每session獨立recurrent state，不引進Torch），`models.lock.json` 已固定 revision 與 sha256。continuous profile由VAD切段，pre-roll 200 ms、句尾靜音 500 ms（revisable 900 ms）、最短語音 160 ms、8秒hard split；片段經有限佇列交給單一consumer依序處理，推論不阻塞收音。
+**尚未完成：** 一小時長跑的RAM與lag曲線、多路容量實測、以真實語料校準VAD參數；`max_continuous_sessions=1` 是依文件設定而非實測結果。
 
 **完成條件：** 按sample順序產生不可變final；ASR推論中仍能收音；一小時不持續增加RAM／lag；停止時flush；每個已排片段都有終局；profile與能力宣告符合實際。根據單路實測設定max continuous sessions。
 

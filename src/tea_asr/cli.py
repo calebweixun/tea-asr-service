@@ -14,6 +14,7 @@ from huggingface_hub.errors import LocalEntryNotFoundError
 from .config import AppPaths
 from .model_manager import locate_prepared_model, prepare_model
 from .model_spec import TEA_ASR_1_1_MLX_4BIT
+from .vad import VAD_REVISION, VAD_SHA256, locate_vad, prepare_vad, sha256
 from .wire import MAX_UTTERANCE_PCM_BYTES, SAMPLE_RATE, ws_event_schema
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8765"
@@ -73,6 +74,11 @@ def _doctor() -> int:
         model_path: str | None = str(locate_prepared_model(TEA_ASR_1_1_MLX_4BIT))
     except (LocalEntryNotFoundError, OSError):
         model_path = None
+    try:
+        vad_path = locate_vad()
+        vad_ok = sha256(vad_path) == VAD_SHA256
+    except (LocalEntryNotFoundError, OSError):
+        vad_ok = False
     checks = {
         "machine": platform.machine(),
         "macos": platform.mac_ver()[0],
@@ -82,6 +88,8 @@ def _doctor() -> int:
         "model_revision": TEA_ASR_1_1_MLX_4BIT.revision,
         "model_prepared": model_path is not None,
         "model_path": model_path,
+        "vad_revision": VAD_REVISION,
+        "vad_prepared": vad_ok,
     }
     print(json.dumps(checks, ensure_ascii=False, indent=2))
     return 0 if checks["python_ok"] and checks["apple_silicon"] else 1
@@ -91,7 +99,7 @@ def _export_schemas(out: Path) -> int:
     from .api.app import create_app
 
     out.mkdir(parents=True, exist_ok=True)
-    app = create_app(Path("unused"), token="schema-export-only")
+    app = create_app(Path("unused"), token="schema-export-only", vad_model=None)
     (out / "openapi.json").write_text(
         json.dumps(app.openapi(), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     )
@@ -144,6 +152,12 @@ def main() -> int:
         return 0
     if args.command == "model-prepare":
         print(prepare_model(TEA_ASR_1_1_MLX_4BIT))
+        vad_path = prepare_vad()
+        digest = sha256(vad_path)
+        if digest != VAD_SHA256:
+            print(f"VAD 資產 hash 不符 models.lock：{digest}", file=sys.stderr)
+            return 2
+        print(vad_path)
         return 0
     return 2
 

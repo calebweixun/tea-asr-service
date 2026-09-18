@@ -897,6 +897,48 @@
         "title": "SessionStopped",
         "type": "object"
       },
+      "SpeechStarted": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "segment_id": {
+            "title": "Segment Id",
+            "type": "string"
+          },
+          "segment_index": {
+            "title": "Segment Index",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "start_sample": {
+            "title": "Start Sample",
+            "type": "integer"
+          },
+          "type": {
+            "const": "speech.started",
+            "default": "speech.started",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "segment_id",
+          "segment_index",
+          "start_sample"
+        ],
+        "title": "SpeechStarted",
+        "type": "object"
+      },
       "TranscriptFinal": {
         "additionalProperties": false,
         "properties": {
@@ -1066,6 +1108,7 @@
           "session.cancelled": "#/$defs/models/SessionCancelled",
           "session.started": "#/$defs/models/SessionStarted",
           "session.stopped": "#/$defs/models/SessionStopped",
+          "speech.started": "#/$defs/models/SpeechStarted",
           "transcript.final": "#/$defs/models/TranscriptFinal",
           "transcript.partial": "#/$defs/models/TranscriptPartial"
         },
@@ -1077,6 +1120,9 @@
         },
         {
           "$ref": "#/$defs/models/AudioAck"
+        },
+        {
+          "$ref": "#/$defs/models/SpeechStarted"
         },
         {
           "$ref": "#/$defs/models/AudioCommitted"

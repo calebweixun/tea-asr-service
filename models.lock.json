@@ -20,7 +20,14 @@
     }
   },
   "vad": {
-    "status": "not-yet-selected",
-    "reason": "P0 validates ASR first; the ONNX asset will be pinned before P2"
+    "repo_id": "onnx-community/silero-vad",
+    "revision": "e71cae966052b992a7eca6b17738916ce0eca4ec",
+    "license": "MIT",
+    "runtime": "onnxruntime CPUExecutionProvider",
+    "window_samples": 512,
+    "sample_rate": 16000,
+    "files": {
+      "onnx/model.onnx": "a4a068cd6cf1ea8355b84327595838ca748ec29a25bc91fc82e6c299ccdc5808"
+    }
   }
 }

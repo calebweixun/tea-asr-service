@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -54,12 +55,29 @@ class FakeSupervisor:
         }
 
 
-def build_client(supervisor: FakeSupervisor, *, revisable_preview: bool = False) -> TestClient:
+class FakeVad:
+    """Deterministic stand-in for Silero.
+
+    Any window with real energy counts as speech, so segmentation tests do not
+    depend on a downloaded ONNX asset or on model behaviour.
+    """
+
+    def probability(self, window: np.ndarray, session: Any) -> float:
+        return 1.0 if float(np.abs(window).max()) > 0.05 else 0.0
+
+
+def build_client(
+    supervisor: FakeSupervisor,
+    *,
+    revisable_preview: bool = False,
+    vad: Any = None,
+) -> TestClient:
     app = create_app(
         Path("unused"),
         token="test-token",
         supervisor=supervisor,
         config=ServiceConfig(revisable_preview=revisable_preview),
+        vad_model=vad,
     )
     return TestClient(app)
 
@@ -72,6 +90,11 @@ def supervisor() -> FakeSupervisor:
 @pytest.fixture
 def client(supervisor: FakeSupervisor) -> TestClient:
     return build_client(supervisor)
+
+
+@pytest.fixture
+def continuous_client(supervisor: FakeSupervisor) -> TestClient:
+    return build_client(supervisor, vad=FakeVad())
 
 
 @pytest.fixture

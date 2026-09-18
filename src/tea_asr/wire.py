@@ -91,7 +91,7 @@ class CapabilityFeatures(ServerModel):
 class CapabilityLimits(ServerModel):
     max_frame_pcm_bytes: int = MAX_FRAME_PCM_BYTES
     max_utterance_ms: int = MAX_UTTERANCE_MS
-    max_continuous_sessions: int = 0
+    max_continuous_sessions: int = 1
     max_total_connections: int = 4
 
 
@@ -209,6 +209,13 @@ class AudioAck(SessionEvent):
     persisted_sample: int | None = None
 
 
+class SpeechStarted(SessionEvent):
+    type: Literal["speech.started"] = "speech.started"
+    segment_id: str
+    segment_index: int
+    start_sample: int
+
+
 class AudioCommitted(SessionEvent):
     type: Literal["audio.committed"] = "audio.committed"
     request_id: str
@@ -309,6 +316,7 @@ class ErrorEvent(SessionEvent):
 ServerEvent = Annotated[
     SessionStarted
     | AudioAck
+    | SpeechStarted
     | AudioCommitted
     | SegmentQueued
     | TranscriptPartial

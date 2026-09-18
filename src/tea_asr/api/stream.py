@@ -14,6 +14,8 @@ from pydantic import ValidationError
 from tea_asr.api.events import EventWriter
 from tea_asr.config import ServiceConfig
 from tea_asr.errors import ApiError
+from tea_asr.segmenter import ContinuousSegmenter, SegmentClosed, SegmenterConfig, SpeechStarted
+from tea_asr.vad import SileroVad
 from tea_asr.wire import (
     INITIAL_FLOW_WINDOW_SAMPLES,
     MAX_FRAME_PCM_BYTES,
@@ -38,6 +40,7 @@ from tea_asr.wire import (
     TranscriptFinal,
     TranscriptPartial,
 )
+from tea_asr.wire import SpeechStarted as SpeechStartedEvent
 
 FRAME_HEADER_BYTES = 16
 IDLE_TIMEOUT_S = 120.0
@@ -45,6 +48,9 @@ SESSION_START_TIMEOUT_S = 5.0
 FLOW_WINDOW_REFILL_SAMPLES = 80_000
 FLOW_WINDOW_LOW_WATER_SAMPLES = 40_000
 CONTROL_DEDUP_LIMIT = 256
+
+#: docs/03: at most 16 segments may be waiting on one session.
+MAX_PENDING_SEGMENTS = 16
 
 #: Errors that concern one control message, not the session as a whole.
 RECOVERABLE_CODES = frozenset({"conflict", "queue_full", "session_limit"})
@@ -54,6 +60,10 @@ PREVIEW_MIN_AUDIO_SAMPLES = 12_800
 PREVIEW_MIN_INTERVAL_S = 0.8
 PREVIEW_MAX_AUDIO_SAMPLES = 128_000
 
+#: docs/07: a revisable continuous session waits longer before closing a
+#: segment, so a late correction still lands before the final.
+REVISABLE_END_SILENCE_MS = 900
+
 
 class StreamScheduler(Protocol):
     async def transcribe(
@@ -62,11 +72,7 @@ class StreamScheduler(Protocol):
 
 
 def private_use_warnings(text: str) -> list[str]:
-    return (
-        ["private_use_characters"]
-        if any(0xE000 <= ord(char) <= 0xF8FF for char in text)
-        else []
-    )
+    return ["private_use_characters"] if any(0xE000 <= ord(c) <= 0xF8FF for c in text) else []
 
 
 @dataclass(slots=True)
@@ -77,6 +83,14 @@ class Segment:
     revision: int = 0
     published_preview_end: int = 0
     terminal: bool = False
+
+
+@dataclass(slots=True)
+class ClosedSegment:
+    segment: Segment
+    pcm: bytes
+    end_sample: int
+    boundary: str
 
 
 @dataclass(slots=True)
@@ -93,7 +107,12 @@ class SessionState:
 
 
 class StreamSession:
-    """One WebSocket connection, one audio timeline, one utterance at a time."""
+    """One WebSocket connection: one audio timeline, one ordered segment stream.
+
+    Inference never runs on the receive loop. Closed segments go onto a bounded
+    queue that a single consumer drains in order, so audio keeps arriving while
+    the model works and `segment_index` order is preserved by construction.
+    """
 
     def __init__(
         self,
@@ -102,19 +121,25 @@ class StreamSession:
         *,
         config: ServiceConfig,
         model_state: str,
+        vad: SileroVad | None = None,
     ) -> None:
         self._websocket = websocket
         self._scheduler = scheduler
         self._config = config
         self._model_state = model_state
+        self._vad = vad
         self._state = SessionState()
         self._writer = EventWriter(websocket, self._state.session_id)
+        self._profile = "utterance"
         self._transcript_mode = "final_only"
         self._language = "Chinese"
+        self._segmenter: ContinuousSegmenter | None = None
+        self._pending: asyncio.Queue[ClosedSegment] = asyncio.Queue(MAX_PENDING_SEGMENTS)
+        self._consumer: asyncio.Task[None] | None = None
         self._preview_task: asyncio.Task[None] | None = None
         self._preview_pending = False
         self._preview_last_started = 0.0
-        self._control_acks: dict[str, tuple[str, dict[str, Any] | None]] = {}
+        self._control_acks: dict[str, str] = {}
 
     # -- handshake -----------------------------------------------------------
 
@@ -129,10 +154,10 @@ class StreamSession:
         start = self._parse_control(message["text"])
         if not isinstance(start, SessionStart):
             raise ApiError("protocol_error", "連線後的第一則訊息必須是 session.start。")
-        if start.profile != "utterance":
+        if start.profile == "continuous" and self._vad is None:
             raise ApiError(
                 "unsupported_option",
-                "continuous profile 需要尚未實作的 VAD；目前僅支援 utterance。",
+                "continuous profile 需要 VAD 資產；請先執行 tea-asr model-prepare。",
             )
         if start.durable:
             raise ApiError("unsupported_option", "durable session 要等 P4 完成才提供。")
@@ -151,12 +176,13 @@ class StreamSession:
     def _preview_policy(self) -> PreviewPolicy | None:
         if self._transcript_mode != "revisable":
             return None
+        continuous = self._profile == "continuous"
         return PreviewPolicy(
             min_audio_ms=PREVIEW_MIN_AUDIO_SAMPLES // 16,
             min_interval_ms=int(PREVIEW_MIN_INTERVAL_S * 1000),
             max_preview_audio_ms=PREVIEW_MAX_AUDIO_SAMPLES // 16,
-            endpoint_silence_ms=None,
-            max_segment_ms=MAX_UTTERANCE_PCM_BYTES // 2 // 16,
+            endpoint_silence_ms=REVISABLE_END_SILENCE_MS if continuous else None,
+            max_segment_ms=8_000 if continuous else MAX_UTTERANCE_PCM_BYTES // 2 // 16,
             context_biasing=False,
         )
 
@@ -175,28 +201,116 @@ class StreamSession:
             raise ApiError(_validation_code(payload, exc), _first_error(exc)) from exc
 
     def _dedup(self, request_id: str, kind: str, fingerprint: str) -> bool:
-        """Return True when this control message was already handled."""
-
         previous = self._control_acks.get(request_id)
         if previous is None:
-            self._control_acks[request_id] = (f"{kind}:{fingerprint}", None)
+            self._control_acks[request_id] = f"{kind}:{fingerprint}"
             while len(self._control_acks) > CONTROL_DEDUP_LIMIT:
                 self._control_acks.pop(next(iter(self._control_acks)))
             return False
-        if previous[0] != f"{kind}:{fingerprint}":
+        if previous != f"{kind}:{fingerprint}":
             raise ApiError("conflict", f"request_id {request_id} 已用於不同的控制訊息。")
         return True
 
-    # -- audio ---------------------------------------------------------------
+    # -- segments ------------------------------------------------------------
 
-    def _open_segment(self) -> Segment:
-        if self._state.segment is None:
-            self._state.segment = Segment(
-                segment_id=str(uuid.uuid4()),
-                index=self._state.next_index,
-                start_sample=self._state.next_sample,
+    def _open_segment(self, start_sample: int) -> Segment:
+        segment = Segment(
+            segment_id=str(uuid.uuid4()),
+            index=self._state.next_index,
+            start_sample=start_sample,
+        )
+        self._state.next_index += 1
+        self._state.segment = segment
+        return segment
+
+    def _enqueue(self, segment: Segment, pcm: bytes, end_sample: int, boundary: str) -> None:
+        segment.terminal = True
+        self._writer.emit(
+            SegmentQueued(
+                session_id=self._state.session_id,
+                event_id=0,
+                segment_id=segment.segment_id,
+                segment_index=segment.index,
+                start_sample=segment.start_sample,
+                end_sample=end_sample,
+                boundary=boundary,  # type: ignore[arg-type]
             )
-        return self._state.segment
+        )
+        try:
+            self._pending.put_nowait(
+                ClosedSegment(segment=segment, pcm=pcm, end_sample=end_sample, boundary=boundary)
+            )
+        except asyncio.QueueFull as exc:
+            raise ApiError("session_limit", "等待辨識的片段已達上限。") from exc
+
+    async def _consume(self) -> None:
+        """Drain closed segments in order; one terminal event each."""
+
+        while True:
+            closed = await self._pending.get()
+            try:
+                if self._state.cancelled:
+                    continue
+                await self._transcribe_segment(closed)
+            finally:
+                self._pending.task_done()
+
+    async def _transcribe_segment(self, closed: ClosedSegment) -> None:
+        segment = closed.segment
+        state = self._state
+        try:
+            response, queue_ms = await self._scheduler.transcribe(
+                closed.pcm,
+                language=self._language,
+                kind="realtime" if self._profile == "continuous" else "interactive",
+            )
+        except ApiError as exc:
+            state.failed_segments.append(segment.index)
+            self._writer.emit(
+                SegmentError(
+                    session_id=state.session_id,
+                    event_id=0,
+                    segment_id=segment.segment_id,
+                    segment_index=segment.index,
+                    code=exc.code,
+                    message=exc.message,
+                    retryable=exc.retryable,
+                )
+            )
+            return
+        if state.cancelled:
+            return
+        text = str(response["text"])
+        if not text:
+            self._writer.emit(
+                SegmentSkipped(
+                    session_id=state.session_id,
+                    event_id=0,
+                    segment_id=segment.segment_id,
+                    segment_index=segment.index,
+                    reason="no_speech",
+                )
+            )
+            return
+        self._writer.emit(
+            TranscriptFinal(
+                session_id=state.session_id,
+                event_id=0,
+                segment_id=segment.segment_id,
+                segment_index=segment.index,
+                revision=segment.revision + 1,
+                start_sample=segment.start_sample,
+                end_sample=closed.end_sample,
+                text=text,
+                raw_text=text,
+                audio_ms=(closed.end_sample - segment.start_sample) // 16,
+                queue_ms=queue_ms,
+                inference_ms=round(float(response["total_time_s"]) * 1000),
+                warnings=private_use_warnings(text),
+            )
+        )
+
+    # -- audio ---------------------------------------------------------------
 
     def _handle_frame(self, frame: bytes) -> None:
         state = self._state
@@ -213,10 +327,16 @@ class StreamSession:
         end_sample = start_sample + len(pcm) // 2
         if end_sample > state.send_until_sample:
             raise ApiError("protocol_error", "Frame 超出 flow-control 窗口。")
-        if len(state.pcm) + len(pcm) > MAX_UTTERANCE_PCM_BYTES:
-            raise ApiError("payload_too_large", "單一 utterance 不得超過 30 秒。")
-        self._open_segment()
-        state.pcm.extend(pcm)
+
+        if self._profile == "continuous":
+            self._advance_continuous(pcm)
+        else:
+            if len(state.pcm) + len(pcm) > MAX_UTTERANCE_PCM_BYTES:
+                raise ApiError("payload_too_large", "單一 utterance 不得超過 30 秒。")
+            if state.segment is None:
+                self._open_segment(start_sample)
+            state.pcm.extend(pcm)
+
         state.next_seq += 1
         state.next_sample = end_sample
         self._writer.emit(
@@ -243,7 +363,53 @@ class StreamSession:
             )
         self._maybe_schedule_preview()
 
+    def _advance_continuous(self, pcm: bytes) -> None:
+        assert self._segmenter is not None
+        for event in self._segmenter.push(pcm):
+            if isinstance(event, SpeechStarted):
+                segment = self._open_segment(event.start_sample)
+                self._writer.emit(
+                    SpeechStartedEvent(
+                        session_id=self._state.session_id,
+                        event_id=0,
+                        segment_id=segment.segment_id,
+                        segment_index=segment.index,
+                        start_sample=event.start_sample,
+                    )
+                )
+            elif isinstance(event, SegmentClosed):
+                segment = self._state.segment or self._open_segment(event.start_sample)
+                self._state.segment = None
+                self._settle_preview_soon(segment)
+                self._enqueue(segment, event.pcm, event.end_sample, event.boundary)
+                if event.boundary == "max_duration":
+                    # The talker did not stop, so the next segment opens at the
+                    # same sample the previous one ended on.
+                    reopened = self._open_segment(event.end_sample)
+                    self._writer.emit(
+                        SpeechStartedEvent(
+                            session_id=self._state.session_id,
+                            event_id=0,
+                            segment_id=reopened.segment_id,
+                            segment_index=reopened.index,
+                            start_sample=event.end_sample,
+                        )
+                    )
+
     # -- preview (P2a, experimental) ----------------------------------------
+
+    def _current_preview_audio(self) -> tuple[bytes, int] | None:
+        if self._profile == "continuous":
+            if self._segmenter is None:
+                return None
+            open_audio = self._segmenter.open_segment_audio()
+            if open_audio is None:
+                return None
+            start, pcm = open_audio
+            return pcm, start + len(pcm) // 2
+        if not self._state.pcm:
+            return None
+        return bytes(self._state.pcm), self._state.next_sample
 
     def _maybe_schedule_preview(self) -> None:
         if self._transcript_mode != "revisable":
@@ -251,7 +417,11 @@ class StreamSession:
         segment = self._state.segment
         if segment is None or segment.terminal:
             return
-        samples = len(self._state.pcm) // 2
+        audio = self._current_preview_audio()
+        if audio is None:
+            return
+        pcm, end_sample = audio
+        samples = len(pcm) // 2
         if samples > PREVIEW_MAX_AUDIO_SAMPLES:
             return
         if samples - segment.published_preview_end < PREVIEW_MIN_AUDIO_SAMPLES:
@@ -264,9 +434,7 @@ class StreamSession:
             self._preview_pending = True
             return
         self._preview_last_started = loop.time()
-        self._preview_task = asyncio.create_task(
-            self._run_preview(bytes(self._state.pcm), self._state.next_sample, segment)
-        )
+        self._preview_task = asyncio.create_task(self._run_preview(pcm, end_sample, segment))
 
     async def _run_preview(self, snapshot: bytes, end_sample: int, segment: Segment) -> None:
         try:
@@ -275,7 +443,7 @@ class StreamSession:
             )
             if segment.terminal or self._state.cancelled:
                 return
-            if end_sample <= segment.published_preview_end:
+            if end_sample - segment.start_sample <= segment.published_preview_end:
                 return
             segment.revision += 1
             segment.published_preview_end = end_sample - segment.start_sample
@@ -317,34 +485,59 @@ class StreamSession:
                 self._preview_pending = False
                 self._maybe_schedule_preview()
 
+    def _settle_preview_soon(self, segment: Segment) -> None:
+        """Mark the segment closed so an in-flight preview discards its result."""
+
+        segment.terminal = True
+        self._preview_pending = False
+
     async def _settle_preview(self) -> None:
         self._preview_pending = False
         task = self._preview_task
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
 
-    # -- commit / finalize ---------------------------------------------------
+    # -- commit / stop -------------------------------------------------------
 
-    async def _finalize(self, request_id: str, boundary: str) -> None:
+    async def _close_open_audio(self, request_id: str, boundary: str) -> None:
         state = self._state
         segment = state.segment
         if segment is not None:
-            segment.terminal = True
+            self._settle_preview_soon(segment)
         await self._settle_preview()
-        if segment is None or not state.pcm:
-            ack = AudioCommitted(
-                session_id=state.session_id,
-                event_id=0,
-                request_id=request_id,
-                segment_id=None,
-                reason="no_audio",
-            )
-            self._writer.emit(ack)
-            self._control_acks[request_id] = (self._control_acks[request_id][0], None)
+
+        if self._profile == "continuous":
+            assert self._segmenter is not None
+            closed_any = False
+            for event in self._segmenter.flush():
+                if isinstance(event, SegmentClosed):
+                    active = state.segment or self._open_segment(event.start_sample)
+                    state.segment = None
+                    self._enqueue(active, event.pcm, event.end_sample, "stop")
+                    closed_any = True
+            if not closed_any and boundary == "stop":
+                self._writer.emit(
+                    AudioCommitted(
+                        session_id=state.session_id,
+                        event_id=0,
+                        request_id=request_id,
+                        segment_id=None,
+                        reason="no_audio",
+                    )
+                )
             return
 
-        pcm = bytes(state.pcm)
-        end_sample = state.next_sample
+        if segment is None or not state.pcm:
+            self._writer.emit(
+                AudioCommitted(
+                    session_id=state.session_id,
+                    event_id=0,
+                    request_id=request_id,
+                    segment_id=None,
+                    reason="no_audio",
+                )
+            )
+            return
         self._writer.emit(
             AudioCommitted(
                 session_id=state.session_id,
@@ -354,69 +547,10 @@ class StreamSession:
                 reason="committed",
             )
         )
-        self._writer.emit(
-            SegmentQueued(
-                session_id=state.session_id,
-                event_id=0,
-                segment_id=segment.segment_id,
-                segment_index=segment.index,
-                start_sample=segment.start_sample,
-                end_sample=end_sample,
-                boundary=boundary,  # type: ignore[arg-type]
-            )
-        )
+        pcm = bytes(state.pcm)
         state.pcm.clear()
         state.segment = None
-        state.next_index += 1
-
-        try:
-            response, queue_ms = await self._scheduler.transcribe(
-                pcm, language=self._language, kind="interactive"
-            )
-        except ApiError as exc:
-            state.failed_segments.append(segment.index)
-            self._writer.emit(
-                SegmentError(
-                    session_id=state.session_id,
-                    event_id=0,
-                    segment_id=segment.segment_id,
-                    segment_index=segment.index,
-                    code=exc.code,
-                    message=exc.message,
-                    retryable=exc.retryable,
-                )
-            )
-            return
-
-        text = str(response["text"])
-        if not text:
-            self._writer.emit(
-                SegmentSkipped(
-                    session_id=state.session_id,
-                    event_id=0,
-                    segment_id=segment.segment_id,
-                    segment_index=segment.index,
-                    reason="no_speech",
-                )
-            )
-            return
-        self._writer.emit(
-            TranscriptFinal(
-                session_id=state.session_id,
-                event_id=0,
-                segment_id=segment.segment_id,
-                segment_index=segment.index,
-                revision=segment.revision + 1,
-                start_sample=segment.start_sample,
-                end_sample=end_sample,
-                text=text,
-                raw_text=text,
-                audio_ms=(end_sample - segment.start_sample) // 16,
-                queue_ms=queue_ms,
-                inference_ms=round(float(response["total_time_s"]) * 1000),
-                warnings=private_use_warnings(text),
-            )
-        )
+        self._enqueue(segment, pcm, state.next_sample, boundary)
 
     # -- main loop -----------------------------------------------------------
 
@@ -427,9 +561,21 @@ class StreamSession:
             ).model_dump(mode="json")
         )
         start = await self._read_session_start()
+        self._profile = start.profile
         self._transcript_mode = start.transcript_mode
         self._language = start.language
-        self._control_acks[start.request_id] = ("session.start:", None)
+        self._control_acks[start.request_id] = "session.start:"
+        if self._profile == "continuous":
+            assert self._vad is not None
+            end_silence = (
+                REVISABLE_END_SILENCE_MS
+                if self._transcript_mode == "revisable"
+                else SegmenterConfig().end_silence_ms
+            )
+            self._segmenter = ContinuousSegmenter(
+                self._vad, SegmenterConfig(end_silence_ms=end_silence)
+            )
+        self._consumer = asyncio.create_task(self._consume())
         self._writer.emit(
             SessionStarted(
                 session_id=self._state.session_id,
@@ -473,33 +619,34 @@ class StreamSession:
                 )
 
     async def _handle_control(self, control: Any) -> bool:
-        """Handle one control message. Returns True when the session is finished."""
-
         state = self._state
         kind = control.type
         if kind == "ping":
             if not self._dedup(control.request_id, kind, ""):
                 self._writer.emit(
-                    Pong(
-                        session_id=state.session_id, event_id=0, request_id=control.request_id
-                    )
+                    Pong(session_id=state.session_id, event_id=0, request_id=control.request_id)
                 )
             return False
         if kind == "session.start":
             raise ApiError("protocol_error", "同一條連線只能有一次 session.start。")
         if kind == "audio.commit":
+            if self._profile == "continuous":
+                raise ApiError(
+                    "unsupported_option", "continuous profile 由 VAD 切段，不接受 audio.commit。"
+                )
             if control.through_seq != state.next_seq - 1:
                 raise ApiError("protocol_error", "audio.commit 的 through_seq 與已收音訊不符。")
             if self._dedup(control.request_id, kind, str(control.through_seq)):
                 return False
-            await self._finalize(control.request_id, "manual")
+            await self._close_open_audio(control.request_id, "manual")
             return False
         if kind == "session.stop":
             expected = state.next_seq - 1 if state.next_seq else None
             if control.through_seq != expected:
                 raise ApiError("protocol_error", "session.stop 的 through_seq 與已收音訊不符。")
             self._dedup(control.request_id, kind, str(expected))
-            await self._finalize(control.request_id, "stop")
+            await self._close_open_audio(control.request_id, "stop")
+            await self._pending.join()
             self._writer.emit(
                 SessionStopped(
                     session_id=state.session_id,
@@ -549,6 +696,14 @@ class StreamSession:
         except (RuntimeError, WebSocketDisconnect):
             pass
 
+    async def shutdown(self) -> None:
+        for task in (self._consumer, self._preview_task):
+            if task is not None:
+                task.cancel()
+        tasks = [task for task in (self._consumer, self._preview_task) if task is not None]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     @property
     def writer(self) -> EventWriter:
         return self._writer
@@ -583,6 +738,7 @@ async def run_stream(
     auth_token: str,
     config: ServiceConfig,
     model_state: str,
+    vad: SileroVad | None = None,
 ) -> None:
     if websocket.headers.get("authorization") != f"Bearer {auth_token}":
         await websocket.close(code=1008, reason="unauthenticated")
@@ -593,7 +749,9 @@ async def run_stream(
         return
 
     await websocket.accept()
-    session = StreamSession(websocket, scheduler, config=config, model_state=model_state)
+    session = StreamSession(
+        websocket, scheduler, config=config, model_state=model_state, vad=vad
+    )
     writer_task = asyncio.create_task(session.writer.run())
     watchdog_task = asyncio.create_task(session.writer.watchdog())
     main_task = asyncio.create_task(session.run())
@@ -615,4 +773,5 @@ async def run_stream(
         # Teardown runs while the connection is already going away, so a
         # cancellation arriving here must not escape as an endpoint failure.
         with contextlib.suppress(asyncio.CancelledError):
+            await session.shutdown()
             await asyncio.gather(main_task, writer_task, watchdog_task, return_exceptions=True)

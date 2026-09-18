@@ -15,6 +15,7 @@ from tea_asr.config import ServiceConfig, load_or_create_token
 from tea_asr.errors import ApiError
 from tea_asr.model_spec import TEA_ASR_1_1_MLX_4BIT
 from tea_asr.scheduler import Scheduler
+from tea_asr.vad import VAD_SHA256, SileroVad, locate_vad
 from tea_asr.wire import (
     MAX_UTTERANCE_PCM_BYTES,
     Capabilities,
@@ -27,6 +28,22 @@ from tea_asr.wire import (
     TranscriptionResponse,
 )
 from tea_asr.worker.supervisor import WorkerSupervisor
+
+#: Sentinel so a caller can say "no VAD" (tests) instead of "load the default".
+_AUTO_VAD: Any = object()
+
+
+def _load_vad() -> SileroVad | None:
+    """Load the pinned VAD asset, or run without continuous support.
+
+    A missing asset must not break utterance sessions, so capabilities simply
+    stops advertising `continuous` and `session.start` says why.
+    """
+
+    try:
+        return SileroVad(locate_vad(), expected_sha256=VAD_SHA256)
+    except Exception:  # noqa: BLE001 - any lookup or load failure means no continuous
+        return None
 
 
 class InferenceSupervisor(Protocol):
@@ -46,11 +63,13 @@ def create_app(
     token: str | None = None,
     supervisor: InferenceSupervisor | None = None,
     config: ServiceConfig | None = None,
+    vad_model: Any = _AUTO_VAD,
 ) -> FastAPI:
     auth_token = token or load_or_create_token()
     settings = config or ServiceConfig.from_env()
     worker = supervisor or WorkerSupervisor(model_path)
     scheduler = Scheduler(worker)
+    vad = _load_vad() if vad_model is _AUTO_VAD else vad_model
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -110,13 +129,13 @@ def create_app(
     async def capabilities() -> Capabilities:
         return Capabilities(
             protocol_version=settings.protocol_version,
-            profiles=["utterance"],
+            profiles=["utterance", "continuous"] if vad is not None else ["utterance"],
             features=CapabilityFeatures(
                 # Only flip these once the matching acceptance in docs/05 passes.
                 partial_transcripts=settings.revisable_preview,
             ),
             limits=CapabilityLimits(
-                max_continuous_sessions=0,
+                max_continuous_sessions=1 if vad is not None else 0,
                 max_total_connections=settings.max_total_connections,
             ),
         )
@@ -146,6 +165,7 @@ def create_app(
             auth_token=auth_token,
             config=settings,
             model_state=worker.state,
+            vad=vad,
         )
 
     @app.post("/v1/transcriptions", dependencies=[Depends(authorize)])

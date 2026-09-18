@@ -3,7 +3,8 @@
 > 基線wire 1.0，P2a增加opt-in wire 1.1擴充；路徑仍使用 `/v1`。v0.1／v0.1.1／v0.2是產品里程碑，不是wire版本。
 >
 > **實作狀態（2026-09-19）：** v0.1的HTTP端點與WS utterance session已實作，機器可讀契約在 [docs/api/](api/)。
-> 尚未實作：continuous profile與VAD、durable session、`/v1/jobs`、resume；這些選項一律回 `unsupported_option` 或404，不會靜默降級。
+> continuous profile與Silero VAD已實作，`speech.started` 與 `boundary=silence/max_duration` 會實際送出。
+> 尚未實作：durable session、`/v1/jobs`、resume；這些選項一律回 `unsupported_option` 或404，不會靜默降級。
 > P2a的1.1擴充已實作但未通過驗收，預設關閉（`TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1` 才啟用）。
 
 ## 共通規則

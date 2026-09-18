@@ -6,7 +6,13 @@
     uv run python examples/mic_stream.py --list-devices
     uv run python examples/mic_stream.py --device 2
 
-預設是 final_only：說完按 Enter（或 Ctrl-C）才會送出並定稿。
+預設是 continuous：server 用 VAD 自己斷句，你講一句停一下就會出一段，
+不用按任何鍵。按 Enter 結束整個 session。
+
+    uv run python examples/mic_stream.py --device 2 --utterance
+
+改用 utterance profile 時，要自己按 Enter 標記「這段講完了」。
+
 服務若啟用了實驗性的 P2a 預覽，加 --revisable 就能看到邊說邊修訂：
 
     TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1 uv run tea-asr serve
@@ -72,7 +78,7 @@ def render(event: dict) -> None:
         sys.stdout.write(f"\r\033[K✗ {event.get('code')}: {event.get('message', '')}\n")
 
 
-async def run(device: str, url: str, transcript_mode: str) -> int:
+async def run(device: str, url: str, profile: str, transcript_mode: str) -> int:
     token_file = AppPaths.macos_default().token_file
     if not token_file.exists():
         print(f"找不到 token，請先啟動服務：{token_file}", file=sys.stderr)
@@ -91,7 +97,7 @@ async def run(device: str, url: str, transcript_mode: str) -> int:
                 {
                     "type": "session.start",
                     "request_id": "mic-start",
-                    "profile": "utterance",
+                    "profile": profile,
                     "audio": {"sample_rate": 16_000, "channels": 1, "format": "pcm_s16le"},
                     "language": "Chinese",
                     "durable": False,
@@ -104,9 +110,14 @@ async def run(device: str, url: str, transcript_mode: str) -> int:
             print(json.dumps(started, ensure_ascii=False, indent=2), file=sys.stderr)
             ffmpeg.terminate()
             return 1
+        how = (
+            "server 會用 VAD 自動斷句"
+            if profile == "continuous"
+            else "按 Enter 送出這一段"
+        )
         print(
-            f"協定 {hello['protocol_version']}、模式 {started['transcript_mode']}。"
-            "開始說話，按 Enter 結束。\n"
+            f"協定 {hello['protocol_version']}、profile {started['profile']}、"
+            f"模式 {started['transcript_mode']}。{how}；按 Enter 結束。\n"
         )
 
         async def receive() -> None:
@@ -131,7 +142,7 @@ async def run(device: str, url: str, transcript_mode: str) -> int:
                 chunk = await loop.run_in_executor(None, ffmpeg.stdout.read, FRAME_BYTES)
                 if not chunk:
                     break
-                if sent_bytes + len(chunk) > MAX_UTTERANCE_BYTES:
+                if profile != "continuous" and sent_bytes + len(chunk) > MAX_UTTERANCE_BYTES:
                     print("\n達到 30 秒單段上限，先定稿。", file=sys.stderr)
                     break
                 await socket.send(struct.pack("<QQ", seq, sample) + chunk)
@@ -161,12 +172,18 @@ def main() -> int:
     parser.add_argument("--list-devices", action="store_true")
     parser.add_argument("--url", default="ws://127.0.0.1:8765/v1/stream")
     parser.add_argument("--revisable", action="store_true", help="要求 P2a 串流預覽")
+    parser.add_argument(
+        "--utterance",
+        action="store_true",
+        help="改用 utterance profile，由你自己標記段落結束",
+    )
     args = parser.parse_args()
     if args.list_devices:
         return list_devices()
     mode = "revisable" if args.revisable else "final_only"
+    profile = "utterance" if args.utterance else "continuous"
     try:
-        return asyncio.run(run(args.device, args.url, mode))
+        return asyncio.run(run(args.device, args.url, profile, mode))
     except KeyboardInterrupt:
         return 130
 
