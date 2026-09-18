@@ -20,6 +20,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     private let meetingEntry = NSMenuItem()
     private let autoInsertEntry = NSMenuItem()
     private let previewEntry = NSMenuItem()
+    private let lastTextEntry = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private var warnedAboutAccessibility = false
 
     private var mode: Mode = .idle
     private var meeting: MeetingWindow?
@@ -50,6 +52,9 @@ final class AppController: NSObject, NSApplicationDelegate {
 
         statusEntry.isEnabled = false
         menu.addItem(statusEntry)
+        lastTextEntry.isEnabled = false
+        lastTextEntry.isHidden = true
+        menu.addItem(lastTextEntry)
         menu.addItem(.separator())
 
         toggleEntry.action = #selector(toggleDictation)
@@ -249,11 +254,13 @@ final class AppController: NSObject, NSApplicationDelegate {
             case .meeting:
                 self.meeting?.appendFinal(item.text, spokenAt: self.spokenAt(item.startSample))
             case .dictation:
+                self.showLastText(item.text)
                 if self.settings.autoInsert, TextInjector.isTrusted {
                     TextInjector.insert(item.text)
                 } else {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(item.text, forType: .string)
+                    self.warnAboutAccessibilityOnce()
                 }
             case .idle:
                 break
@@ -262,6 +269,27 @@ final class AppController: NSObject, NSApplicationDelegate {
         client.onNotice = { [weak self] message in
             self?.meeting?.setStatus(message)
         }
+    }
+
+    /// Show the last final in the menu so the user can tell recognition from
+    /// insertion problems without any extra permission.
+    private func showLastText(_ text: String) {
+        let trimmed = text.count > 48 ? String(text.prefix(48)) + "…" : text
+        lastTextEntry.title = "最近一句：\(trimmed)"
+        lastTextEntry.isHidden = trimmed.isEmpty
+    }
+
+    private func warnAboutAccessibilityOnce() {
+        guard settings.autoInsert, !TextInjector.isTrusted, !warnedAboutAccessibility else {
+            return
+        }
+        warnedAboutAccessibility = true
+        TextInjector.requestTrust()
+        alert(
+            "文字放進剪貼簿了，但沒有自動貼上",
+            "自動貼上需要輔助使用權限。到「系統設定 → 隱私權與安全性 → 輔助使用」允許 TEA ASR 後，"
+                + "重新開始聽寫即可。\n在那之前每段定稿都會放進剪貼簿，按 ⌘V 貼上。"
+        )
     }
 
     private func spokenAt(_ startSample: Int) -> Date {
