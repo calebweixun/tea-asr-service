@@ -27,6 +27,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var meeting: MeetingWindow?
     private var preferences: PreferencesWindow?
     private var hotKeyRef: EventHotKeyRef?
+    private var hotKeyRegistered = false
     /// Wall clock of the current session's sample 0, so a session restarted after
     /// a timeline gap still lands on one continuous meeting timeline.
     private var sessionOrigin = Date()
@@ -120,7 +121,8 @@ final class AppController: NSObject, NSApplicationDelegate {
             statusEntry.title = "錯誤：\(message.prefix(60))"
         }
 
-        toggleEntry.title = mode == .dictation ? "停止聽寫" : "開始聽寫"
+        toggleEntry.title = (mode == .dictation ? "停止聽寫" : "開始聽寫")
+            + (hotKeyRegistered ? "" : "（⌥⌘D 被其他 app 占用）")
         meetingEntry.title = mode == .meeting ? "停止會議記錄" : "開始會議記錄"
         autoInsertEntry.state = settings.autoInsert ? .on : .off
         previewEntry.state = settings.revisablePreview ? .on : .off
@@ -316,7 +318,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             nil
         )
         let id = EventHotKeyID(signature: OSType(0x54454153), id: 1)  // 'TEAS'
-        RegisterEventHotKey(
+        let status = RegisterEventHotKey(
             UInt32(kVK_ANSI_D),
             UInt32(cmdKey | optionKey),
             id,
@@ -324,6 +326,9 @@ final class AppController: NSObject, NSApplicationDelegate {
             0,
             &hotKeyRef
         )
+        // Another app may already own the combination. Saying so beats letting
+        // the user press it and wonder why nothing happens.
+        hotKeyRegistered = status == noErr
     }
 
     private func alert(_ title: String, _ message: String) {
