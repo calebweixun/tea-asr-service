@@ -90,7 +90,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             symbol = "exclamationmark.triangle"
         case (.idle, _):
             symbol = "mic"
-        case (_, .connecting):
+        case (_, .connecting), (_, .loadingModel):
             symbol = "mic.badge.plus"
         default:
             symbol = "waveform"
@@ -104,6 +104,8 @@ final class AppController: NSObject, NSApplicationDelegate {
             statusEntry.title = mode == .idle ? "未啟動" : "連線中…"
         case .connecting:
             statusEntry.title = "連線中…"
+        case .loadingModel:
+            statusEntry.title = "模型載入中…"
         case .listening(_, let preview):
             statusEntry.title = preview ? "聆聽中（含串流預覽）" : "聆聽中"
         case .failed(let message):

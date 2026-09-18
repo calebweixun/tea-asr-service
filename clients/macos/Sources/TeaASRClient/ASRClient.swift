@@ -9,9 +9,15 @@ final class ASRClient: NSObject {
     enum State: Equatable {
         case idle
         case connecting
+        case loadingModel
         case listening(protocolVersion: String, preview: Bool)
         case failed(String)
     }
+
+    /// The service unloads the model when idle, and the first connection is what
+    /// wakes it. Retrying beats telling the user to try again themselves.
+    private static let modelWaitAttempts = 30
+    private static let modelWaitDelay: TimeInterval = 2.0
 
     private let settings: Settings
     private var task: URLSessionWebSocketTask?
@@ -28,6 +34,7 @@ final class ASRClient: NSObject {
     private var backlog: [Data] = []
     private let backlogLimit = 150  // 15 s at 100 ms per frame
     private var wantsPreview = false
+    private var modelWaits = 0
 
     private let queue = DispatchQueue(label: "tea-asr.client")
 
@@ -51,12 +58,13 @@ final class ASRClient: NSObject {
     func connect(wantsPreview: Bool) {
         queue.async {
             self.wantsPreview = wantsPreview
+            self.modelWaits = 0
             self.reallyConnect()
         }
     }
 
     private func reallyConnect() {
-        guard task == nil else { return }
+        guard task == nil, !stopping else { return }
         stopping = false
         started = false
         nextSeq = 0
@@ -181,7 +189,22 @@ final class ASRClient: NSObject {
         case "hello":
             guard let hello = try? decoder.decode(Wire.Hello.self, from: data) else { return }
             guard hello.modelState == "ready" else {
-                fail("模型尚未就緒（\(hello.modelState)）。")
+                // Connecting is itself what asks the service to load the model,
+                // so wait for it instead of handing the user an error.
+                guard
+                    hello.modelState == "loading" || hello.modelState == "idle_unloaded",
+                    modelWaits < Self.modelWaitAttempts
+                else {
+                    fail("模型無法使用（\(hello.modelState)）。")
+                    return
+                }
+                modelWaits += 1
+                state = .loadingModel
+                task?.cancel(with: .normalClosure, reason: nil)
+                teardown(keepState: true)
+                queue.asyncAfter(deadline: .now() + Self.modelWaitDelay) { [weak self] in
+                    self?.reallyConnect()
+                }
                 return
             }
             startSession(preview: wantsPreview && hello.protocolVersion == "1.1")

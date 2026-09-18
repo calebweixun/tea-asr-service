@@ -39,6 +39,8 @@ enum SelfTest {
                 finished = true
             case .connecting:
                 break
+            case .loadingModel:
+                print("模型載入中，等待服務…")
             }
         }
         client.onPartial = { item in
