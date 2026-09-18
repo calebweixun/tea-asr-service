@@ -2,15 +2,30 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import struct
 import sys
+import time
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Any
 
 from ..errors import ApiError
 from .protocol import MAX_HEADER_BYTES, MAX_PCM_BYTES, read_response
+
+logger = logging.getLogger("tea_asr.worker")
+
+#: docs/03: 1/2/4 second backoff, at most three restarts in a minute. Beyond
+#: that the service stops trying and says so, instead of thrashing the GPU.
+RESTART_BACKOFF_S = (1.0, 2.0, 4.0)
+RESTART_WINDOW_S = 60.0
+MAX_RESTARTS_PER_WINDOW = 3
+
+#: Failures that mean the checkpoint itself is wrong. Retrying cannot help, so
+#: they never enter the restart loop.
+UNRECOVERABLE_CODES = frozenset({"model_incompatible"})
 
 
 class WorkerError(ApiError):
@@ -32,6 +47,8 @@ class WorkerSupervisor:
         self.load_ms: int | None = None
         self.generation = 0
         self._lock = asyncio.Lock()
+        self._restarts: deque[float] = deque()
+        self._recovering: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         if self.process and self.process.returncode is None:
@@ -70,8 +87,15 @@ class WorkerSupervisor:
         if len(pcm) > MAX_PCM_BYTES or len(pcm) % 2:
             raise ValueError("PCM must be even-length and no longer than 30 seconds")
         async with self._lock:
-            if not self.process or self.process.returncode is not None or self.state != "ready":
-                raise WorkerError("model_unavailable", "ASR worker is not ready")
+            if self.process and self.process.returncode is not None:
+                # The worker died between requests. Say so for this segment and
+                # bring it back for the next one.
+                self.last_error = f"Worker exited with code {self.process.returncode}"
+                self.state = "recovering"
+                self._schedule_restart()
+                raise WorkerError("inference_failed", self.last_error)
+            if not self.process or self.state != "ready":
+                raise WorkerError("model_unavailable", f"ASR worker is {self.state}")
             request_id = str(uuid.uuid4())
             header = json.dumps(
                 {
@@ -93,11 +117,19 @@ class WorkerSupervisor:
                 response = await asyncio.wait_for(
                     read_response(self.process.stdout), self.task_timeout_s
                 )
-            except TimeoutError as exc:
+            except (TimeoutError, asyncio.IncompleteReadError, ConnectionResetError) as exc:
+                # A hung or dead worker takes the whole process down and comes
+                # back; a stuck Metal kernel cannot be interrupted any other way.
                 await self.stop()
-                self.state = "failed"
-                self.last_error = "Inference timed out"
-                raise WorkerError("inference_timeout", self.last_error) from exc
+                self.state = "recovering"
+                self.last_error = (
+                    "Inference timed out"
+                    if isinstance(exc, TimeoutError)
+                    else f"Worker connection lost: {type(exc).__name__}"
+                )
+                self._schedule_restart()
+                code = "inference_timeout" if isinstance(exc, TimeoutError) else "inference_failed"
+                raise WorkerError(code, self.last_error) from exc
             if response.get("request_id") != request_id:
                 raise WorkerError("invalid_ipc", "Worker response ID does not match")
             if response.get("status") != "ok":
@@ -106,6 +138,43 @@ class WorkerSupervisor:
                     str(response.get("message", "Inference failed")),
                 )
             return response
+
+    def _schedule_restart(self) -> None:
+        if self._recovering is not None and not self._recovering.done():
+            return
+        self._recovering = asyncio.get_running_loop().create_task(self._restart_loop())
+
+    async def _restart_loop(self) -> None:
+        for delay in RESTART_BACKOFF_S:
+            now = time.monotonic()
+            while self._restarts and now - self._restarts[0] > RESTART_WINDOW_S:
+                self._restarts.popleft()
+            if len(self._restarts) >= MAX_RESTARTS_PER_WINDOW:
+                self._give_up()
+                return
+            self._restarts.append(now)
+            await asyncio.sleep(delay)
+            try:
+                await self.start()
+            except WorkerError as exc:
+                if exc.code in UNRECOVERABLE_CODES:
+                    self.state = "failed"
+                    self.last_error = str(exc)
+                    return
+                continue
+            logger.info(
+                "worker.restarted", extra={"fields": {"generation": self.generation}}
+            )
+            return
+        self._give_up()
+
+    def _give_up(self) -> None:
+        self.state = "failed"
+        self.last_error = (
+            f"Worker restarted {MAX_RESTARTS_PER_WINDOW} times in "
+            f"{int(RESTART_WINDOW_S)}s; giving up until the service is restarted."
+        )
+        logger.warning(self.last_error, extra={"fields": {"restarts": len(self._restarts)}})
 
     async def stop(self) -> None:
         process, self.process = self.process, None

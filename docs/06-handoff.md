@@ -145,7 +145,7 @@ server repo只放reference clients与protocol測試；正式Swift app／OBS plug
 
 ## 開發中不可破壞的約束
 
-1. Production載入失敗不能改用FakeBackend；測試fake必須明確開啟並在status標示。
+1. Production載入失敗不能改用FakeBackend；測試fake必須明確開啟並在status標示。（已實作：worker 死亡後依 1/2/4 秒退避重啟，60 秒內最多 3 次，超過即 failed；`model_incompatible` 屬不可重試，不進重啟迴圈。）
 2. 每機一個服務instance、一個MLX worker、一份模型；不能開多Uvicorn workers。
 3. 不在async route、WS receive loop或OBS audio callback阻塞推論。
 4. 每層buffer、queue、spool、timeout有上限與可見失敗。

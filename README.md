@@ -122,6 +122,35 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 
 能力宣告跟著這張表走：`capabilities` 只有在對應驗收通過後才會把 feature 設為 true。
 
+## 這個版本不做什麼
+
+不是省略，是明確不支援。client 不該假設這些行為存在：
+
+- **Ephemeral**：預設不把音訊或逐字稿寫進資料庫。服務重啟後 session 與逐字稿都不在了。
+  會議記錄的保存是 Mac client 自己寫檔，不是服務的持久化。
+- **不支援 resume**：斷線就是結束。重連要開新 session、新的 sample clock。
+  機器睡眠醒來後服務會主動送 `timeline_gap` 並關閉連線，而不是把缺口兩側接起來假裝連續。
+- **沒有精準時間戳**：`timestamp_quality` 永遠是 `segment`，只有片段的起迄範圍，
+  沒有逐字對齊。字幕可用，但不要拿它做逐字高亮。
+- **沒有翻譯、沒有語者分離、沒有熱詞**：`capabilities` 裡這些 feature 都是 false，
+  請求相關選項會被拒絕而不是被忽略。
+- **單機單模型**：一台機器一份服務、一個 worker、一份模型。第二個實例會被拒絕。
+
+## 安裝
+
+```bash
+uv sync
+uv run tea-asr model-prepare
+```
+
+要打包成 wheel 給另一台 Apple Silicon Mac：
+
+```bash
+uv build
+```
+
+產物在 `dist/`。模型與 VAD 資產不在 wheel 裡，裝好後仍要跑 `tea-asr model-prepare`。
+
 ## 設計基準
 
 研究日期：2026-09-18。原始專案 [DSDALAB/lcsy-asr-csinputmethod](https://github.com/DSDALAB/lcsy-asr-csinputmethod) 固定於 `018777c41e929f17cee41ad25eae49625fe4f452`。
