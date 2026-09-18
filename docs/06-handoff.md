@@ -117,7 +117,7 @@ log 為 JSON lines 並輪替，明確過濾 token、PCM 與逐字稿。關閉時
 
 ## P5｜挑一種client整合
 
-**P5a：** Swift選單列聽寫client，以驗證真正日常使用的延遲、短詞、焦點與剪貼簿行為。採AVAudioEngine收音及可靠resampling；partial在自有浮動視窗更新，final才貼入。不要為了顯示partial而回刪使用者已打的字。
+**P5a（已有可用版本，見 [clients/macos](../clients/macos/)）：** Swift選單列聽寫client，以驗證真正日常使用的延遲、短詞、焦點與剪貼簿行為。採AVAudioEngine收音及可靠resampling；partial在自有浮動視窗更新，final才貼入。不要為了顯示partial而回刪使用者已打的字。
 
 **P5b：** InputMethodKit輸入法整合，把partial呈現在自己持有的marked text／組字區，final才commit，交付游標處直接修訂體驗。涵蓋組字生命週期、使用者編輯、焦點變更、取消與安全輸入；實際app相容測試見07。一般選單列app不能直接取代此層。P5a與P5b分開交付，server協定共用。
 

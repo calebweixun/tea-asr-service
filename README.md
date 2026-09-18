@@ -25,6 +25,7 @@
 | 交給 Sol 或其他模型開始開發 | [06 開發交接](docs/06-handoff.md) |
 | 理解類似系統聽寫的預覽與上下文修訂 | [07 串流修訂規劃](docs/07-contextual-streaming.md) |
 | 開 OBS 直播字幕外掛的 repo | [08 OBS 外掛規格](docs/08-obs-plugin.md) |
+| 用 Mac 選單列 app 聽寫或做會議記錄 | [clients/macos](clients/macos/) |
 
 建議先閱讀 01 的「範圍」，再把 06 最後的開發提示交给實作模型。API 定義以 04 為準；不確定事項以 05 的驗證關卡為準。
 
@@ -114,7 +115,7 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 | P2a 串流修訂 | 實作但未驗收 | utterance與continuous都支援；需 `TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1` 才啟用。未啟用時 `partial_transcripts=false` 且 revisable 請求回 `unsupported_option`。延遲與錯改率尚未量測 |
 | P3 服務管理 | 大致完成 | LaunchAgent install/uninstall/status、singleton lock、port 檢查、idle unload 與重新載入、TOML 設定、JSON log 輪替、關閉時 drain。sleep/wake 尚未實測 |
 | P4 長檔案與保存 | 未開始 | `/v1/jobs` 不存在，回404 |
-| P5 client | 未開始 | 只有 `examples/` 下的參考 client |
+| P5a Mac client | 可用，未完整驗收 | 選單列 app：聽寫（定稿後貼進前景 app）與會議記錄（即時視窗＋Markdown 匯出），見 [clients/macos](clients/macos/)。P5b 輸入法組字區整合未做 |
 
 能力宣告跟著這張表走：`capabilities` 只有在對應驗收通過後才會把 feature 設為 true。
 

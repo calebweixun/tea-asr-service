@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>zh_TW</string>
+  <key>CFBundleExecutable</key>
+  <string>TeaASRClient</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.tea-asr.client</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>TEA ASR</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <!-- Menu bar only: no Dock icon, no main window on launch. -->
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>TEA ASR 需要麥克風來做本機語音辨識。音訊只送到你自己電腦上的 TEA ASR 服務，不會離開這台機器。</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>

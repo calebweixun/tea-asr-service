@@ -8,3 +8,7 @@ benchmarks/generated/
 benchmarks/results/*.json
 docs/benchmarks/p0-report.local.md
 
+
+# Swift client build artefacts
+clients/macos/.build/
+clients/macos/build/
