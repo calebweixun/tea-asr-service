@@ -50,6 +50,13 @@ uv run tea-asr serve
 加 `--no-realtime` 會用最快速度送，通常會撞到服務的流量窗口；
 加 `--preview` 要求串流預覽（服務要以 `TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1` 啟動才會被接受）。
 
+## 設定
+
+選單列 →「設定…」可以改服務位址與 port、開關自動貼上與串流預覽，並直接測試連線。
+會議記錄每收到一段定稿就自動寫入
+`~/Library/Application Support/TEA ASR/meetings/meeting-<時間>.md`，
+所以就算 app 當掉或忘記按存檔，內容也還在。
+
 ## 設計上的取捨
 
 - **只有 `final` 會被貼出去。** partial 只更新會議視窗自己的那一行，不會去刪使用者已經打的字。
@@ -61,7 +68,6 @@ uv run tea-asr serve
 
 ## 尚未做
 
-- 沒有偏好設定視窗；server 位址目前只能用 `defaults write com.tea-asr.client serverPort -int 8327` 這類方式改。
 - 沒有輸入法層級的組字區整合（docs/06 的 P5b），所以聽寫是「定稿後貼上」，不是游標處即時修訂。
 - 沒有簽章公證，無法直接發給別人。
 - 長時間會議的記憶體與穩定性尚未實測。

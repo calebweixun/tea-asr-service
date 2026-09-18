@@ -23,6 +23,7 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     private var mode: Mode = .idle
     private var meeting: MeetingWindow?
+    private var preferences: PreferencesWindow?
     private var hotKeyRef: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -71,6 +72,13 @@ final class AppController: NSObject, NSApplicationDelegate {
         menu.addItem(previewEntry)
 
         menu.addItem(.separator())
+        let settingsEntry = NSMenuItem(
+            title: "設定…", action: #selector(showPreferences), keyEquivalent: ","
+        )
+        settingsEntry.target = self
+        menu.addItem(settingsEntry)
+
+        menu.addItem(.separator())
         let quit = NSMenuItem(title: "結束", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
     }
@@ -116,6 +124,19 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     @objc private func toggleMeeting() {
         mode == .meeting ? stopSession() : start(mode: .meeting)
+    }
+
+    @objc private func showPreferences() {
+        if preferences == nil {
+            let window = PreferencesWindow(settings: settings)
+            window.onClose = { [weak self] in
+                self?.preferences = nil
+                self?.render()
+            }
+            preferences = window
+        }
+        preferences?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func toggleAutoInsert() {

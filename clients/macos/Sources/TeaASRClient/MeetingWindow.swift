@@ -8,6 +8,20 @@ final class MeetingWindow: NSWindowController, NSWindowDelegate {
     private var partialRange: NSRange?
     private let startedAt = Date()
 
+    /// Written after every final so a crash or a forgotten window does not lose
+    /// an hour of meeting. The user still chooses where the real copy goes.
+    private lazy var autosaveURL: URL = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmm"
+        let directory = FileManager.default
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/TEA ASR/meetings")
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true
+        )
+        return directory.appendingPathComponent("meeting-\(formatter.string(from: startedAt)).md")
+    }()
+
     var onClose: (() -> Void)?
 
     convenience init() {
@@ -62,6 +76,8 @@ final class MeetingWindow: NSWindowController, NSWindowDelegate {
         statusLabel.stringValue = text
     }
 
+    var autosavePath: String { autosaveURL.path }
+
     /// A tentative line, replaced wholesale on every revision.
     func showPartial(_ text: String, startSample: Int) {
         clearPartial()
@@ -94,6 +110,12 @@ final class MeetingWindow: NSWindowController, NSWindowDelegate {
         )
         textView.textStorage?.append(attributed)
         scrollToEnd()
+        autosave()
+    }
+
+    private func autosave() {
+        try? markdown().write(to: autosaveURL, atomically: true, encoding: .utf8)
+        statusLabel.stringValue = "自動存檔：\(autosaveURL.lastPathComponent)（\(lines.count) 段）"
     }
 
     private func clearPartial() {
