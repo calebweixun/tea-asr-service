@@ -1,0 +1,628 @@
+{
+  "components": {
+    "schemas": {
+      "Capabilities": {
+        "additionalProperties": false,
+        "properties": {
+          "audio": {
+            "$ref": "#/components/schemas/CapabilityAudio"
+          },
+          "features": {
+            "$ref": "#/components/schemas/CapabilityFeatures"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/CapabilityLimits"
+          },
+          "profiles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Profiles",
+            "type": "array"
+          },
+          "protocol_version": {
+            "title": "Protocol Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "profiles",
+          "features",
+          "limits"
+        ],
+        "title": "Capabilities",
+        "type": "object"
+      },
+      "CapabilityAudio": {
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "default": 1,
+            "title": "Channels",
+            "type": "integer"
+          },
+          "format": {
+            "default": "pcm_s16le",
+            "title": "Format",
+            "type": "string"
+          },
+          "sample_rate": {
+            "default": 16000,
+            "title": "Sample Rate",
+            "type": "integer"
+          }
+        },
+        "title": "CapabilityAudio",
+        "type": "object"
+      },
+      "CapabilityFeatures": {
+        "additionalProperties": false,
+        "properties": {
+          "batch_jobs": {
+            "default": false,
+            "title": "Batch Jobs",
+            "type": "boolean"
+          },
+          "context_biasing": {
+            "default": false,
+            "title": "Context Biasing",
+            "type": "boolean"
+          },
+          "diarization": {
+            "default": false,
+            "title": "Diarization",
+            "type": "boolean"
+          },
+          "durable_revisable": {
+            "default": false,
+            "title": "Durable Revisable",
+            "type": "boolean"
+          },
+          "durable_sessions": {
+            "default": false,
+            "title": "Durable Sessions",
+            "type": "boolean"
+          },
+          "hotwords": {
+            "default": false,
+            "title": "Hotwords",
+            "type": "boolean"
+          },
+          "native_audio_streaming": {
+            "default": false,
+            "title": "Native Audio Streaming",
+            "type": "boolean"
+          },
+          "partial_transcripts": {
+            "default": false,
+            "title": "Partial Transcripts",
+            "type": "boolean"
+          },
+          "translation": {
+            "default": false,
+            "title": "Translation",
+            "type": "boolean"
+          },
+          "word_timestamps": {
+            "default": false,
+            "title": "Word Timestamps",
+            "type": "boolean"
+          }
+        },
+        "title": "CapabilityFeatures",
+        "type": "object"
+      },
+      "CapabilityLimits": {
+        "additionalProperties": false,
+        "properties": {
+          "max_continuous_sessions": {
+            "default": 0,
+            "title": "Max Continuous Sessions",
+            "type": "integer"
+          },
+          "max_frame_pcm_bytes": {
+            "default": 6400,
+            "title": "Max Frame Pcm Bytes",
+            "type": "integer"
+          },
+          "max_total_connections": {
+            "default": 4,
+            "title": "Max Total Connections",
+            "type": "integer"
+          },
+          "max_utterance_ms": {
+            "default": 30000,
+            "title": "Max Utterance Ms",
+            "type": "integer"
+          }
+        },
+        "title": "CapabilityLimits",
+        "type": "object"
+      },
+      "ErrorBody": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "title": "ErrorBody",
+        "type": "object"
+      },
+      "ErrorEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorBody"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorEnvelope",
+        "type": "object"
+      },
+      "QueueStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "max_waiting_samples": {
+            "title": "Max Waiting Samples",
+            "type": "integer"
+          },
+          "max_waiting_tasks": {
+            "title": "Max Waiting Tasks",
+            "type": "integer"
+          },
+          "waiting_samples": {
+            "title": "Waiting Samples",
+            "type": "integer"
+          },
+          "waiting_tasks": {
+            "title": "Waiting Tasks",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "waiting_tasks",
+          "waiting_samples",
+          "max_waiting_tasks",
+          "max_waiting_samples"
+        ],
+        "title": "QueueStatus",
+        "type": "object"
+      },
+      "Segment": {
+        "additionalProperties": false,
+        "properties": {
+          "end_sample": {
+            "maximum": 9007199254740991.0,
+            "minimum": 0.0,
+            "title": "End Sample",
+            "type": "integer"
+          },
+          "segment_id": {
+            "title": "Segment Id",
+            "type": "string"
+          },
+          "start_sample": {
+            "maximum": 9007199254740991.0,
+            "minimum": 0.0,
+            "title": "Start Sample",
+            "type": "integer"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "timestamp_quality": {
+            "const": "segment",
+            "default": "segment",
+            "title": "Timestamp Quality",
+            "type": "string"
+          }
+        },
+        "required": [
+          "segment_id",
+          "start_sample",
+          "end_sample",
+          "text"
+        ],
+        "title": "Segment",
+        "type": "object"
+      },
+      "StatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "model_revision": {
+            "title": "Model Revision",
+            "type": "string"
+          },
+          "model_state": {
+            "title": "Model State",
+            "type": "string"
+          },
+          "queue": {
+            "$ref": "#/components/schemas/QueueStatus"
+          },
+          "worker_generation": {
+            "title": "Worker Generation",
+            "type": "integer"
+          },
+          "worker_load_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worker Load Ms"
+          }
+        },
+        "required": [
+          "model_state",
+          "model",
+          "model_revision",
+          "worker_generation",
+          "worker_load_ms",
+          "last_error",
+          "queue"
+        ],
+        "title": "StatusResponse",
+        "type": "object"
+      },
+      "TranscriptionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "audio_ms": {
+            "title": "Audio Ms",
+            "type": "integer"
+          },
+          "inference_ms": {
+            "title": "Inference Ms",
+            "type": "integer"
+          },
+          "language": {
+            "title": "Language",
+            "type": "string"
+          },
+          "model_revision": {
+            "title": "Model Revision",
+            "type": "string"
+          },
+          "queue_ms": {
+            "title": "Queue Ms",
+            "type": "integer"
+          },
+          "raw_text": {
+            "title": "Raw Text",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "segments": {
+            "items": {
+              "$ref": "#/components/schemas/Segment"
+            },
+            "title": "Segments",
+            "type": "array"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "model_revision",
+          "text",
+          "raw_text",
+          "language",
+          "segments",
+          "audio_ms",
+          "queue_ms",
+          "inference_ms"
+        ],
+        "title": "TranscriptionResponse",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "TEA ASR Service",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Healthz Healthz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Healthz"
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "readyz_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Readyz"
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "operationId": "capabilities_v1_capabilities_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Capabilities"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Capabilities"
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "operationId": "service_status_v1_status_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Service Status"
+      }
+    },
+    "/v1/transcriptions": {
+      "post": {
+        "operationId": "transcribe_v1_transcriptions_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "sample_rate",
+            "required": true,
+            "schema": {
+              "title": "Sample Rate",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "channels",
+            "required": true,
+            "schema": {
+              "title": "Channels",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": true,
+            "schema": {
+              "title": "Format",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-request-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Request-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Transcribe"
+      }
+    }
+  }
+}

@@ -1,0 +1,1123 @@
+{
+  "$defs": {
+    "client_event": {
+      "discriminator": {
+        "mapping": {
+          "audio.commit": "#/$defs/models/AudioCommit",
+          "ping": "#/$defs/models/Ping",
+          "session.cancel": "#/$defs/models/SessionCancel",
+          "session.start": "#/$defs/models/SessionStart",
+          "session.stop": "#/$defs/models/SessionStop"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/models/SessionStart"
+        },
+        {
+          "$ref": "#/$defs/models/AudioCommit"
+        },
+        {
+          "$ref": "#/$defs/models/SessionStop"
+        },
+        {
+          "$ref": "#/$defs/models/SessionCancel"
+        },
+        {
+          "$ref": "#/$defs/models/Ping"
+        }
+      ],
+      "title": "Event"
+    },
+    "hello": {
+      "additionalProperties": false,
+      "properties": {
+        "model_state": {
+          "title": "Model State",
+          "type": "string"
+        },
+        "protocol_version": {
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "type": {
+          "const": "hello",
+          "default": "hello",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "model_state"
+      ],
+      "title": "Hello",
+      "type": "object"
+    },
+    "models": {
+      "AudioAck": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "persisted_sample": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Persisted Sample"
+          },
+          "persisted_seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Persisted Seq"
+          },
+          "received_sample": {
+            "title": "Received Sample",
+            "type": "integer"
+          },
+          "received_seq": {
+            "title": "Received Seq",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "audio.ack",
+            "default": "audio.ack",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "received_seq",
+          "received_sample"
+        ],
+        "title": "AudioAck",
+        "type": "object"
+      },
+      "AudioCommit": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "through_seq": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Through Seq",
+            "type": "integer"
+          },
+          "type": {
+            "const": "audio.commit",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "request_id",
+          "through_seq"
+        ],
+        "title": "AudioCommit",
+        "type": "object"
+      },
+      "AudioCommitted": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "reason": {
+            "enum": [
+              "committed",
+              "no_audio"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "segment_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Segment Id"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "audio.committed",
+            "default": "audio.committed",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "request_id",
+          "segment_id",
+          "reason"
+        ],
+        "title": "AudioCommitted",
+        "type": "object"
+      },
+      "AudioFormat": {
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "const": 1,
+            "title": "Channels",
+            "type": "integer"
+          },
+          "format": {
+            "const": "pcm_s16le",
+            "title": "Format",
+            "type": "string"
+          },
+          "sample_rate": {
+            "const": 16000,
+            "title": "Sample Rate",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sample_rate",
+          "channels",
+          "format"
+        ],
+        "title": "AudioFormat",
+        "type": "object"
+      },
+      "ErrorEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Request Id"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "error",
+            "default": "error",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "code",
+          "message",
+          "retryable"
+        ],
+        "title": "ErrorEvent",
+        "type": "object"
+      },
+      "FlowControl": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "reason": {
+            "enum": [
+              "normal",
+              "paused",
+              "recovering"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "send_until_sample": {
+            "title": "Send Until Sample",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "flow.control",
+            "default": "flow.control",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "send_until_sample",
+          "reason"
+        ],
+        "title": "FlowControl",
+        "type": "object"
+      },
+      "Ping": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "ping",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "request_id"
+        ],
+        "title": "Ping",
+        "type": "object"
+      },
+      "Pong": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "pong",
+            "default": "pong",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "request_id"
+        ],
+        "title": "Pong",
+        "type": "object"
+      },
+      "PreviewPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "context_biasing": {
+            "default": false,
+            "title": "Context Biasing",
+            "type": "boolean"
+          },
+          "endpoint_silence_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint Silence Ms"
+          },
+          "max_preview_audio_ms": {
+            "title": "Max Preview Audio Ms",
+            "type": "integer"
+          },
+          "max_segment_ms": {
+            "title": "Max Segment Ms",
+            "type": "integer"
+          },
+          "min_audio_ms": {
+            "title": "Min Audio Ms",
+            "type": "integer"
+          },
+          "min_interval_ms": {
+            "title": "Min Interval Ms",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "min_audio_ms",
+          "min_interval_ms",
+          "max_preview_audio_ms",
+          "endpoint_silence_ms",
+          "max_segment_ms"
+        ],
+        "title": "PreviewPolicy",
+        "type": "object"
+      },
+      "PreviewStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "reason": {
+            "enum": [
+              "normal",
+              "load",
+              "long_utterance",
+              "backend_error"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "paused"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "type": {
+            "const": "preview.status",
+            "default": "preview.status",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "state",
+          "reason"
+        ],
+        "title": "PreviewStatus",
+        "type": "object"
+      },
+      "SegmentError": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "segment_id": {
+            "title": "Segment Id",
+            "type": "string"
+          },
+          "segment_index": {
+            "title": "Segment Index",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "segment.error",
+            "default": "segment.error",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "segment_id",
+          "segment_index",
+          "code",
+          "message",
+          "retryable"
+        ],
+        "title": "SegmentError",
+        "type": "object"
+      },
+      "SegmentQueued": {
+        "additionalProperties": false,
+        "properties": {
+          "boundary": {
+            "enum": [
+              "manual",
+              "silence",
+              "max_duration",
+              "stop"
+            ],
+            "title": "Boundary",
+            "type": "string"
+          },
+          "end_sample": {
+            "title": "End Sample",
+            "type": "integer"
+          },
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "segment_id": {
+            "title": "Segment Id",
+            "type": "string"
+          },
+          "segment_index": {
+            "title": "Segment Index",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "start_sample": {
+            "title": "Start Sample",
+            "type": "integer"
+          },
+          "type": {
+            "const": "segment.queued",
+            "default": "segment.queued",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "segment_id",
+          "segment_index",
+          "start_sample",
+          "end_sample",
+          "boundary"
+        ],
+        "title": "SegmentQueued",
+        "type": "object"
+      },
+      "SegmentSkipped": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "reason": {
+            "enum": [
+              "no_speech",
+              "empty"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "segment_id": {
+            "title": "Segment Id",
+            "type": "string"
+          },
+          "segment_index": {
+            "title": "Segment Index",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "segment.skipped",
+            "default": "segment.skipped",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "segment_id",
+          "segment_index",
+          "reason"
+        ],
+        "title": "SegmentSkipped",
+        "type": "object"
+      },
+      "SessionCancel": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.cancel",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "request_id"
+        ],
+        "title": "SessionCancel",
+        "type": "object"
+      },
+      "SessionCancelled": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.cancelled",
+            "default": "session.cancelled",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "request_id"
+        ],
+        "title": "SessionCancelled",
+        "type": "object"
+      },
+      "SessionStart": {
+        "additionalProperties": false,
+        "properties": {
+          "audio": {
+            "$ref": "#/$defs/models/AudioFormat"
+          },
+          "durable": {
+            "default": false,
+            "title": "Durable",
+            "type": "boolean"
+          },
+          "language": {
+            "default": "Chinese",
+            "title": "Language",
+            "type": "string"
+          },
+          "profile": {
+            "enum": [
+              "utterance",
+              "continuous"
+            ],
+            "title": "Profile",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "transcript_mode": {
+            "default": "final_only",
+            "enum": [
+              "final_only",
+              "revisable"
+            ],
+            "title": "Transcript Mode",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.start",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "request_id",
+          "profile",
+          "audio"
+        ],
+        "title": "SessionStart",
+        "type": "object"
+      },
+      "SessionStarted": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "next_sample": {
+            "title": "Next Sample",
+            "type": "integer"
+          },
+          "next_seq": {
+            "title": "Next Seq",
+            "type": "integer"
+          },
+          "preview_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/models/PreviewPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "send_until_sample": {
+            "title": "Send Until Sample",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "transcript_mode": {
+            "title": "Transcript Mode",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.started",
+            "default": "session.started",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "request_id",
+          "profile",
+          "transcript_mode",
+          "next_seq",
+          "next_sample",
+          "send_until_sample"
+        ],
+        "title": "SessionStarted",
+        "type": "object"
+      },
+      "SessionStop": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "through_seq": {
+            "anyOf": [
+              {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Through Seq"
+          },
+          "type": {
+            "const": "session.stop",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "request_id"
+        ],
+        "title": "SessionStop",
+        "type": "object"
+      },
+      "SessionStopped": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "failed_segments": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Failed Segments",
+            "type": "array"
+          },
+          "last_seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seq"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "completed_with_errors"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.stopped",
+            "default": "session.stopped",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "request_id",
+          "last_seq",
+          "status"
+        ],
+        "title": "SessionStopped",
+        "type": "object"
+      },
+      "TranscriptFinal": {
+        "additionalProperties": false,
+        "properties": {
+          "audio_ms": {
+            "title": "Audio Ms",
+            "type": "integer"
+          },
+          "end_sample": {
+            "title": "End Sample",
+            "type": "integer"
+          },
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "inference_ms": {
+            "title": "Inference Ms",
+            "type": "integer"
+          },
+          "queue_ms": {
+            "title": "Queue Ms",
+            "type": "integer"
+          },
+          "raw_text": {
+            "title": "Raw Text",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "segment_id": {
+            "title": "Segment Id",
+            "type": "string"
+          },
+          "segment_index": {
+            "title": "Segment Index",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "start_sample": {
+            "title": "Start Sample",
+            "type": "integer"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "timestamp_quality": {
+            "const": "segment",
+            "default": "segment",
+            "title": "Timestamp Quality",
+            "type": "string"
+          },
+          "type": {
+            "const": "transcript.final",
+            "default": "transcript.final",
+            "title": "Type",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "segment_id",
+          "segment_index",
+          "revision",
+          "start_sample",
+          "end_sample",
+          "text",
+          "raw_text",
+          "audio_ms",
+          "queue_ms",
+          "inference_ms"
+        ],
+        "title": "TranscriptFinal",
+        "type": "object"
+      },
+      "TranscriptPartial": {
+        "additionalProperties": false,
+        "properties": {
+          "end_sample": {
+            "title": "End Sample",
+            "type": "integer"
+          },
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "segment_id": {
+            "title": "Segment Id",
+            "type": "string"
+          },
+          "segment_index": {
+            "title": "Segment Index",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "start_sample": {
+            "title": "Start Sample",
+            "type": "integer"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "timestamp_quality": {
+            "const": "segment",
+            "default": "segment",
+            "title": "Timestamp Quality",
+            "type": "string"
+          },
+          "type": {
+            "const": "transcript.partial",
+            "default": "transcript.partial",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "segment_id",
+          "segment_index",
+          "revision",
+          "start_sample",
+          "end_sample",
+          "text"
+        ],
+        "title": "TranscriptPartial",
+        "type": "object"
+      }
+    },
+    "server_event": {
+      "discriminator": {
+        "mapping": {
+          "audio.ack": "#/$defs/models/AudioAck",
+          "audio.committed": "#/$defs/models/AudioCommitted",
+          "error": "#/$defs/models/ErrorEvent",
+          "flow.control": "#/$defs/models/FlowControl",
+          "pong": "#/$defs/models/Pong",
+          "preview.status": "#/$defs/models/PreviewStatus",
+          "segment.error": "#/$defs/models/SegmentError",
+          "segment.queued": "#/$defs/models/SegmentQueued",
+          "segment.skipped": "#/$defs/models/SegmentSkipped",
+          "session.cancelled": "#/$defs/models/SessionCancelled",
+          "session.started": "#/$defs/models/SessionStarted",
+          "session.stopped": "#/$defs/models/SessionStopped",
+          "transcript.final": "#/$defs/models/TranscriptFinal",
+          "transcript.partial": "#/$defs/models/TranscriptPartial"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/models/SessionStarted"
+        },
+        {
+          "$ref": "#/$defs/models/AudioAck"
+        },
+        {
+          "$ref": "#/$defs/models/AudioCommitted"
+        },
+        {
+          "$ref": "#/$defs/models/SegmentQueued"
+        },
+        {
+          "$ref": "#/$defs/models/TranscriptPartial"
+        },
+        {
+          "$ref": "#/$defs/models/TranscriptFinal"
+        },
+        {
+          "$ref": "#/$defs/models/SegmentSkipped"
+        },
+        {
+          "$ref": "#/$defs/models/SegmentError"
+        },
+        {
+          "$ref": "#/$defs/models/FlowControl"
+        },
+        {
+          "$ref": "#/$defs/models/PreviewStatus"
+        },
+        {
+          "$ref": "#/$defs/models/SessionStopped"
+        },
+        {
+          "$ref": "#/$defs/models/SessionCancelled"
+        },
+        {
+          "$ref": "#/$defs/models/Pong"
+        },
+        {
+          "$ref": "#/$defs/models/ErrorEvent"
+        }
+      ],
+      "title": "Event"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TEA ASR WebSocket events"
+}
