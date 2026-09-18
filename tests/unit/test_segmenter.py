@@ -119,3 +119,18 @@ def test_a_quiet_gap_is_preferred_over_the_exact_cap() -> None:
     assert closed[0].boundary == "max_duration"
     spoken_ms = (closed[0].end_sample - closed[0].start_sample) / 16
     assert spoken_ms < config.hard_cap_ms, "it should not have waited out the grace"
+
+
+def test_segment_audio_length_always_matches_its_sample_range() -> None:
+    """A mismatch here means the model was handed audio from the wrong place."""
+
+    config = SegmenterConfig(max_segment_ms=1000, split_grace_ms=500)
+    stream = silence(400) + tone(2500) + silence(700) + tone(900) + silence(800)
+    for event in segment(stream, config):
+        if isinstance(event, SegmentClosed):
+            expected = (event.end_sample - event.start_sample) * 2
+            assert len(event.pcm) == expected, (
+                f"{event.boundary} 片段的 PCM 長度與 sample 範圍不符"
+            )
+            assert event.start_sample >= 0
+            assert event.end_sample > event.start_sample

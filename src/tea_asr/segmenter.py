@@ -277,6 +277,9 @@ class ContinuousSegmenter:
         if end is None:
             end = min(self._next_sample, self._last_speech_end + config.samples(config.tail_ms))
         end = max(end, start)
+        # A negative offset would silently slice from the end of the buffer and
+        # hand the model somebody else's audio, so clamp instead of trusting it.
+        start = max(start, self._buffer_start)
         offset = (start - self._buffer_start) * 2
         pcm = bytes(self._buffer[offset : offset + (end - start) * 2])
         self._committed_end = end
