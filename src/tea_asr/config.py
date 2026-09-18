@@ -60,12 +60,13 @@ def load_or_create_token(paths: AppPaths | None = None) -> str:
 class ServiceConfig:
     """Runtime switches that change what the service is allowed to claim.
 
-    `revisable_preview` stays off until the P2a acceptance in docs/07 passes.
-    While it is off the server answers `unsupported_option` instead of quietly
-    downgrading, and capabilities keeps `partial_transcripts=false`.
+    `revisable_preview` is on since the P2a acceptance measurements in
+    docs/benchmarks/p2a-preview-report.md. Turning it off makes the server
+    answer `unsupported_option` instead of quietly downgrading, and capabilities
+    then keeps `partial_transcripts=false`.
     """
 
-    revisable_preview: bool = False
+    revisable_preview: bool = True
     max_total_connections: int = 4
     #: Stop the worker after this long with no work, freeing Metal memory.
     #: 0 disables unloading.
@@ -77,9 +78,8 @@ class ServiceConfig:
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> ServiceConfig:
         source = os.environ if env is None else env
-        return cls(
-            revisable_preview=source.get("TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW") == "1",
-        )
+        config = cls()
+        return _apply_env(config, source)
 
     @classmethod
     def load(
@@ -102,11 +102,7 @@ class ServiceConfig:
                 )
             config = replace(config, **service)
         source = os.environ if env is None else env
-        if source.get("TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW") == "1":
-            config = replace(config, revisable_preview=True)
-        if source.get("TEA_ASR_KEEP_WARM") == "1":
-            config = replace(config, keep_warm=True)
-        return config
+        return _apply_env(config, source)
 
     @property
     def unload_after_s(self) -> int:
@@ -115,3 +111,17 @@ class ServiceConfig:
     @property
     def protocol_version(self) -> str:
         return "1.1" if self.revisable_preview else "1.0"
+
+
+def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
+    """Environment overrides the file, so a shell flag always wins."""
+
+    get = source.get  # type: ignore[attr-defined]
+    preview = get("TEA_ASR_REVISABLE_PREVIEW")
+    if preview is not None:
+        config = replace(config, revisable_preview=preview not in {"0", "false", "no"})
+    elif get("TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW") == "1":
+        config = replace(config, revisable_preview=True)
+    if get("TEA_ASR_KEEP_WARM") == "1":
+        config = replace(config, keep_warm=True)
+    return config

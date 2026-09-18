@@ -447,3 +447,51 @@ def test_continuous_keeps_receiving_audio_while_inference_runs(
         assert len(finals) == 2
         assert acks, "audio was acknowledged while the model was busy"
         assert events[-1]["status"] == "completed"
+
+
+def test_cancel_during_preview_produces_no_later_text(supervisor: FakeSupervisor) -> None:
+    """docs/07: after session.cancelled no partial or final may appear."""
+
+    supervisor.delay_s = 0.15
+    with build_client(supervisor, revisable_preview=True, vad=FakeVad()) as http, (
+        http.websocket_connect("/v1/stream", headers=AUTH)
+    ) as socket:
+        socket.receive_json()
+        socket.send_json({**CONTINUOUS, "transcript_mode": "revisable"})
+        started = socket.receive_json()
+        assert started["transcript_mode"] == "revisable"
+
+        # Speak long enough that a preview is in flight, then cancel mid-segment.
+        send_continuous(socket, [("silence", 2), ("tone", 16)])
+        socket.send_json({"type": "session.cancel", "request_id": "x1"})
+
+        events = drain_until(socket, "session.cancelled")
+        cancelled_at = next(
+            index for index, event in enumerate(events) if event["type"] == "session.cancelled"
+        )
+        after = events[cancelled_at + 1 :]
+        assert not [
+            event for event in after if event["type"] in {"transcript.partial", "transcript.final"}
+        ], "cancel 之後不得再出現任何文字"
+
+
+def test_preview_revisions_are_strictly_increasing(supervisor: FakeSupervisor) -> None:
+    supervisor.text = "測試"
+    with build_client(supervisor, revisable_preview=True, vad=FakeVad()) as http, (
+        http.websocket_connect("/v1/stream", headers=AUTH)
+    ) as socket:
+        socket.receive_json()
+        socket.send_json({**CONTINUOUS, "transcript_mode": "revisable"})
+        socket.receive_json()
+        seq = send_continuous(socket, [("silence", 2), ("tone", 20), ("silence", 12)])
+        socket.send_json({"type": "session.stop", "request_id": "s1", "through_seq": seq - 1})
+        events = drain_until(socket, "session.stopped")
+
+        by_segment: dict[str, list[int]] = {}
+        for event in events:
+            if event["type"] in {"transcript.partial", "transcript.final"}:
+                by_segment.setdefault(event["segment_id"], []).append(event["revision"])
+        assert by_segment, "應該至少有一個片段"
+        for revisions in by_segment.values():
+            assert revisions == sorted(revisions)
+            assert len(set(revisions)) == len(revisions)

@@ -22,6 +22,7 @@
 | 實作 client 或 server 通訊 | [04 API 契約](docs/04-api.md) |
 | 執行模型驗證、效能與可靠性驗收 | [05 驗證計畫](docs/05-validation.md) |
 | 看真實語料的品質實測 | [P0 品質報告](docs/benchmarks/p0-quality-report.md) |
+| 看切段與串流預覽的實測 | [P2 切段](docs/benchmarks/p2-segmentation-report.md)、[P2a 預覽](docs/benchmarks/p2a-preview-report.md) |
 | 交給 Sol 或其他模型開始開發 | [06 開發交接](docs/06-handoff.md) |
 | 理解類似系統聽寫的預覽與上下文修訂 | [07 串流修訂規劃](docs/07-contextual-streaming.md) |
 | 開 OBS 直播字幕外掛的 repo | [08 OBS 外掛規格](docs/08-obs-plugin.md) |
@@ -85,14 +86,16 @@ uv run python examples/mic_stream.py --device 2
 
 對著麥克風一句一句講，停頓一下 server 就會自己斷句並印出該段定稿——不用按任何鍵。按 Enter 結束整個 session；加 `--utterance` 則改回自己標記段落。
 
-若想看「邊說邊出字、依後文修訂」，服務要以實驗旗標啟動，client 再要求 revisable：
-
-```bash
-TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1 uv run tea-asr serve
-```
+「邊說邊出字、依後文修訂」預設就是開的，client 加 `--revisable` 即可：
 
 ```bash
 uv run python examples/mic_stream.py --device 2 --revisable
+```
+
+要關掉預覽（只要定稿）：
+
+```bash
+TEA_ASR_REVISABLE_PREVIEW=0 uv run tea-asr serve
 ```
 
 沒有麥克風也可以用合成語音試：
@@ -112,7 +115,7 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 | P0 模型可行性 | 效能通過、品質未通過 | 真實語料CER 4.92%（200筆），但私用區字元leak在73.5%的句子重現，見 [品質報告](docs/benchmarks/p0-quality-report.md) |
 | P1 短音訊API | 已實作 | HTTP transcription、健康探針、capabilities、status、bounded scheduler、typed errors、OpenAPI／WS schema |
 | P2 即時音訊 | 已實作並校準 | WS utterance與continuous皆可用：Silero VAD自動斷句、有序片段管線、推論不阻塞收音。切段參數已用真實口語校準，真人MER 3.97%，見 [P2切段報告](docs/benchmarks/p2-segmentation-report.md)。長跑與多路壓力測試尚未做 |
-| P2a 串流修訂 | 實作但未驗收 | utterance與continuous都支援；需 `TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1` 才啟用。未啟用時 `partial_transcripts=false` 且 revisable 請求回 `unsupported_option`。延遲與錯改率尚未量測 |
+| P2a 串流修訂 | 已驗收，預設開啟 | 首次可見延遲 p95 0.91 秒、final 與 final-only 完全一致、混合負載不互相阻塞，見 [P2a 報告](docs/benchmarks/p2a-preview-report.md)。`TEA_ASR_REVISABLE_PREVIEW=0` 可關閉 |
 | P3 服務管理 | 完成 | LaunchAgent install/uninstall/status、singleton lock、port 檢查、idle unload 與重新載入、TOML 設定、JSON log 輪替、關閉時 drain、睡眠喚醒偵測與 worker 健康探測 |
 | P4 長檔案與保存 | 未開始 | `/v1/jobs` 不存在，回404 |
 | P5a Mac client | 可用，未完整驗收 | 選單列 app：聽寫（定稿後貼進前景 app）與會議記錄（即時視窗＋Markdown 匯出），見 [clients/macos](clients/macos/)。P5b 輸入法組字區整合未做 |

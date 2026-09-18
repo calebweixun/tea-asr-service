@@ -86,8 +86,10 @@ tea-asr-service/
 
 **工作：** 閱讀 [07](07-contextual-streaming.md)；實作累積音訊快照、preview排程與預算、最新待跑任務合併、900ms端點grace、固定segment ID、partial完整替換與revision、final優先、負載降級。依04擴充wire 1.1；reference client能在同一row修訂文字。前文prompt独立實驗，不阻擋同片段後文修正。
 
-**狀態：實作完成、驗收未通過。** 預設關閉；`TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1` 才啟用。關閉時 `partial_transcripts=false`、`protocol_version=1.0`，revisable 請求回 `unsupported_option`。
-尚未量測07要求的首次可見延遲、錯改對／對改錯率與混合負載，因此**不得**宣告 `partial_transcripts=true`。
+**狀態：驗收通過，預設開啟。** 量測見 [P2a 報告](benchmarks/p2a-preview-report.md)：首次可見延遲 p95 0.91 秒、
+final 與 final-only 模式完全一致、混合負載下 23/23 HTTP 辨識成功且 10 段 final 全數產生。
+`TEA_ASR_REVISABLE_PREVIEW=0` 或 config.toml 可關閉，關閉時 revisable 請求回 `unsupported_option` 而非靜默降級。
+未涵蓋：單一語者與單一機器、預覽降級路徑未在真實過載下觸發。
 
 **完成條件：** 能呈現「先出字→後文修正→定稿」；partial不重複append、不改已final內容；重跑總RTF與品質、延遲符合07或有明確未達標報告；preview超載不阻塞收音與正式排程。測試同音詞、數字、否定詞、中英混用與cancel/final競態。
 
