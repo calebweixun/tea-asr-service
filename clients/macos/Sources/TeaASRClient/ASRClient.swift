@@ -93,7 +93,7 @@ final class ASRClient: NSObject {
         self.session = session
         self.task = task
         task.resume()
-        receive()
+        receive(on: task)
     }
 
     func stop() {
@@ -165,12 +165,16 @@ final class ASRClient: NSObject {
         }
     }
 
-    private func receive() {
-        task?.receive { [weak self] result in
+    private func receive(on task: URLSessionWebSocketTask) {
+        task.receive { [weak self] result in
             guard let self else { return }
             switch result {
             case .failure(let error):
                 self.queue.async {
+                    // A socket we deliberately replaced (stop, or a reconnect
+                    // while the model loads) reports a failure on the way out.
+                    // That is not the current connection's problem.
+                    guard self.task === task else { return }
                     guard !self.stopping else {
                         self.teardown()
                         return
@@ -179,9 +183,12 @@ final class ASRClient: NSObject {
                 }
             case .success(let message):
                 if case .string(let text) = message {
-                    self.queue.async { self.handle(text: text) }
+                    self.queue.async {
+                        guard self.task === task else { return }
+                        self.handle(text: text)
+                    }
                 }
-                self.receive()
+                self.receive(on: task)
             }
         }
     }
