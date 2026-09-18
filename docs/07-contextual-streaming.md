@@ -137,3 +137,12 @@ P2a ephemeral斷線即清除partial，不承諾恢復。P4 durable整合時：fi
 - P5b驗收必須由真實app互動測試，不以server JSON測試取代。尚未完成時產品只宣稱「浮動預覽修訂」。
 
 交付 `docs/benchmarks/p2a-report.md`、可重跑replay benchmark、07與04的contract測試及一個能原位替換segment的reference client。這是正式里程碑，不再只是未排期的preview想法。
+
+## 校準後的調整（2026-09-19）
+
+`max_preview_audio_ms` 由 8000 改為 **15000**。原本的 8 秒上限是為了限制預覽成本，
+但 continuous 片段在切段校準後可長到 14 秒（12 秒上限＋2 秒 grace），
+於是長句講到一半預覽就凍住，使用者看到的是「字停住了但我還在講」。
+實測 RTF 約 0.03，15 秒的預覽推論不到半秒，而且預覽排在最低優先序，
+不會排擠正式片段。依據見 [P2 切段報告](benchmarks/p2-segmentation-report.md)
+與 [P2a 預覽報告](benchmarks/p2a-preview-report.md)。

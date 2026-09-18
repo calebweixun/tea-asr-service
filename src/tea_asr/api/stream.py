@@ -59,10 +59,15 @@ MAX_PENDING_SEGMENTS = 16
 #: Errors that concern one control message, not the session as a whole.
 RECOVERABLE_CODES = frozenset({"conflict", "queue_full", "session_limit"})
 
-#: docs/07: preview waits for 800 ms of new audio and stops growing at 8 s.
+#: docs/07: preview waits for 800 ms of new audio before running again.
 PREVIEW_MIN_AUDIO_SAMPLES = 12_800
 PREVIEW_MIN_INTERVAL_S = 0.8
-PREVIEW_MAX_AUDIO_SAMPLES = 128_000
+
+#: How much audio a single preview may cover. docs/07 proposed 8 s to bound the
+#: cost, but a continuous segment now runs to 14 s, so the preview froze partway
+#: through a long sentence while the speaker was still talking. Measured RTF is
+#: ~0.03, so 15 s of preview costs well under half a second.
+PREVIEW_MAX_AUDIO_SAMPLES = 240_000
 
 #: docs/07: a revisable continuous session waits longer before closing a
 #: segment, so a late correction still lands before the final.
