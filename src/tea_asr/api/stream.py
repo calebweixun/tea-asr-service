@@ -700,6 +700,16 @@ class StreamSession:
         except (RuntimeError, WebSocketDisconnect):
             pass
 
+    async def interrupt(self, reason: str) -> None:
+        """End the session because its sample clock can no longer be trusted.
+
+        v0.1 has no resume, so pretending the recording continued across a gap
+        would be a lie about the timeline (docs/03). The client starts a new
+        session with a fresh clock instead.
+        """
+
+        await self.fail(ApiError("timeline_gap", reason))
+
     async def shutdown(self) -> None:
         for task in (self._consumer, self._preview_task):
             if task is not None:
@@ -743,6 +753,7 @@ async def run_stream(
     config: ServiceConfig,
     model_state: str,
     vad: SileroVad | None = None,
+    registry: set[StreamSession] | None = None,
 ) -> None:
     if websocket.headers.get("authorization") != f"Bearer {auth_token}":
         await websocket.close(code=1008, reason="unauthenticated")
@@ -756,6 +767,8 @@ async def run_stream(
     session = StreamSession(
         websocket, scheduler, config=config, model_state=model_state, vad=vad
     )
+    if registry is not None:
+        registry.add(session)
     writer_task = asyncio.create_task(session.writer.run())
     watchdog_task = asyncio.create_task(session.writer.watchdog())
     main_task = asyncio.create_task(session.run())
@@ -772,6 +785,8 @@ async def run_stream(
     except (WebSocketDisconnect, TimeoutError):
         pass
     finally:
+        if registry is not None:
+            registry.discard(session)
         for task in (main_task, writer_task, watchdog_task):
             task.cancel()
         # Teardown runs while the connection is already going away, so a

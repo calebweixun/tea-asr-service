@@ -19,6 +19,7 @@ ERROR_HTTP_STATUS: dict[str, int] = {
     "inference_timeout": 504,
     "protocol_error": 400,
     "conflict": 409,
+    "timeline_gap": 409,
     "internal_error": 500,
 }
 
@@ -34,10 +35,19 @@ ERROR_WS_CLOSE: dict[str, int] = {
     "queue_full": 1013,
     "session_limit": 1013,
     "slow_client": 1013,
+    # 1012 "service restart": the session cannot continue on the old clock.
+    "timeline_gap": 1012,
 }
 
 RETRYABLE_CODES = frozenset(
-    {"queue_full", "session_limit", "model_loading", "inference_failed", "inference_timeout"}
+    {
+        "queue_full",
+        "session_limit",
+        "model_loading",
+        "inference_failed",
+        "inference_timeout",
+        "timeline_gap",
+    }
 )
 
 

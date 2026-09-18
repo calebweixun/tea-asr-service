@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI, Header, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from tea_asr.api.stream import private_use_warnings, run_stream
+from tea_asr.api.stream import StreamSession, private_use_warnings, run_stream
 from tea_asr.config import ServiceConfig, load_or_create_token
 from tea_asr.errors import ApiError
 from tea_asr.logs import event
@@ -51,6 +51,31 @@ def _load_vad() -> SileroVad | None:
 
 
 logger = logging.getLogger("tea_asr.api")
+
+
+async def detect_sleep(
+    on_wake: Any,
+    *,
+    interval: float = 5.0,
+    floor: float = 10.0,
+    wall_clock: Any = time.time,
+    monotonic_clock: Any = time.monotonic,
+) -> None:
+    """Notice that the machine slept.
+
+    On Darwin `time.monotonic()` stops during sleep while `time.time()` keeps
+    going, so the divergence between them is the time spent asleep. This avoids
+    pulling in pyobjc just to hear a wake notification.
+    """
+
+    wall, mono = wall_clock(), monotonic_clock()
+    while True:
+        await asyncio.sleep(interval)
+        now_wall, now_mono = wall_clock(), monotonic_clock()
+        slept = (now_wall - wall) - (now_mono - mono)
+        wall, mono = now_wall, now_mono
+        if slept >= floor:
+            await on_wake(slept)
 
 
 class Activity:
@@ -93,6 +118,7 @@ def create_app(
     vad = _load_vad() if vad_model is _AUTO_VAD else vad_model
     activity = Activity()
     loading = asyncio.Lock()
+    sessions: set[StreamSession] = set()
 
     async def ensure_loaded() -> None:
         """Bring the worker back after an idle unload.
@@ -111,6 +137,32 @@ def create_app(
                 event(logger, "model.reloaded", state=worker.state)
             except ApiError as exc:
                 event(logger, "model.reload_failed", code=exc.code)
+
+    async def after_wake(slept: float) -> None:
+        event(logger, "service.woke", slept_s=round(slept))
+        # Any live session's sample clock now has a hole in it. There is no
+        # resume in v0.1, so the gap is reported and the session ends rather
+        # than splicing audio across it (docs/03).
+        for session in list(sessions):
+            await session.interrupt(
+                f"機器睡眠了約 {round(slept)} 秒，時間軸出現缺口；請開新的 session。"
+            )
+        if worker.state != "ready":
+            return
+        try:
+            # A real probe, not an assumption: Metal state can be broken by sleep.
+            await asyncio.wait_for(
+                scheduler.transcribe(b"\x00\x00" * 1_600, kind="interactive"), timeout=30
+            )
+            event(logger, "worker.healthy_after_wake")
+        except (ApiError, TimeoutError) as exc:
+            event(logger, "worker.unhealthy_after_wake", error=type(exc).__name__)
+            await worker.stop()
+            try:
+                await worker.start()
+                event(logger, "worker.restarted_after_wake", state=worker.state)
+            except ApiError as restart_error:
+                event(logger, "worker.restart_failed", code=restart_error.code)
 
     async def idle_watcher() -> None:
         unload_after = settings.unload_after_s
@@ -138,8 +190,10 @@ def create_app(
             # Keep the API alive so health and status can explain the failure.
             pass
         watcher = asyncio.create_task(idle_watcher())
+        sleep_watcher = asyncio.create_task(detect_sleep(after_wake))
         event(logger, "service.started", model_state=worker.state, continuous=vad is not None)
         yield
+        sleep_watcher.cancel()
         watcher.cancel()
         # Stop admitting work, then let what is already running finish.
         deadline = time.monotonic() + 30
@@ -237,6 +291,7 @@ def create_app(
                 config=settings,
                 model_state=worker.state,
                 vad=vad,
+                registry=sessions,
             )
         finally:
             activity.sessions -= 1

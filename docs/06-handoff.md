@@ -103,7 +103,10 @@ singleton 採 flock lock file ＋ port 檢查，第二份實例會被拒絕並�
 與手動同時啟動只會有一份模型）。閒置逾時卸載 worker 後 `model_state=idle_unloaded`，第一個請求觸發重新載入
 並回 503 `model_loading`（已實測，重新載入 1.7 秒、worker generation 遞增）。設定走 TOML，未知欄位直接報錯。
 log 為 JSON lines 並輪替，明確過濾 token、PCM 與逐字稿。關閉時停止收件並最多 drain 30 秒。
-**尚未做：** sleep/wake 後的 worker health 檢查與時間軸缺口標示。
+睡眠偵測比較 wall clock 與 monotonic clock 的差距（Darwin 的 monotonic 在睡眠期間不前進），
+不必為此引進 pyobjc。喚醒後對進行中的 session 送 `timeline_gap` 並 close 1012——v0.1 沒有 resume，
+把缺口兩側的音訊接在同一個 sample clock 上是說謊；接著用一次真實推論探測 worker，
+失敗才重啟，而不是假設它還活著。
 
 **完成條件：** 從新環境照文件可完成prepare→serve→client轉錄；退出／卸載不留worker；手動與登入啟動不重複；離線重啟可辨識。service命令不得靜默變更使用者登入設定，只有明確執行install才建立agent。
 

@@ -162,6 +162,7 @@ outgoing events 最多256項或1MiB，先到為準。flow/ACK可合併成最新�
 | queue_full／session_limit | 429 | start拒絕或flow pause；超配close1013 |
 | model_loading／model_unavailable | 503 | start拒絕；既有session送狀態相關error |
 | inference_failed／inference_timeout | 500／504 | segment.error；必要時worker復原 |
+| timeline_gap | 409 | 機器睡眠等原因使 sample clock 出現缺口；送 error 後close1012，client 須開新 session |
 | storage_full（v0.2） | 507 | 停止 durable ACK、error、close1013 |
 
 ## P2a／v0.1.1：可修訂預覽擴充
