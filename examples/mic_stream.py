@@ -30,6 +30,8 @@ import struct
 import subprocess
 import sys
 import threading
+import wave
+from pathlib import Path
 
 from websockets.asyncio.client import connect
 
@@ -95,6 +97,36 @@ def pump_audio(
     threading.Thread(target=reader, name="mic-reader", daemon=True).start()
 
 
+class Recording:
+    """Save exactly the audio that was sent, plus the events it produced.
+
+    The WAV is the same 16 kHz mono PCM the server received, so a saved take can
+    be replayed against different VAD settings or another checkpoint and the
+    sample ranges in the events still line up.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._wav = wave.open(str(path), "wb")  # noqa: SIM115 - closed in close()
+        self._wav.setnchannels(1)
+        self._wav.setsampwidth(2)
+        self._wav.setframerate(16_000)
+        self._events = (path.with_suffix(".events.jsonl")).open(
+            "w", encoding="utf-8"
+        )
+
+    def audio(self, chunk: bytes) -> None:
+        self._wav.writeframes(chunk)
+
+    def event(self, payload: dict) -> None:
+        self._events.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    def close(self) -> None:
+        self._wav.close()
+        self._events.close()
+
+
 def render(event: dict) -> None:
     kind = event.get("type")
     if kind == "transcript.partial":
@@ -118,6 +150,7 @@ async def run(
     transcript_mode: str,
     *,
     show_ffmpeg_errors: bool = False,
+    save_wav: Path | None = None,
 ) -> int:
     token_file = AppPaths.macos_default().token_file
     if not token_file.exists():
@@ -131,6 +164,7 @@ async def run(
     stopping = asyncio.Event()
     audio: asyncio.Queue[bytes | None] = asyncio.Queue()
     pump_audio(ffmpeg, loop, audio)
+    recording = Recording(save_wav) if save_wav else None
 
     # Ctrl-C ends the session the same way Enter does, so the last segment
     # still gets a final instead of being dropped on the floor.
@@ -171,6 +205,8 @@ async def run(
         async def receive() -> None:
             async for message in socket:
                 event = json.loads(message)
+                if recording is not None and event["type"] != "audio.ack":
+                    recording.event(event)
                 render(event)
                 if event["type"] == "session.stopped":
                     return
@@ -205,6 +241,8 @@ async def run(
                     print("\n達到 30 秒單段上限，先定稿。", file=sys.stderr)
                     break
                 await socket.send(struct.pack("<QQ", seq, sample) + chunk)
+                if recording is not None:
+                    recording.audio(chunk)
                 seq += 1
                 sample += len(chunk) // 2
                 sent_bytes += len(chunk)
@@ -225,6 +263,10 @@ async def run(
             )
         )
         await receiver
+    if recording is not None:
+        recording.close()
+        print(f"\n錄音：{recording.path}")
+        print(f"事件：{recording.path.with_suffix('.events.jsonl')}")
     return 0
 
 
@@ -242,6 +284,12 @@ def main() -> int:
     parser.add_argument(
         "--debug-ffmpeg", action="store_true", help="顯示 ffmpeg 的 stderr"
     )
+    parser.add_argument(
+        "--save-wav",
+        type=Path,
+        default=None,
+        help="把送出的音訊存成 16 kHz mono WAV，並把事件寫到同名的 .events.jsonl",
+    )
     args = parser.parse_args()
     if args.list_devices:
         return list_devices()
@@ -255,6 +303,7 @@ def main() -> int:
                 profile,
                 mode,
                 show_ffmpeg_errors=args.debug_ffmpeg,
+                save_wav=args.save_wav,
             )
         )
     except KeyboardInterrupt:
