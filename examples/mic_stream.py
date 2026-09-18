@@ -23,10 +23,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
+import signal
 import struct
 import subprocess
 import sys
+import threading
 
 from websockets.asyncio.client import connect
 
@@ -45,11 +48,13 @@ def list_devices() -> int:
     return 0
 
 
-def start_ffmpeg(device: str) -> subprocess.Popen[bytes]:
+def start_ffmpeg(device: str, *, show_errors: bool = False) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         [
             "ffmpeg",
+            "-hide_banner",
             "-loglevel", "error",
+            "-nostdin",
             "-f", "avfoundation",
             "-i", f":{device}",
             "-ac", "1",
@@ -58,8 +63,36 @@ def start_ffmpeg(device: str) -> subprocess.Popen[bytes]:
             "-",
         ],
         stdout=subprocess.PIPE,
-        stderr=None,
+        # Terminating ffmpeg mid-write makes it complain about the broken pipe,
+        # which is expected on shutdown and only confuses the reader.
+        stderr=None if show_errors else subprocess.DEVNULL,
     )
+
+
+def pump_audio(
+    ffmpeg: subprocess.Popen[bytes],
+    loop: asyncio.AbstractEventLoop,
+    queue: asyncio.Queue[bytes | None],
+) -> None:
+    """Read the capture pipe on a daemon thread.
+
+    A blocking read on the default executor keeps the interpreter alive at exit,
+    which is why Ctrl-C used to need a second press.
+    """
+
+    def reader() -> None:
+        stream = ffmpeg.stdout
+        assert stream is not None
+        try:
+            while True:
+                chunk = stream.read(FRAME_BYTES)
+                loop.call_soon_threadsafe(queue.put_nowait, chunk or None)
+                if not chunk:
+                    return
+        except (ValueError, OSError):
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    threading.Thread(target=reader, name="mic-reader", daemon=True).start()
 
 
 def render(event: dict) -> None:
@@ -78,17 +111,32 @@ def render(event: dict) -> None:
         sys.stdout.write(f"\r\033[K✗ {event.get('code')}: {event.get('message', '')}\n")
 
 
-async def run(device: str, url: str, profile: str, transcript_mode: str) -> int:
+async def run(
+    device: str,
+    url: str,
+    profile: str,
+    transcript_mode: str,
+    *,
+    show_ffmpeg_errors: bool = False,
+) -> int:
     token_file = AppPaths.macos_default().token_file
     if not token_file.exists():
         print(f"找不到 token，請先啟動服務：{token_file}", file=sys.stderr)
         return 2
     token = token_file.read_text().strip()
 
-    ffmpeg = start_ffmpeg(device)
+    ffmpeg = start_ffmpeg(device, show_errors=show_ffmpeg_errors)
     assert ffmpeg.stdout is not None
     loop = asyncio.get_running_loop()
     stopping = asyncio.Event()
+    audio: asyncio.Queue[bytes | None] = asyncio.Queue()
+    pump_audio(ffmpeg, loop, audio)
+
+    # Ctrl-C ends the session the same way Enter does, so the last segment
+    # still gets a final instead of being dropped on the floor.
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stopping.set)
 
     async with connect(url, additional_headers={"Authorization": f"Bearer {token}"}) as socket:
         hello = json.loads(await socket.recv())
@@ -127,19 +175,30 @@ async def run(device: str, url: str, profile: str, transcript_mode: str) -> int:
                 if event["type"] == "session.stopped":
                     return
 
-        async def wait_for_enter() -> None:
-            await loop.run_in_executor(None, sys.stdin.readline)
-            stopping.set()
+        def watch_stdin() -> None:
+            # EOF (piped or /dev/null stdin) is not a request to stop; only a
+            # real line is, otherwise the session would end before it began.
+            if sys.stdin.readline():
+                loop.call_soon_threadsafe(stopping.set)
+
+        threading.Thread(target=watch_stdin, name="enter-watch", daemon=True).start()
 
         receiver = asyncio.create_task(receive())
-        enter = asyncio.create_task(wait_for_enter())
+        stop_wait = asyncio.create_task(stopping.wait())
 
         seq = 0
         sample = 0
         sent_bytes = 0
         try:
-            while not stopping.is_set():
-                chunk = await loop.run_in_executor(None, ffmpeg.stdout.read, FRAME_BYTES)
+            while True:
+                nxt = asyncio.create_task(audio.get())
+                done, _ = await asyncio.wait(
+                    {nxt, stop_wait}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if nxt not in done:
+                    nxt.cancel()
+                    break
+                chunk = nxt.result()
                 if not chunk:
                     break
                 if profile != "continuous" and sent_bytes + len(chunk) > MAX_UTTERANCE_BYTES:
@@ -150,8 +209,11 @@ async def run(device: str, url: str, profile: str, transcript_mode: str) -> int:
                 sample += len(chunk) // 2
                 sent_bytes += len(chunk)
         finally:
+            stop_wait.cancel()
             ffmpeg.terminate()
-            enter.cancel()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                ffmpeg.wait(timeout=2)
+            print()
 
         await socket.send(
             json.dumps(
@@ -177,13 +239,24 @@ def main() -> int:
         action="store_true",
         help="改用 utterance profile，由你自己標記段落結束",
     )
+    parser.add_argument(
+        "--debug-ffmpeg", action="store_true", help="顯示 ffmpeg 的 stderr"
+    )
     args = parser.parse_args()
     if args.list_devices:
         return list_devices()
     mode = "revisable" if args.revisable else "final_only"
     profile = "utterance" if args.utterance else "continuous"
     try:
-        return asyncio.run(run(args.device, args.url, profile, mode))
+        return asyncio.run(
+            run(
+                args.device,
+                args.url,
+                profile,
+                mode,
+                show_ffmpeg_errors=args.debug_ffmpeg,
+            )
+        )
     except KeyboardInterrupt:
         return 130
 
