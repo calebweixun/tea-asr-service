@@ -1,6 +1,6 @@
 """混合負載：預覽在忙碌時必須降級，不能擋住收音與正式排程。
 
-    TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1 uv run tea-asr serve
+    uv run tea-asr serve
     uv run python benchmarks/mixed_load.py --wav take.wav
 
 一邊跑 revisable 的 continuous session，一邊每隔幾秒打一次 HTTP 短音訊辨識。

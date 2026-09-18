@@ -1,6 +1,6 @@
 """P2a 驗收量測：串流預覽的延遲、修訂行為與對 final 的影響。
 
-    TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1 uv run tea-asr serve
+    uv run tea-asr serve
     uv run python benchmarks/preview_eval.py --wav take.wav
 
 依 docs/07 量測：

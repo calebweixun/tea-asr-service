@@ -81,7 +81,7 @@ OBS 的 scene collection JSON（那份檔案使用者常常分享）。
 顯示模型：保留最近 N 行已定稿文字（預設 2），最後一行是目前這段（可能是 partial）。
 partial 可用較低不透明度或不同顏色，讓觀眾知道還會變。**不要為了顯示 partial 而回刪已經定稿的字。**
 
-`partial_transcripts` 目前預設 false（P2a 尚未驗收）。外掛要先讀 `hello` / `/v1/capabilities`，
+`partial_transcripts` 目前預設 true，但使用者可以關掉。外掛仍要先讀 `hello` / `/v1/capabilities`，
 只有在 server 宣告 true 時才要求 `transcript_mode="revisable"`；否則以 final-only 運作，
 不要假設一定有預覽。
 

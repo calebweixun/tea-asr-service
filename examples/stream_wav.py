@@ -73,7 +73,7 @@ def main() -> int:
     parser.add_argument(
         "--revisable",
         action="store_true",
-        help="要求串流預覽；只有在服務啟用實驗性 P2a 預覽時才會被接受",
+        help="要求串流預覽；服務把它關掉時會回 unsupported_option",
     )
     args = parser.parse_args()
     mode = "revisable" if args.revisable else "final_only"

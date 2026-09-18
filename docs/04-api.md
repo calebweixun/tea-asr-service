@@ -5,7 +5,7 @@
 > **實作狀態（2026-09-19）：** v0.1的HTTP端點與WS utterance session已實作，機器可讀契約在 [docs/api/](api/)。
 > continuous profile與Silero VAD已實作，`speech.started` 與 `boundary=silence/max_duration` 會實際送出。
 > 尚未實作：durable session、`/v1/jobs`、resume；這些選項一律回 `unsupported_option` 或404，不會靜默降級。
-> P2a的1.1擴充已實作但未通過驗收，預設關閉（`TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1` 才啟用）。
+> P2a的1.1擴充已通過驗收並預設開啟（`TEA_ASR_REVISABLE_PREVIEW=0` 可關閉），量測見 [P2a報告](benchmarks/p2a-preview-report.md)。
 
 ## 共通規則
 

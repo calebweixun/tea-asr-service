@@ -13,9 +13,8 @@
 
 改用 utterance profile 時，要自己按 Enter 標記「這段講完了」。
 
-服務若啟用了實驗性的 P2a 預覽，加 --revisable 就能看到邊說邊修訂：
+加 --revisable 可以看到邊說邊修訂（服務預設就支援）：
 
-    TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW=1 uv run tea-asr serve
     uv run python examples/mic_stream.py --device 2 --revisable
 """
 
