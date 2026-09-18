@@ -26,7 +26,7 @@ from .service import (
 from .vad import VAD_REVISION, VAD_SHA256, locate_vad, prepare_vad, sha256
 from .wire import MAX_UTTERANCE_PCM_BYTES, SAMPLE_RATE, ws_event_schema
 
-DEFAULT_BASE_URL = "http://127.0.0.1:8765"
+DEFAULT_BASE_URL = "http://127.0.0.1:8327"
 
 
 def _parser() -> argparse.ArgumentParser:

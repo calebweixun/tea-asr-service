@@ -68,7 +68,7 @@ async def run(path: Path, url: str, realtime: bool, transcript_mode: str) -> Non
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("wav", type=Path)
-    parser.add_argument("--url", default="ws://127.0.0.1:8765/v1/stream")
+    parser.add_argument("--url", default="ws://127.0.0.1:8327/v1/stream")
     parser.add_argument("--no-realtime", action="store_true")
     parser.add_argument(
         "--revisable",

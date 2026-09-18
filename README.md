@@ -63,12 +63,11 @@ uv run tea-asr service uninstall
 
 ```toml
 [service]
-port = 8766
+port = 8327
 idle_unload_s = 900   # 閒置這麼久就卸載模型釋放記憶體；0 或 keep_warm 可關閉
 keep_warm = false
 ```
 
-**預設 port 8765 在這台機器上與其他程式衝突過**，所以上面示範改用 8766。
 服務啟動時會檢查 port 與 singleton lock，第二份實例會被拒絕並告訴你是誰占著。
 
 ## 想先體驗效果
@@ -103,7 +102,7 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 
 體驗時會看到的已知限制：一直講不停會在 8 秒處硬切（`boundary="max_duration"`）、utterance 單段最多 30 秒、辨識結果仍夾帶私用區字元（會以 `private_use_characters` warning 標示，不會靜默刪掉）。VAD 參數（句尾靜音 500 ms、最短語音 160 ms、pre-roll 200 ms）是 docs/03 的初始值，還沒用真實語料校準。
 
-服務只監聽 `127.0.0.1:8765`。首次啟動會在 `~/Library/Application Support/TEA ASR/token` 建立權限0600的token。短音訊端點與WS utterance session都接受最多30秒、16 kHz mono PCM s16le；詳見 [API契約](docs/04-api.md)，機器可讀版本在 [docs/api/](docs/api/)（`uv run tea-asr export-schemas` 重新產生，測試會檢查是否過期）。本機結果見 [P0報告](docs/benchmarks/p0-report.md)。
+服務只監聽 `127.0.0.1:8327`（電話鍵盤上的 T-E-A；刻意避開 8765 那類 AI 工具常用的 port）。首次啟動會在 `~/Library/Application Support/TEA ASR/token` 建立權限0600的token。短音訊端點與WS utterance session都接受最多30秒、16 kHz mono PCM s16le；詳見 [API契約](docs/04-api.md)，機器可讀版本在 [docs/api/](docs/api/)（`uv run tea-asr export-schemas` 重新產生，測試會檢查是否過期）。本機結果見 [P0報告](docs/benchmarks/p0-report.md)。
 
 ## 實作進度
 

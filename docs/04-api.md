@@ -9,7 +9,7 @@
 
 ## 共通規則
 
-- 本機 URL：`http://127.0.0.1:8765`；WS 為 `ws://127.0.0.1:8765/v1/stream`。
+- 本機 URL：`http://127.0.0.1:8327`；WS 為 `ws://127.0.0.1:8327/v1/stream`。port 可由設定檔改，但預設刻意避開 8765 等 AI 工具常用 port。
 - 除 `/healthz`、`/readyz` 外，需要 `Authorization: Bearer <token>`。WS upgrade 時驗證。
 - IDs 為 server UUID 字串；client `request_id` 為1–64字元識別碼，同一 session 不得重用於不同操作。
 - JSON 為 UTF-8；拒絕未知 client 欄位與不支援選項，不能 silently ignore。client 可忽略未知 server 欄位，但未知 event type 要記錄診斷。

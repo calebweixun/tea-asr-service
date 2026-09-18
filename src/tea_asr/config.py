@@ -72,7 +72,7 @@ class ServiceConfig:
     idle_unload_s: int = 15 * 60
     keep_warm: bool = False
     host: str = "127.0.0.1"
-    port: int = 8765
+    port: int = 8327
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> ServiceConfig:

@@ -232,7 +232,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", default="0", help="avfoundation 音訊裝置編號")
     parser.add_argument("--list-devices", action="store_true")
-    parser.add_argument("--url", default="ws://127.0.0.1:8765/v1/stream")
+    parser.add_argument("--url", default="ws://127.0.0.1:8327/v1/stream")
     parser.add_argument("--revisable", action="store_true", help="要求 P2a 串流預覽")
     parser.add_argument(
         "--utterance",

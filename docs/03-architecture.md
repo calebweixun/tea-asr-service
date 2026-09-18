@@ -117,7 +117,7 @@ v0.2 斷線 session 保留10分鐘可 resume；超過期限 flush 已持久化�
 
 ## 本機服務與發行
 
-只 bind `127.0.0.1:8765`。即使是 localhost，仍使用隨機256-bit bearer token，設定檔權限0600；驗證 Host 與 WS Origin，預設不開 CORS。native client 可無 Origin；若有 Origin 只允許明確 allowlist。v0.1 不支援瀏覽器 token query parameter、token 放 URL 或廣泛 `*` origin。OBS browser overlay 由 bridge 提供呈現，不直接暴露 server 管理 token。
+只 bind `127.0.0.1:8327`。即使是 localhost，仍使用隨機256-bit bearer token，設定檔權限0600；驗證 Host 與 WS Origin，預設不開 CORS。native client 可無 Origin；若有 Origin 只允許明確 allowlist。v0.1 不支援瀏覽器 token query parameter、token 放 URL 或廣泛 `*` origin。OBS browser overlay 由 bridge 提供呈現，不直接暴露 server 管理 token。
 
 HTTP 健康探針只回最小狀態；其餘需授權。log 不包含 bearer、PCM、prompt、逐字稿或任意使用者檔案路徑。關閉預設 telemetry，模型 prepare 才連外取得固定資產。
 

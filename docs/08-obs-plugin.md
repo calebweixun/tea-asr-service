@@ -59,7 +59,7 @@ Ring buffer 滿了就丟最舊的並累計 drop 計數，在設定視窗顯示�
 | 用 QTcpSocket 自己實作 RFC 6455 | 可行且無新依賴，但 framing／ping／close 要自己測對 |
 | 隨外掛 bundle QtWebSockets.framework | 要處理 rpath 與公證，最重 |
 
-協定完全依 [04](04-api.md)：`ws://127.0.0.1:8765/v1/stream`、`Authorization: Bearer <token>`、
+協定完全依 [04](04-api.md)：`ws://127.0.0.1:8327/v1/stream`、`Authorization: Bearer <token>`、
 `profile="continuous"`、16-byte binary header（uint64 LE `seq` ＋ uint64 LE `start_sample`）、
 單一 frame PCM 上限 6,400 bytes。**務必遵守 `send_until_sample` 流控窗口**，超出會被 server 視為
 protocol error 並關閉連線。
@@ -142,7 +142,7 @@ obs_output_output_caption_text2(output, text, display_duration);
 
 從 [obsproject/obs-plugintemplate](https://github.com/obsproject/obs-plugintemplate) 開始，沿用它的
 `buildspec.json` 與 CMake presets。macOS 官方流程需要**完整 Xcode**（template 的 macOS preset 使用
-Xcode generator）；本機目前只有 Command Line Tools，開工前先裝 Xcode 並 `xcode-select --switch`。
+Xcode generator）。本機已備妥：Xcode 27.0，`xcode-select -p` 指向 `/Applications/Xcode.app/Contents/Developer`。
 
 外掛裝到 `~/Library/Application Support/obs-studio/plugins/`。發給別人要 codesign ＋ notarize，
 否則 Gatekeeper 會擋。CI 用 template 附的 workflow。

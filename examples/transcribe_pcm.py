@@ -30,7 +30,7 @@ def read_pcm(path: Path) -> bytes:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("wav", type=Path)
-    parser.add_argument("--url", default="http://127.0.0.1:8765")
+    parser.add_argument("--url", default="http://127.0.0.1:8327")
     parser.add_argument("--request-id", default="example-1")
     args = parser.parse_args()
 
