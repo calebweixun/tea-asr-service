@@ -93,16 +93,20 @@ final class ASRClient: NSObject {
 
     func stop() {
         queue.async {
-            guard let task = self.task, !self.stopping else { return }
+            guard !self.stopping else { return }
+            // Set this first: while waiting for the model to load there is no
+            // task yet, and a pending reconnect would otherwise ignore the stop.
             self.stopping = true
+            guard self.task != nil else {
+                self.teardown()
+                return
+            }
             let through: Any = self.nextSeq == 0 ? NSNull() : Int(self.nextSeq - 1)
-            let payload: [String: Any] = [
+            self.send(json: [
                 "type": "session.stop",
                 "request_id": "mac-stop",
                 "through_seq": through,
-            ]
-            self.send(json: payload)
-            _ = task
+            ])
         }
     }
 
@@ -203,7 +207,8 @@ final class ASRClient: NSObject {
                 task?.cancel(with: .normalClosure, reason: nil)
                 teardown(keepState: true)
                 queue.asyncAfter(deadline: .now() + Self.modelWaitDelay) { [weak self] in
-                    self?.reallyConnect()
+                    guard let self, !self.stopping else { return }
+                    self.reallyConnect()
                 }
                 return
             }
@@ -267,6 +272,7 @@ final class ASRClient: NSObject {
     }
 
     private func teardown(keepState: Bool = false) {
+        task?.cancel(with: .normalClosure, reason: nil)
         task = nil
         session?.invalidateAndCancel()
         session = nil

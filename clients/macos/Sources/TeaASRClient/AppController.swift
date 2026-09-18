@@ -266,7 +266,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             Unmanaged.passUnretained(self).toOpaque(),
             nil
         )
-        var id = EventHotKeyID(signature: OSType(0x54454153), id: 1)  // 'TEAS'
+        let id = EventHotKeyID(signature: OSType(0x54454153), id: 1)  // 'TEAS'
         RegisterEventHotKey(
             UInt32(kVK_ANSI_D),
             UInt32(cmdKey | optionKey),
@@ -275,7 +275,6 @@ final class AppController: NSObject, NSApplicationDelegate {
             0,
             &hotKeyRef
         )
-        _ = id
     }
 
     private func alert(_ title: String, _ message: String) {
