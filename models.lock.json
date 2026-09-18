@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "asr": {
+    "repo_id": "Alkd/TEA-ASR-1.1-MLX-4bit",
+    "revision": "caee57a908b6d64be08a6462c7a21ececbd4d7cb",
+    "mlx_audio": "0.4.5",
+    "files": {
+      "README.md": "41a8aae78658c0733c2013083f74acfb0ed6ffd87cc92cb8058ccc34b7bbd076",
+      "added_tokens.json": "de40784677cbd1843cabe5fbee078c7e042cd0b62155f0810af5a13842e5722a",
+      "chat_template.jinja": "a103579066642f0e035873f12de6046a1bbc909a7a2833732fda9fd6bc7c528d",
+      "config.json": "3d4d8f6fa911a32e5f80305ca6a33bf9fed1687f220e5ea577f942a66c1ab8bb",
+      "generation_config.json": "c82553802c5a4871569fcc8f155b529a7188a2abc71e2616b029fb4494fa26ff",
+      "minimal_injection_deployability.json": "4937fa4b09695e5bac6d1fc8be5b106da54682fd2a538aee5c8f9bc55e5ae4c6",
+      "model.safetensors": "c9e764858d4bda42e8d7b2053535f2ca8562f7c210b6b66adc4f943fffc4572f",
+      "model.safetensors.index.json": "d69aae84ae59a7c5a87edb1f2a06a5a6a3d22b51494c27fb19e7c53936eed1ba",
+      "preprocessor_config.json": "0443a40d411d3caad769e7b59971fa6eae75926ed4b7e337e60da909eb38c1f7",
+      "special_tokens_map.json": "7b376c510ccf9d88bb9bbee41dfc5052122e16e0dec1124a8d8983c59259a9f3",
+      "tokenizer.json": "cd76abfab7f2edf5346061f556310d8c06e28e067c99c176fbc2ba304a14b1df",
+      "tokenizer_config.json": "7f335cbd3b6f1036808e23613c1c1919f8d5570c11cb55420e5094e036f45669"
+    }
+  },
+  "vad": {
+    "status": "not-yet-selected",
+    "reason": "P0 validates ASR first; the ONNX asset will be pinned before P2"
+  }
+}
