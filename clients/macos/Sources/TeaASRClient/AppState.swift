@@ -196,9 +196,26 @@ final class AppState {
             case "failed":
                 return .failed(Self.workerIssue(from: serviceSnapshot.status, retryable: false))
             case "ready":
-                return serviceSnapshot.readyzOK ? .ready : .loading
+                if serviceSnapshot.readyzOK {
+                    return .ready
+                }
+                return .retryable(
+                    ConnectionIssue(
+                        code: "service_not_ready",
+                        message: "服務尚未就緒，請稍候。",
+                        retryable: true,
+                        closeCode: nil
+                    )
+                )
             default:
-                return .loading
+                return .failed(
+                    ConnectionIssue(
+                        code: "unknown_worker_state",
+                        message: "服務回報未知的 worker 狀態，請重新啟動服務。",
+                        retryable: false,
+                        closeCode: nil
+                    )
+                )
             }
         }
     }
@@ -207,30 +224,66 @@ final class AppState {
         let fallback = retryable
             ? "ASR worker 正在恢復，請稍候。"
             : "ASR worker 無法使用，請檢查服務設定或重新啟動服務。"
-        let message: String
-        if let raw = status.lastError {
-            let normalized = raw
-                .replacingOccurrences(of: "\n", with: " ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let lowercased = normalized.lowercased()
-            if normalized.isEmpty
-                || lowercased.contains("token")
-                || lowercased.contains("authorization")
-                || lowercased.contains("bearer")
-            {
-                message = fallback
-            } else {
-                message = String(normalized.prefix(160))
-            }
-        } else {
-            message = fallback
-        }
+        let message = safeWorkerMessage(from: status.lastError) ?? fallback
         return ConnectionIssue(
             code: retryable ? "worker_recovering" : "model_unavailable",
             message: message,
             retryable: retryable,
             closeCode: nil
         )
+    }
+
+    /// `last_error` is a diagnostic field, not a safe-to-display error
+    /// envelope. The worker currently emits the allow-listed prefixes below;
+    /// anything else may be a raw worker response or a future format carrying
+    /// credentials, so keep it out of the menu and meeting window.
+    private static func safeWorkerMessage(from raw: String?) -> String? {
+        guard var normalized = raw?
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !normalized.isEmpty
+        else {
+            return nil
+        }
+
+        let lowercased = normalized.lowercased()
+        let sensitiveMarkers = [
+            "token",
+            "authorization",
+            "bearer",
+            "password",
+            "secret",
+            "api_key",
+            "api-key",
+            "cookie",
+            "set-cookie",
+            "response body",
+            "response_body",
+            "http body",
+            "http_body",
+            "<html",
+            "<!doctype",
+            "{\"",
+            "[{"
+        ]
+        guard !sensitiveMarkers.contains(where: { lowercased.contains($0) }) else {
+            return nil
+        }
+
+        let safePrefixes = [
+            "Worker did not become ready:",
+            "Worker connection lost:",
+            "Worker exited with code ",
+            "Inference timed out",
+            "Worker restarted "
+        ]
+        guard safePrefixes.contains(where: { normalized.hasPrefix($0) }) else {
+            return nil
+        }
+
+        normalized = String(normalized.prefix(160))
+        return normalized.isEmpty ? nil : normalized
     }
 
     private func notify() {

@@ -1,5 +1,28 @@
 import Foundation
 
+/// Serial-queue owned token used to reject callbacks from a replaced socket.
+/// Keeping this tiny policy value separate makes the stale-callback contract
+/// unit-testable without requiring a live URLSession server.
+struct SessionGeneration {
+    private(set) var current: UInt64 = 0
+
+    @discardableResult
+    mutating func begin() -> UInt64 {
+        current &+= 1
+        return current
+    }
+
+    @discardableResult
+    mutating func invalidate() -> UInt64 {
+        current &+= 1
+        return current
+    }
+
+    func accepts(_ token: UInt64) -> Bool {
+        token == current
+    }
+}
+
 /// Drives one continuous session against the local service.
 ///
 /// Everything the wire contract requires of a client lives here: the flow
@@ -28,11 +51,16 @@ final class ASRClient: NSObject {
     private var sendUntilSample: UInt64 = 0
     private var started = false
     private var stopping = false
+    /// Monotonically identifies the socket/session currently owned by this
+    /// client. URLSession can still deliver callbacks after cancellation, so
+    /// task identity alone is not enough when a new task is created quickly.
+    private var generation = SessionGeneration()
+    private var pendingConnectPreview: Bool?
 
-    /// Audio that arrived while the flow window was closed. Bounded: the mic
-    /// keeps producing, so an unbounded queue would grow without limit.
-    private var backlog: [Data] = []
-    private let backlogLimit = 150  // 15 s at 100 ms per frame
+    /// Audio that arrived before the session became ready, or while the flow
+    /// window was closed. Bounded: an unavailable service must not grow memory
+    /// without limit, and a full buffer is reported instead of dropping audio.
+    private var backlog = AudioPreRollBuffer(capacity: 150)  // 15 s at 100 ms
     private var wantsPreview = false
     private var modelWaits = 0
 
@@ -64,18 +92,26 @@ final class ASRClient: NSObject {
         queue.async {
             self.wantsPreview = wantsPreview
             self.modelWaits = 0
+            if self.stopping {
+                // A caller may request the next session while the previous
+                // one is draining its final transcript. Defer it until the
+                // server's session.stopped (or the socket failure) completes
+                // the old generation.
+                self.pendingConnectPreview = wantsPreview
+                return
+            }
             self.reallyConnect()
         }
     }
 
     private func reallyConnect() {
         guard task == nil, !stopping else { return }
+        pendingConnectPreview = nil
         stopping = false
         started = false
         nextSeq = 0
         nextSample = 0
         sendUntilSample = 0
-        backlog.removeAll()
         state = .connecting
 
         let token: String
@@ -97,10 +133,11 @@ final class ASRClient: NSObject {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         let session = URLSession(configuration: .ephemeral)
         let task = session.webSocketTask(with: request)
+        let generation = self.generation.begin()
         self.session = session
         self.task = task
         task.resume()
-        receive(on: task)
+        receive(on: task, generation: generation)
     }
 
     func stop() {
@@ -118,7 +155,7 @@ final class ASRClient: NSObject {
                 "type": "session.stop",
                 "request_id": "mac-stop",
                 "through_seq": through,
-            ])
+            ], task: self.task, generation: self.generation.current)
         }
     }
 
@@ -132,13 +169,13 @@ final class ASRClient: NSObject {
     /// Hand one frame of 16 kHz mono PCM16 to the session.
     func send(pcm: Data) {
         queue.async {
-            guard self.started, !self.stopping else { return }
-            self.backlog.append(pcm)
-            if self.backlog.count > self.backlogLimit {
+            guard !self.stopping else { return }
+            guard self.backlog.append(pcm) else {
                 // Dropping frames here would splice the audio while the sample
                 // clock kept counting, so the server would see a continuous
                 // timeline that never happened. docs/04 forbids that, so the
-                // session ends loudly instead.
+                // session ends loudly instead. This also covers a model that
+                // remains loading before `session.started`.
                 self.fail(
                     ConnectionIssue(
                         code: "flow_control_backlog",
@@ -155,10 +192,16 @@ final class ASRClient: NSObject {
 
     private func drain() {
         guard let task else { return }
-        while let frame = backlog.first {
+        let generation = self.generation.current
+        while let frame = backlog.removeFirst() {
             let samples = UInt64(frame.count / 2)
-            guard nextSample + samples <= sendUntilSample else { return }
-            backlog.removeFirst()
+            guard nextSample + samples <= sendUntilSample else {
+                var pending = AudioPreRollBuffer(capacity: backlog.capacity)
+                _ = pending.append(frame)
+                for queued in backlog.frames { _ = pending.append(queued) }
+                backlog = pending
+                return
+            }
             let message = Wire.frame(seq: nextSeq, startSample: nextSample, pcm: frame)
             nextSeq += 1
             nextSample += samples
@@ -171,19 +214,28 @@ final class ASRClient: NSObject {
                     closeCode: nil
                 )
                 self.queue.async { [weak self] in
-                    guard let self, self.task === task else { return }
+                    guard
+                        let self,
+                        self.task === task,
+                        self.generation.accepts(generation)
+                    else { return }
                     self.fail(issue)
                 }
             }
         }
     }
 
-    private func send(json: [String: Any]) {
+    private func send(
+        json: [String: Any],
+        task expectedTask: URLSessionWebSocketTask? = nil,
+        generation expectedGeneration: UInt64? = nil
+    ) {
         guard
-            let task,
+            let task = expectedTask ?? self.task,
             let data = try? JSONSerialization.data(withJSONObject: json),
             let text = String(data: data, encoding: .utf8)
         else { return }
+        let generation = expectedGeneration ?? self.generation.current
         task.send(.string(text)) { [weak self] error in
             guard let self, let error else { return }
             let issue = ConnectionIssue(
@@ -193,13 +245,17 @@ final class ASRClient: NSObject {
                 closeCode: nil
             )
             self.queue.async { [weak self] in
-                guard let self, self.task === task else { return }
+                guard
+                    let self,
+                    self.task === task,
+                    self.generation.accepts(generation)
+                else { return }
                 self.fail(issue)
             }
         }
     }
 
-    private func receive(on task: URLSessionWebSocketTask) {
+    private func receive(on task: URLSessionWebSocketTask, generation: UInt64) {
         task.receive { [weak self] result in
             guard let self else { return }
             switch result {
@@ -208,7 +264,7 @@ final class ASRClient: NSObject {
                     // A socket we deliberately replaced (stop, or a reconnect
                     // while the model loads) reports a failure on the way out.
                     // That is not the current connection's problem.
-                    guard self.task === task else { return }
+                    guard self.task === task, self.generation.accepts(generation) else { return }
                     guard !self.stopping else {
                         self.teardown()
                         return
@@ -221,13 +277,14 @@ final class ASRClient: NSObject {
                     )
                 }
             case .success(let message):
-                if case .string(let text) = message {
-                    self.queue.async {
-                        guard self.task === task else { return }
+                self.queue.async {
+                    guard self.task === task, self.generation.accepts(generation) else { return }
+                    if case .string(let text) = message {
                         self.handle(text: text)
                     }
+                    guard self.task === task, self.generation.accepts(generation) else { return }
+                    self.receive(on: task, generation: generation)
                 }
-                self.receive(on: task)
             }
         }
     }
@@ -263,9 +320,15 @@ final class ASRClient: NSObject {
                 modelWaits += 1
                 state = .loadingModel
                 task?.cancel(with: .normalClosure, reason: nil)
-                teardown(keepState: true)
+                teardown(keepState: true, preserveBacklog: true)
+                let waitingGeneration = self.generation.current
                 queue.asyncAfter(deadline: .now() + Self.modelWaitDelay) { [weak self] in
-                    guard let self, !self.stopping else { return }
+                    guard
+                        let self,
+                        !self.stopping,
+                        self.task == nil,
+                        self.generation.accepts(waitingGeneration)
+                    else { return }
                     self.reallyConnect()
                 }
                 return
@@ -277,7 +340,10 @@ final class ASRClient: NSObject {
             }
             sendUntilSample = UInt64(started.sendUntilSample)
             self.started = true
-            let origin = Date()
+            let bufferedSamples = backlog.frames.reduce(UInt64(0)) { total, frame in
+                total + UInt64(frame.count / 2)
+            }
+            let origin = Date().addingTimeInterval(-Double(bufferedSamples) / Double(Wire.sampleRate))
             DispatchQueue.main.async { [weak self] in self?.onSessionOrigin?(origin) }
             state = .listening(
                 protocolVersion: started.transcriptMode == "revisable" ? "1.1" : "1.0",
@@ -335,17 +401,34 @@ final class ASRClient: NSObject {
 
     private func fail(_ issue: ConnectionIssue) {
         state = .failed(issue)
+        pendingConnectPreview = nil
+        stopping = false
         task?.cancel(with: .normalClosure, reason: nil)
         teardown(keepState: true)
     }
 
-    private func teardown(keepState: Bool = false) {
+    private func teardown(keepState: Bool = false, preserveBacklog: Bool = false) {
+        // Invalidate callbacks from the socket being torn down before clearing
+        // the references. A new connection can then safely use the same client
+        // without an old receive/send completion changing its state.
+        generation.invalidate()
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
         session?.invalidateAndCancel()
         session = nil
         started = false
-        backlog.removeAll()
-        if !keepState { state = .idle }
+        if !preserveBacklog {
+            backlog.removeAll()
+        }
+        if !keepState {
+            state = .idle
+            stopping = false
+            if let wantsPreview = pendingConnectPreview {
+                pendingConnectPreview = nil
+                self.wantsPreview = wantsPreview
+                modelWaits = 0
+                queue.async { [weak self] in self?.reallyConnect() }
+            }
+        }
     }
 }

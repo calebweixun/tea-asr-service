@@ -247,6 +247,55 @@ final class M0StateTests: XCTestCase {
             return XCTFail("failed worker should remain a failure")
         }
         XCTAssertFalse(redactedIssue.message.contains("secret-token"))
+
+        let responseBody = AppState.displayStatus(
+            clientState: .idle,
+            mode: .idle,
+            serviceSnapshot: makeSnapshot(
+                modelState: "failed",
+                lastError: "Worker did not become ready: HTTP 502 response body: <html>upstream failure</html>"
+            ),
+            serviceReachable: true,
+            serviceError: nil
+        )
+        guard case .failed(let responseBodyIssue) = responseBody else {
+            return XCTFail("failed worker should remain a failure")
+        }
+        XCTAssertEqual(responseBodyIssue.message, "ASR worker 無法使用，請檢查服務設定或重新啟動服務。")
+    }
+
+    func testAppStateDoesNotTreatUnknownOrInconsistentWorkerStateAsLoading() {
+        let unknown = AppState.displayStatus(
+            clientState: .idle,
+            mode: .idle,
+            serviceSnapshot: makeSnapshot(modelState: "draining", lastError: nil),
+            serviceReachable: true,
+            serviceError: nil
+        )
+        guard case .failed(let unknownIssue) = unknown else {
+            return XCTFail("unknown worker state should be explicit failure")
+        }
+        XCTAssertEqual(unknownIssue.code, "unknown_worker_state")
+
+        // `makeSnapshot` marks ready as readyz=true; construct the mismatch
+        // explicitly so the test documents the contract boundary.
+        let notReady = ServiceSnapshot(
+            healthzOK: true,
+            readyzOK: false,
+            readyState: "recovering",
+            status: inconsistentSnapshotStatus(),
+            capabilities: makeCapabilities()
+        )
+        guard case .retryable(let notReadyIssue) = AppState.displayStatus(
+            clientState: .idle,
+            mode: .idle,
+            serviceSnapshot: notReady,
+            serviceReachable: true,
+            serviceError: nil
+        ) else {
+            return XCTFail("ready worker with non-ready readiness should be retryable")
+        }
+        XCTAssertEqual(notReadyIssue.code, "service_not_ready")
     }
 
     private func makeSnapshot(modelState: String, lastError: String?) -> ServiceSnapshot {
@@ -270,28 +319,51 @@ final class M0StateTests: XCTestCase {
                     maxWaitingSamples: 960000
                 )
             ),
-            capabilities: Capabilities(
-                protocolVersion: "1.1",
-                audio: CapabilityAudio(sampleRate: 16000, channels: 1, format: "pcm_s16le"),
-                profiles: ["continuous"],
-                features: CapabilityFeatures(
-                    nativeAudioStreaming: false,
-                    partialTranscripts: true,
-                    wordTimestamps: false,
-                    translation: false,
-                    diarization: false,
-                    hotwords: false,
-                    contextBiasing: false,
-                    durableSessions: false,
-                    durableRevisable: false,
-                    batchJobs: false
-                ),
-                limits: CapabilityLimits(
-                    maxFramePCMBytes: 6400,
-                    maxUtteranceMs: 30000,
-                    maxContinuousSessions: 2,
-                    maxTotalConnections: 4
-                )
+            capabilities: makeCapabilities()
+        )
+    }
+
+    private func inconsistentSnapshotStatus() -> ServerStatus {
+        ServerStatus(
+            modelState: "ready",
+            model: "model",
+            modelRevision: "revision",
+            workerGeneration: 1,
+            workerLoadMs: nil,
+            lastError: nil,
+            idleS: 0,
+            activeSessions: 0,
+            queue: QueueStatus(
+                waitingTasks: 0,
+                waitingSamples: 0,
+                maxWaitingTasks: 16,
+                maxWaitingSamples: 960000
+            )
+        )
+    }
+
+    private func makeCapabilities() -> Capabilities {
+        Capabilities(
+            protocolVersion: "1.1",
+            audio: CapabilityAudio(sampleRate: 16000, channels: 1, format: "pcm_s16le"),
+            profiles: ["continuous"],
+            features: CapabilityFeatures(
+                nativeAudioStreaming: false,
+                partialTranscripts: true,
+                wordTimestamps: false,
+                translation: false,
+                diarization: false,
+                hotwords: false,
+                contextBiasing: false,
+                durableSessions: false,
+                durableRevisable: false,
+                batchJobs: false
+            ),
+            limits: CapabilityLimits(
+                maxFramePCMBytes: 6400,
+                maxUtteranceMs: 30000,
+                maxContinuousSessions: 2,
+                maxTotalConnections: 4
             )
         )
     }

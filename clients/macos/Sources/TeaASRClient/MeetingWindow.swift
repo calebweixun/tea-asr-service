@@ -1,9 +1,27 @@
 import AppKit
 
+enum MeetingSessionPresentation {
+    static func status(for state: ASRClient.State) -> String {
+        switch state {
+        case .idle:
+            return "已停止"
+        case .connecting:
+            return "正在連線…音訊暫存中"
+        case .loadingModel:
+            return "模型載入中…音訊暫存中"
+        case .listening:
+            return "聆聽中，可以開始說話"
+        case .failed(let issue):
+            return "錯誤：\(issue.message)"
+        }
+    }
+}
+
 /// Live transcript for meeting notes, with source timestamps and Markdown export.
 final class MeetingWindow: NSWindowController, NSWindowDelegate {
     private let textView = NSTextView()
     private let statusLabel = NSTextField(labelWithString: "準備中…")
+    private let audioLabel = NSTextField(labelWithString: "音訊：尚未開始")
     private var lines: [(spokenAt: Date, text: String)] = []
     private var partialRange: NSRange?
     private var gaps: [(at: Date, reason: String)] = []
@@ -54,10 +72,13 @@ final class MeetingWindow: NSWindowController, NSWindowDelegate {
         save.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.textColor = .secondaryLabelColor
+        audioLabel.translatesAutoresizingMaskIntoConstraints = false
+        audioLabel.textColor = .secondaryLabelColor
 
         let content = NSView()
         content.addSubview(scroll)
         content.addSubview(statusLabel)
+        content.addSubview(audioLabel)
         content.addSubview(save)
         window.contentView = content
 
@@ -65,9 +86,11 @@ final class MeetingWindow: NSWindowController, NSWindowDelegate {
             scroll.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            scroll.bottomAnchor.constraint(equalTo: save.topAnchor, constant: -12),
+            scroll.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -8),
             statusLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            statusLabel.centerYAnchor.constraint(equalTo: save.centerYAnchor),
+            statusLabel.bottomAnchor.constraint(equalTo: audioLabel.topAnchor, constant: -3),
+            audioLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            audioLabel.bottomAnchor.constraint(equalTo: save.topAnchor, constant: -12),
             save.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
             save.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
         ])
@@ -75,6 +98,24 @@ final class MeetingWindow: NSWindowController, NSWindowDelegate {
 
     func setStatus(_ text: String) {
         statusLabel.stringValue = text
+    }
+
+    func setSessionState(_ state: ASRClient.State) {
+        setStatus(MeetingSessionPresentation.status(for: state))
+    }
+
+    func setAudioDiagnostics(_ diagnostics: AudioDiagnostics) {
+        let device = diagnostics.inputDeviceName ?? "找不到預設輸入裝置"
+        let frames = diagnostics.hasFrames ? "有 frame" : "尚無 frame"
+        let level = diagnostics.rms.map { String(format: "RMS %.3f", $0) } ?? "RMS --"
+        var text = "音訊：\(device) · \(frames) · \(level) · 已送 \(diagnostics.framesProduced) frame"
+        if diagnostics.framesDropped > 0 {
+            text += " · 丟棄 \(diagnostics.framesDropped)"
+        }
+        if let error = diagnostics.lastError {
+            text += " · \(error)"
+        }
+        audioLabel.stringValue = text
     }
 
     var autosavePath: String { autosaveURL.path }
