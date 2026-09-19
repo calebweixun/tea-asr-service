@@ -17,6 +17,22 @@ def test_defaults_match_what_has_been_accepted() -> None:
     assert config.revisable_preview is True
     assert config.protocol_version == "1.1"
     assert config.unload_after_s == 15 * 60
+    # docs/benchmarks/pua-bf16-ab-report.md: the deployed MLX 4bit checkpoint
+    # leaks PUA characters into 70% of sentences, so filtering ships on.
+    assert config.filter_pua is True
+
+
+def test_pua_filter_can_be_turned_off_explicitly() -> None:
+    config = ServiceConfig.load(env={"TEA_ASR_FILTER_PUA": "0"})
+    assert config.filter_pua is False
+
+
+def test_pua_filter_environment_wins_over_the_file(tmp_path: Path) -> None:
+    paths = app_paths(tmp_path)
+    paths.support.mkdir(parents=True)
+    paths.config_file.write_text("[service]\nfilter_pua = true\n")
+    config = ServiceConfig.load(paths, env={"TEA_ASR_FILTER_PUA": "0"})
+    assert config.filter_pua is False
 
 
 def test_preview_can_be_turned_off_explicitly() -> None:

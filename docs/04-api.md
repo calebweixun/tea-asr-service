@@ -15,7 +15,13 @@
 - JSON 為 UTF-8；拒絕未知 client 欄位與不支援選項，不能 silently ignore。client 可忽略未知 server 欄位，但未知 event type 要記錄診斷。
 - 所有 duration/timing 欄位單位明示；`start_sample`／`end_sample` 採16kHz來源時間軸、左閉右開。
 - `audio_ms` 是送入辨識片段的樣本數／16；`queue_ms` 是等待 scheduler；`inference_ms` 是 worker 實際耗時。不得混用。
-- 時間戳是 segment 範圍，不是逐字對齊。`raw_text` 保留原始辨識；v0.1 `text=raw_text`。
+- 時間戳是 segment 範圍，不是逐字對齊。`raw_text` 保留原始辨識；`text` 預設會過濾掉
+  Unicode 私用區字元（U+E000–U+F8FF，`filter_pua` 設定／`TEA_ASR_FILTER_PUA` 可關閉），
+  因為目前部署的 4bit 量化模型會把這些字元插入正確文字之間（見
+  [PUA vs BF16 A/B 報告](benchmarks/pua-bf16-ab-report.md)）；關閉過濾時 `text=raw_text`。
+  `transcript.partial` 與 `transcript.final` 套用同一份過濾，不會不一致。若整段辨識結果
+  過濾後變成空字串，final 一律以 `segment.skipped`（`reason=empty`）取代，不送出空的
+  `transcript.final`，跟「完全沒聽到聲音」的 `reason=no_speech` 區分開來。
 - 所有 error 有 `code`、可讀 `message`、`retryable`、`request_id`（若可取得）；內部 traceback 不回 client。
 
 ```json

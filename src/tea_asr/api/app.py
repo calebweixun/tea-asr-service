@@ -13,7 +13,12 @@ from fastapi import Depends, FastAPI, Header, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from tea_asr.api.stream import StreamSession, private_use_warnings, run_stream
+from tea_asr.api.stream import (
+    StreamSession,
+    filter_private_use_characters,
+    private_use_warnings,
+    run_stream,
+)
 from tea_asr.config import ServiceConfig, load_or_create_token
 from tea_asr.errors import ApiError
 from tea_asr.logs import event
@@ -339,16 +344,27 @@ def create_app(
         response, queue_ms = await scheduler.transcribe(
             bytes(body), language="Chinese", kind="interactive"
         )
-        text = str(response["text"])
+        raw_text = str(response["text"])
         audio_samples = len(body) // 2
-        warnings = private_use_warnings(text)
-        if not text:
+        warnings = private_use_warnings(raw_text)
+        if not raw_text:
             warnings.insert(0, "no_speech")
+            text = raw_text
+        else:
+            text = filter_private_use_characters(raw_text) if settings.filter_pua else raw_text
+            if not text:
+                # Whole result was PUA noise; see filter_private_use_characters
+                # for why this is distinct from "no_speech" (something was
+                # recognized, it was just entirely filtered).
+                warnings.append("empty_after_filter")
+            removed = len(raw_text) - len(text)
+            if removed:
+                event(logger, "pua_filtered", request_id=request_id, removed_chars=removed)
         return TranscriptionResponse(
             request_id=request_id,
             model_revision=TEA_ASR_1_1_MLX_4BIT.revision,
             text=text,
-            raw_text=text,
+            raw_text=raw_text,
             language="Chinese",
             segments=(
                 [

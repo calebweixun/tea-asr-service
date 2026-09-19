@@ -84,8 +84,15 @@ uv run python benchmarks/replay_segmenter.py ~/tea-asr-takes/take2.wav --transcr
 
 ## 六、會遇到的已知狀況
 
-- **辨識結果夾帶看不見的私用區字元。** 約七成的句子會有，服務會在 `warnings` 標示
-  `private_use_characters` 但不會靜默刪掉。成因與現況見 [P0 品質報告](benchmarks/p0-quality-report.md)。
+- **辨識結果原本會夾帶看不見的私用區字元，現在預設過濾掉。** 根因是
+  `Alkd/TEA-ASR-1.1-MLX-4bit` 的 4bit 量化（上游 BF16 是 0%、換 8bit 也只降到
+  63.3%，都不是可行的解），詳見 [PUA vs BF16 A/B 報告](benchmarks/pua-bf16-ab-report.md)。
+  服務預設把 `text`（partial 與 final 都會過濾）裡的 PUA 字元移除，`raw_text`
+  仍保留原始辨識供除錯；`warnings` 照樣標示 `private_use_characters`。可用
+  `filter_pua = false`（設定檔）或 `TEA_ASR_FILTER_PUA=0`（環境變數）關閉這個
+  過濾，恢復未過濾行為。這是繞過上游量化缺陷的暫時措施，不是永久方案；上游若
+  提供乾淨的量化模型就可以移除，見 `tea_asr/api/stream.py` 的
+  `filter_private_use_characters`。
 - **久沒用之後第一次啟動會等幾秒**：閒置 15 分鐘後模型會卸載釋放記憶體，
   client 會顯示「模型載入中…」並自動等待。不想卸載就在 `config.toml` 設 `keep_warm = true`。
 - **機器睡眠醒來後進行中的 session 會被中止**，client 需要重新開始。

@@ -105,7 +105,7 @@ TEA_ASR_REVISABLE_PREVIEW=0 uv run tea-asr serve
 say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o /tmp/demo.aiff && ffmpeg -y -i /tmp/demo.aiff -ar 16000 -ac 1 /tmp/demo.wav && uv run python examples/stream_wav.py /tmp/demo.wav
 ```
 
-體驗時會看到的已知限制：一直講不停會在 12 秒附近硬切（`boundary="max_duration"`，會先找安靜點）、utterance 單段最多 30 秒、辨識結果仍夾帶私用區字元（會以 `private_use_characters` warning 標示，不會靜默刪掉）。VAD 參數（句尾靜音 500 ms、最短語音 160 ms、pre-roll 600 ms、最大 12 秒）已用真實口語校準過一次，但只有單一語者與單一麥克風。
+體驗時會看到的已知限制：一直講不停會在 12 秒附近硬切（`boundary="max_duration"`，會先找安靜點）、utterance 單段最多 30 秒。辨識結果原本會夾帶私用區字元，根因已定位在 `Alkd/TEA-ASR-1.1-MLX-4bit` 的 4bit 量化本身（上游 BF16 checkpoint 是 0%，見 [PUA vs BF16 A/B 報告](docs/benchmarks/pua-bf16-ab-report.md)），現在服務預設會把這些字元從 `text` 過濾掉（`filter_pua` 設定／`TEA_ASR_FILTER_PUA` 環境變數可關閉），`raw_text` 與 `warnings:["private_use_characters"]` 仍保留原始資訊供除錯；這是繞過量化缺陷的暫時措施，換掉模型量化方式才是根本解。VAD 參數（句尾靜音 500 ms、最短語音 160 ms、pre-roll 600 ms、最大 12 秒）已用真實口語校準過一次，但只有單一語者與單一麥克風。
 
 模型與 VAD 資產放在標準的 Hugging Face cache（`~/.cache/huggingface`，可用 `HF_HOME` 改），**不放 `~/Library/Caches`**——macOS 會在磁碟吃緊時把那裡整個清掉。服務只監聽 `127.0.0.1:8327`（電話鍵盤上的 T-E-A；刻意避開 8765 那類 AI 工具常用的 port）。首次啟動會在 `~/Library/Application Support/TEA ASR/token` 建立權限0600的token。短音訊端點與WS utterance session都接受最多30秒、16 kHz mono PCM s16le；詳見 [API契約](docs/04-api.md)，機器可讀版本在 [docs/api/](docs/api/)（`uv run tea-asr export-schemas` 重新產生，測試會檢查是否過期）。本機結果見 [P0報告](docs/benchmarks/p0-report.md)。
 

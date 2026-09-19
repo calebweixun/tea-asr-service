@@ -67,6 +67,13 @@ class ServiceConfig:
     """
 
     revisable_preview: bool = True
+    #: Strip Unicode Private Use Area characters (U+E000-U+F8FF) from
+    #: recognized text before it reaches the client. This is a stopgap for a
+    #: defect in the deployed MLX 4bit quantization of the model, not a
+    #: permanent feature — see `filter_private_use_characters` in
+    #: `tea_asr/api/stream.py` for the measurements and the removal
+    #: condition. Default on since docs/benchmarks/pua-bf16-ab-report.md.
+    filter_pua: bool = True
     max_total_connections: int = 4
     #: Stop the worker after this long with no work, freeing Metal memory.
     #: 0 disables unloading.
@@ -124,4 +131,7 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
         config = replace(config, revisable_preview=True)
     if get("TEA_ASR_KEEP_WARM") == "1":
         config = replace(config, keep_warm=True)
+    filter_pua = get("TEA_ASR_FILTER_PUA")
+    if filter_pua is not None:
+        config = replace(config, filter_pua=filter_pua not in {"0", "false", "no"})
     return config

@@ -70,13 +70,14 @@ def build_client(
     supervisor: FakeSupervisor,
     *,
     revisable_preview: bool = False,
+    filter_pua: bool = True,
     vad: Any = None,
 ) -> TestClient:
     app = create_app(
         Path("unused"),
         token="test-token",
         supervisor=supervisor,
-        config=ServiceConfig(revisable_preview=revisable_preview),
+        config=ServiceConfig(revisable_preview=revisable_preview, filter_pua=filter_pua),
         vad_model=vad,
     )
     return TestClient(app)

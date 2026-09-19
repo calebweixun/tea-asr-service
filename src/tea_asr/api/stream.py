@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import struct
 import uuid
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from pydantic import ValidationError
 from tea_asr.api.events import EventWriter
 from tea_asr.config import ServiceConfig
 from tea_asr.errors import ApiError
+from tea_asr.logs import event as log_event
 from tea_asr.segmenter import ContinuousSegmenter, SegmentClosed, SegmenterConfig, SpeechStarted
 from tea_asr.vad import SileroVad
 from tea_asr.wire import (
@@ -73,6 +75,8 @@ PREVIEW_MAX_AUDIO_SAMPLES = 240_000
 #: segment, so a late correction still lands before the final.
 REVISABLE_END_SILENCE_MS = 900
 
+logger = logging.getLogger("tea_asr.stream")
+
 
 class StreamScheduler(Protocol):
     async def transcribe(
@@ -82,6 +86,31 @@ class StreamScheduler(Protocol):
 
 def private_use_warnings(text: str) -> list[str]:
     return ["private_use_characters"] if any(0xE000 <= ord(c) <= 0xF8FF for c in text) else []
+
+
+def filter_private_use_characters(text: str) -> str:
+    """Strip Unicode Private Use Area characters (U+E000-U+F8FF).
+
+    Stopgap for a defect in `Alkd/TEA-ASR-1.1-MLX-4bit`, not a permanent
+    feature. Measurements in docs/benchmarks/pua-bf16-ab-report.md show:
+    - 70% of sentences from this quantized checkpoint contain PUA characters;
+      the upstream BF16 checkpoint produces 0% on the same corpus, so the
+      defect is introduced by the 4bit quantization of the language-model
+      weights, not by decoding or by this service.
+    - Re-quantizing to 8bit only drops the rate to 63.3%, at +92% size, +74%
+      memory and +20% latency, so changing bit width does not fix it.
+    - Sentence-by-sentence diffing confirms PUA codepoints are *inserted*
+      between otherwise-identical, correct text, never substituted for it,
+      and the U+E000-U+F8FF range never legitimately appears in Traditional
+      Chinese, punctuation, or mixed CJK/Latin output. Stripping it therefore
+      cannot delete real content.
+
+    Remove this function and `ServiceConfig.filter_pua` once the service
+    switches to a model revision (e.g. a clean BF16 or a correctly quantized
+    checkpoint) that upstream confirms no longer emits PUA output.
+    """
+
+    return "".join(ch for ch in text if not (0xE000 <= ord(ch) <= 0xF8FF))
 
 
 @dataclass(slots=True)
@@ -282,6 +311,31 @@ class StreamSession:
             finally:
                 self._pending.task_done()
 
+    def _apply_pua_filter(self, text: str, *, segment: Segment, kind: str) -> str:
+        """Filter PUA characters out of recognized text, per `filter_pua`.
+
+        Never logs `text`/`raw_text` (docs/03 forbids transcript content in
+        the log; `JsonFormatter` also strips those keys as a second layer).
+        Only a character count is observable, so the filter's impact can be
+        monitored without leaking what was said.
+        """
+
+        if not self._config.filter_pua:
+            return text
+        filtered = filter_private_use_characters(text)
+        removed = len(text) - len(filtered)
+        if removed:
+            log_event(
+                logger,
+                "pua_filtered",
+                session_id=self._state.session_id,
+                segment_id=segment.segment_id,
+                segment_index=segment.index,
+                kind=kind,
+                removed_chars=removed,
+            )
+        return filtered
+
     async def _transcribe_segment(self, closed: ClosedSegment) -> None:
         segment = closed.segment
         state = self._state
@@ -307,8 +361,8 @@ class StreamSession:
             return
         if state.cancelled:
             return
-        text = str(response["text"])
-        if not text:
+        raw_text = str(response["text"])
+        if not raw_text:
             self._writer.emit(
                 SegmentSkipped(
                     session_id=state.session_id,
@@ -316,6 +370,24 @@ class StreamSession:
                     segment_id=segment.segment_id,
                     segment_index=segment.index,
                     reason="no_speech",
+                )
+            )
+            return
+        warnings = private_use_warnings(raw_text)
+        text = self._apply_pua_filter(raw_text, segment=segment, kind="final")
+        if not text:
+            # The whole segment was PUA noise (see filter_private_use_characters):
+            # sending an empty final would look like a real, silent recognition
+            # and would desync a client that only tracks segment.skipped/final
+            # for terminal state. "empty" says a result existed and was fully
+            # filtered, as opposed to "no_speech" (nothing was recognized).
+            self._writer.emit(
+                SegmentSkipped(
+                    session_id=state.session_id,
+                    event_id=0,
+                    segment_id=segment.segment_id,
+                    segment_index=segment.index,
+                    reason="empty",
                 )
             )
             return
@@ -329,11 +401,11 @@ class StreamSession:
                 start_sample=segment.start_sample,
                 end_sample=closed.end_sample,
                 text=text,
-                raw_text=text,
+                raw_text=raw_text,
                 audio_ms=(closed.end_sample - segment.start_sample) // 16,
                 queue_ms=queue_ms,
                 inference_ms=round(float(response["total_time_s"]) * 1000),
-                warnings=private_use_warnings(text),
+                warnings=warnings,
             )
         )
 
@@ -474,6 +546,9 @@ class StreamSession:
                 return
             segment.revision += 1
             segment.published_preview_end = end_sample - segment.start_sample
+            text = self._apply_pua_filter(
+                str(response["text"]), segment=segment, kind="partial"
+            )
             self._writer.emit(
                 TranscriptPartial(
                     session_id=self._state.session_id,
@@ -483,7 +558,7 @@ class StreamSession:
                     revision=segment.revision,
                     start_sample=segment.start_sample,
                     end_sample=end_sample,
-                    text=str(response["text"]),
+                    text=text,
                 )
             )
         except ApiError as exc:

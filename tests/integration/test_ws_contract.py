@@ -198,6 +198,60 @@ def test_commit_produces_queued_then_immutable_final(client: TestClient) -> None
         assert ids == sorted(ids)
 
 
+def test_final_transcript_is_filtered_of_pua_by_default(supervisor: FakeSupervisor) -> None:
+    # docs/benchmarks/pua-bf16-ab-report.md: the deployed 4bit checkpoint
+    # leaks PUA between correct text; the WS final must not pass it through.
+    supervisor.text = "測試文字"
+    with build_client(supervisor) as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as socket:
+        socket.receive_json()
+        socket.send_json(START)
+        socket.receive_json()
+        send_audio(socket, 10)
+        socket.send_json({"type": "audio.commit", "request_id": "c1", "through_seq": 9})
+        events = drain_until(socket, "transcript.final")
+        final = next(e for e in events if e["type"] == "transcript.final")
+        assert final["text"] == "測試文字"
+        assert final["raw_text"] == "測試文字"
+        assert final["warnings"] == ["private_use_characters"]
+
+
+def test_final_transcript_keeps_pua_when_filter_is_disabled(
+    supervisor: FakeSupervisor,
+) -> None:
+    supervisor.text = "測試文字"
+    with build_client(supervisor, filter_pua=False) as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as socket:
+        socket.receive_json()
+        socket.send_json(START)
+        socket.receive_json()
+        send_audio(socket, 10)
+        socket.send_json({"type": "audio.commit", "request_id": "c1", "through_seq": 9})
+        events = drain_until(socket, "transcript.final")
+        final = next(e for e in events if e["type"] == "transcript.final")
+        assert final["text"] == "測試文字"
+        assert final["text"] == final["raw_text"]
+
+
+def test_segment_entirely_pua_is_skipped_as_empty_not_no_speech(
+    supervisor: FakeSupervisor,
+) -> None:
+    supervisor.text = ""
+    with build_client(supervisor) as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as socket:
+        socket.receive_json()
+        socket.send_json(START)
+        socket.receive_json()
+        send_audio(socket, 10)
+        socket.send_json({"type": "audio.commit", "request_id": "c1", "through_seq": 9})
+        events = drain_until(socket, "segment.skipped")
+        assert events[-1]["reason"] == "empty"
+        assert not any(event["type"] == "transcript.final" for event in events)
+
+
 def test_silent_segment_is_skipped_not_invented(supervisor: FakeSupervisor) -> None:
     supervisor.text = ""
     with build_client(supervisor) as http, http.websocket_connect(
@@ -318,6 +372,23 @@ def test_preview_replaces_text_and_final_wins(preview_client: TestClient) -> Non
         assert final["segment_id"] == partial["segment_id"]
         assert final["revision"] > partial["revision"]
         assert final["end_sample"] == 16_000
+
+
+def test_partial_preview_is_also_filtered_of_pua(supervisor: FakeSupervisor) -> None:
+    # docs task: partial and final must agree, or a client's revision/replace
+    # logic sees text re-appear that the final already dropped.
+    supervisor.text = "測試"
+    with build_client(supervisor, revisable_preview=True) as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as socket:
+        socket.receive_json()
+        socket.send_json({**START, "transcript_mode": "revisable"})
+        socket.receive_json()
+        for seq in range(10):
+            socket.send_bytes(frame(seq, seq * 1600))
+        partial = drain_until(socket, "transcript.partial")[-1]
+        assert "" not in partial["text"]
+        assert partial["text"] == "測試"
 
 
 # --- continuous profile -----------------------------------------------------

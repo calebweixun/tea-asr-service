@@ -70,12 +70,38 @@ def test_transcription_contract(client: TestClient) -> None:
         assert body["queue_ms"] >= 0
 
 
-def test_private_use_characters_are_reported_not_stripped(supervisor: FakeSupervisor) -> None:
+def test_private_use_characters_are_filtered_by_default(supervisor: FakeSupervisor) -> None:
+    # docs/benchmarks/pua-bf16-ab-report.md: PUA is inserted between correct
+    # text by MLX 4bit quantization, not a real character; filtering it is
+    # the default so clients do not have to do it themselves.
     supervisor.text = "測試文字"
     with build_client(supervisor) as http:
         body = http.post(TRANSCRIBE, content=b"\0\0" * 1600, headers=AUTH).json()
         assert body["warnings"] == ["private_use_characters"]
-        assert "" in body["text"]
+        assert body["text"] == "測試文字"
+        assert body["raw_text"] == "測試文字"
+        assert "" not in body["text"]
+
+
+def test_private_use_filter_can_be_disabled(supervisor: FakeSupervisor) -> None:
+    supervisor.text = "測試文字"
+    with build_client(supervisor, filter_pua=False) as http:
+        body = http.post(TRANSCRIBE, content=b"\0\0" * 1600, headers=AUTH).json()
+        assert body["warnings"] == ["private_use_characters"]
+        assert body["text"] == "測試文字"
+        assert body["raw_text"] == body["text"]
+
+
+def test_transcript_entirely_made_of_pua_is_reported_empty_not_no_speech(
+    supervisor: FakeSupervisor,
+) -> None:
+    supervisor.text = ""
+    with build_client(supervisor) as http:
+        body = http.post(TRANSCRIBE, content=b"\0\0" * 1600, headers=AUTH).json()
+        assert body["text"] == ""
+        assert body["raw_text"] == ""
+        assert body["segments"] == []
+        assert body["warnings"] == ["private_use_characters", "empty_after_filter"]
 
 
 def test_silence_returns_no_speech(supervisor: FakeSupervisor) -> None:
