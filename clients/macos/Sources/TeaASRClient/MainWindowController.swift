@@ -9,6 +9,13 @@ import Foundation
 /// without opening a session (for example, to fix a missing permission).
 @MainActor
 final class MainWindowController: NSWindowController, NSWindowDelegate {
+    private struct StatusPresentation {
+        let title: String
+        let detail: String
+        let symbolName: String
+        let tint: NSColor
+    }
+
     enum Section: Int, CaseIterable {
         case overview
         case operations
@@ -98,6 +105,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         )
         window.title = "TEA ASR"
         window.minSize = NSSize(width: 780, height: 520)
+        window.toolbarStyle = .unifiedCompact
+        window.titlebarAppearsTransparent = false
+        window.backgroundColor = .windowBackgroundColor
         window.center()
         super.init(window: window)
         window.delegate = self
@@ -119,8 +129,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private func build() {
         buildSidebar()
 
-        detailController.view = detailView
+        let detailScroll = NSScrollView()
+        detailScroll.drawsBackground = false
+        detailScroll.borderType = .noBorder
+        detailScroll.hasVerticalScroller = true
+        detailScroll.hasHorizontalScroller = false
+        detailScroll.autohidesScrollers = true
+        detailScroll.documentView = detailView
         detailView.translatesAutoresizingMaskIntoConstraints = false
+        detailController.view = detailScroll
+        NSLayoutConstraint.activate([
+            detailView.leadingAnchor.constraint(equalTo: detailScroll.contentView.leadingAnchor),
+            detailView.trailingAnchor.constraint(equalTo: detailScroll.contentView.trailingAnchor),
+            detailView.topAnchor.constraint(equalTo: detailScroll.contentView.topAnchor),
+            detailView.widthAnchor.constraint(equalTo: detailScroll.contentView.widthAnchor),
+        ])
         splitViewController.addSplitViewItem(
             NSSplitViewItem(sidebarWithViewController: sidebarController)
         )
@@ -134,7 +157,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func buildSidebar() {
-        let root = NSView()
+        let root = NSVisualEffectView()
+        root.material = .sidebar
+        root.blendingMode = .withinWindow
+        root.state = .active
         let heading = NSTextField(labelWithString: "TEA ASR")
         heading.font = .systemFont(ofSize: 18, weight: .semibold)
         heading.translatesAutoresizingMaskIntoConstraints = false
@@ -146,7 +172,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 6
+        stack.spacing = 5
         stack.translatesAutoresizingMaskIntoConstraints = false
         sectionButtons = Section.allCases.map { section in
             let button = NSButton(
@@ -156,13 +182,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             )
             button.tag = section.rawValue
             button.image = NSImage(systemSymbolName: section.symbolName, accessibilityDescription: section.title)
+            button.image?.isTemplate = true
             button.imagePosition = .imageLeading
             button.alignment = .left
-            button.bezelStyle = .texturedRounded
+            button.bezelStyle = .regularSquare
+            button.isBordered = false
             button.setButtonType(.toggle)
             button.translatesAutoresizingMaskIntoConstraints = false
-            button.widthAnchor.constraint(equalToConstant: 178).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 30).isActive = true
+            button.controlSize = .large
+            button.heightAnchor.constraint(equalToConstant: 34).isActive = true
+            button.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             stack.addArrangedSubview(button)
             return button
         }
@@ -300,7 +329,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private func select(section: Section) {
         selectedSection = section
         for button in sectionButtons {
-            button.state = button.tag == section.rawValue ? .on : .off
+            let selected = button.tag == section.rawValue
+            button.state = selected ? .on : .off
+            button.wantsLayer = true
+            button.layer?.cornerRadius = 8
+            button.layer?.backgroundColor = selected
+                ? NSColor.controlAccentColor.withAlphaComponent(0.14).cgColor
+                : NSColor.clear.cgColor
+            button.contentTintColor = selected ? .controlAccentColor : .labelColor
+            button.font = .systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
         }
         renderDetail()
     }
@@ -338,12 +375,27 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func overviewView() -> NSView {
-        let status = valueRow("目前狀態", appState.displayStatus.title)
-        let server = valueRow("服務", serverSummary())
-        let model = valueRow("模型", modelSummary())
-        let session = valueRow("Session", "\(modeTitle()) · \(sessionStatus)")
-        let input = valueRow("輸入", audioSummary())
-        let recent = valueRow("最近文字", appState.lastText ?? "尚無定稿文字")
+        let service = metricCard(
+            title: "服務",
+            value: serverSummary(),
+            symbolName: "server.rack",
+            tint: .systemBlue
+        )
+        let model = metricCard(
+            title: "模型",
+            value: modelSummary(),
+            symbolName: "cpu",
+            tint: .systemPurple
+        )
+        let runtime = cardStack(
+            [
+                valueRow("Session", "\(modeTitle()) · \(sessionStatus)"),
+                valueRow("輸入", audioSummary()),
+            ],
+            title: "執行狀態",
+            symbolName: "waveform"
+        )
+        let recent = recentTextCard()
 
         let startDictation = actionButton(
             title: appState.mode == .dictation ? "停止聽寫" : "開始聽寫",
@@ -363,8 +415,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         return sectionStack(
             title: "總覽",
-            subtitle: "服務、模型、session 與目前音訊狀態",
-            views: [status, server, model, session, input, recent, separator(), actions]
+            subtitle: "服務、模型與目前音訊狀態",
+            symbolName: "rectangle.3.group",
+            views: [
+                statusHeroView(),
+                metricPair([service, model]),
+                runtime,
+                recent,
+                cardStack([actions], symbolName: "bolt.fill"),
+            ]
         )
     }
 
@@ -393,8 +452,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         return sectionStack(
             title: "操作",
-            subtitle: "在同一個主畫面開始、停止並查看辨識結果",
-            views: [controls, status, audio, transcriptInfo, transcriptTitle, transcript, export]
+            subtitle: "開始、停止並即時查看辨識結果",
+            symbolName: "mic.fill",
+            views: [
+                cardStack([controls], title: "開始錄音", symbolName: "record.circle"),
+                cardStack([status, audio, transcriptInfo], title: "目前 session", symbolName: "waveform.path.ecg"),
+                cardStack([transcriptTitle, transcript], title: "即時逐字稿", symbolName: "text.quote"),
+                cardStack([export], symbolName: "square.and.arrow.up"),
+            ]
         )
     }
 
@@ -410,11 +475,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let rows = state.items.map { item in
             permissionRow(item)
         }
+        let permissionRows = NSStackView(views: rows)
+        permissionRows.orientation = .vertical
+        permissionRows.alignment = .width
+        permissionRows.spacing = 12
         let refresh = actionButton(title: "重新檢查權限", action: #selector(refreshPermissions(_:)))
         return sectionStack(
             title: "權限",
-            subtitle: "TEA ASR 只使用麥克風與必要的自動貼上權限",
-            views: [summary, separator()] + rows + [refresh]
+            subtitle: "完成錄音與自動貼上需要的系統授權",
+            symbolName: "lock.shield.fill",
+            views: [
+                cardStack([summary], symbolName: "checkmark.shield"),
+                cardStack([permissionRows], title: "權限清單", symbolName: "list.bullet"),
+                cardStack([refresh], symbolName: "arrow.clockwise"),
+            ]
         )
     }
 
@@ -439,11 +513,22 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let title = NSTextField(labelWithString: "\(item.title) · \(statusText)")
         title.font = .systemFont(ofSize: 13, weight: .semibold)
         title.textColor = color
+        let statusIconName = item.isSatisfied ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+        let statusIcon = NSImageView(
+            image: NSImage(systemSymbolName: statusIconName, accessibilityDescription: statusText)
+                ?? NSImage()
+        )
+        statusIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+        statusIcon.contentTintColor = color
+        let titleRow = NSStackView(views: [statusIcon, title])
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .centerY
+        titleRow.spacing = 6
         let explanation = NSTextField(wrappingLabelWithString: item.explanation)
         explanation.textColor = .secondaryLabelColor
         explanation.font = .systemFont(ofSize: 12)
 
-        let text = NSStackView(views: [title, explanation])
+        let text = NSStackView(views: [titleRow, explanation])
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 3
@@ -482,6 +567,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         token.placeholderString = "輸入 bearer token（儲存到本機 token 檔）"
         let hotKey = NSTextField(labelWithString: "⌥⌘D（固定）")
         hotKey.textColor = .secondaryLabelColor
+        host.controlSize = .large
+        port.controlSize = .large
+        token.controlSize = .large
+        host.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
+        port.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
+        token.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
         host.identifier = NSUserInterfaceItemIdentifier("host")
         port.identifier = NSUserInterfaceItemIdentifier("port")
         token.identifier = NSUserInterfaceItemIdentifier("token")
@@ -500,7 +591,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         ])
         grid.column(at: 0).xPlacement = .trailing
         grid.columnSpacing = 12
-        grid.rowSpacing = 10
+        grid.rowSpacing = 12
 
         let autoInsert = NSButton(
             checkboxWithTitle: "定稿後自動貼進前景 app",
@@ -530,8 +621,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         return sectionStack(
             title: "設定",
-            subtitle: "服務連線、token、快捷鍵與輸入行為",
-            views: [grid, autoInsert, preview, tokenHint, buttons]
+            subtitle: "服務連線、token 與輸入行為",
+            symbolName: "gearshape.fill",
+            views: [
+                cardStack([grid, tokenHint], title: "服務連線", symbolName: "network"),
+                cardStack([autoInsert, preview], title: "輸入行為", symbolName: "keyboard"),
+                cardStack([buttons], symbolName: "checkmark.circle"),
+            ]
         )
     }
 
@@ -544,8 +640,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let refresh = actionButton(title: "重新檢查服務", action: #selector(testService(_:)))
         return sectionStack(
             title: "診斷",
-            subtitle: "用來確認麥克風 frame、RMS、服務與 WebSocket 狀態",
-            views: [state, client, audio, service, error, separator(), refresh]
+            subtitle: "確認麥克風 frame、RMS、服務與 WebSocket 狀態",
+            symbolName: "stethoscope",
+            views: [
+                cardStack([state, client], title: "應用程式", symbolName: "app.badge"),
+                cardStack([audio, service, error], title: "連線與音訊", symbolName: "waveform.and.magnifyingglass"),
+                cardStack([refresh], symbolName: "arrow.clockwise"),
+            ]
         )
     }
 
@@ -756,25 +857,234 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - View helpers
 
-    private func sectionStack(title: String, subtitle: String, views: [NSView]) -> NSView {
+    private func sectionStack(
+        title: String,
+        subtitle: String,
+        symbolName: String? = nil,
+        views: [NSView]
+    ) -> NSView {
         let heading = NSTextField(labelWithString: title)
-        heading.font = .systemFont(ofSize: 24, weight: .bold)
+        heading.font = .systemFont(ofSize: 26, weight: .bold)
         let subheading = NSTextField(wrappingLabelWithString: subtitle)
         subheading.textColor = .secondaryLabelColor
-        let stack = NSStackView(views: [heading, subheading] + views)
+
+        let headingRow = NSStackView()
+        headingRow.orientation = .horizontal
+        headingRow.alignment = .centerY
+        headingRow.spacing = 10
+        if let symbolName,
+           let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title) {
+            let icon = NSImageView(image: image)
+            icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+            icon.contentTintColor = .controlAccentColor
+            icon.setContentHuggingPriority(.required, for: .horizontal)
+            headingRow.addArrangedSubview(icon)
+        }
+        headingRow.addArrangedSubview(heading)
+
+        let stack = NSStackView(views: [headingRow, subheading] + views)
         stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
+        stack.alignment = .width
+        stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
         for view in views {
             view.setContentHuggingPriority(.defaultLow, for: .horizontal)
             view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            if view is NSScrollView {
-                view.widthAnchor.constraint(greaterThanOrEqualToConstant: 420).isActive = true
-                view.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-            }
         }
         return stack
+    }
+
+    private func statusHeroView() -> NSView {
+        let presentation = statusPresentation()
+        let icon = NSImageView(
+            image: NSImage(systemSymbolName: presentation.symbolName, accessibilityDescription: presentation.title)
+                ?? NSImage()
+        )
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 25, weight: .semibold)
+        icon.contentTintColor = presentation.tint
+        icon.wantsLayer = true
+        icon.layer?.cornerRadius = 15
+        icon.layer?.backgroundColor = presentation.tint.withAlphaComponent(0.14).cgColor
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.widthAnchor.constraint(equalToConstant: 54).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 54).isActive = true
+
+        let title = NSTextField(labelWithString: presentation.title)
+        title.font = .systemFont(ofSize: 18, weight: .semibold)
+        let detail = NSTextField(wrappingLabelWithString: presentation.detail)
+        detail.font = .systemFont(ofSize: 12)
+        detail.textColor = .secondaryLabelColor
+        detail.maximumNumberOfLines = 2
+
+        let text = NSStackView(views: [title, detail])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 4
+
+        let badge = statusBadge(title: modeTitle(), tint: presentation.tint)
+        let row = NSStackView(views: [icon, text, badge])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 12
+        row.setCustomSpacing(8, after: text)
+        return cardStack([row], material: .underWindowBackground, accent: presentation.tint)
+    }
+
+    private func statusPresentation() -> StatusPresentation {
+        // AppState intentionally keeps the public status vocabulary small. The
+        // service payload still tells us when the worker is idle-unloaded; show
+        // that naturally as standby instead of making a healthy app look busy.
+        let modelState = appState.serviceSnapshot?.status.modelState.lowercased()
+        let standby = appState.mode == .idle && ["idle_unloaded", "standby"].contains(modelState)
+        if standby {
+            return StatusPresentation(
+                title: "服務待命",
+                detail: "模型尚未載入；開始聽寫或會議記錄時會自動準備。",
+                symbolName: "moon.zzz.fill",
+                tint: .systemOrange
+            )
+        }
+
+        switch appState.displayStatus {
+        case .checking:
+            return StatusPresentation(title: "檢查服務中…", detail: "正在確認本機語音服務。", symbolName: "arrow.triangle.2.circlepath", tint: .systemBlue)
+        case .offline:
+            return StatusPresentation(title: "服務離線", detail: "啟動 tea-asr 服務後即可開始。", symbolName: "wifi.slash", tint: .systemRed)
+        case .connecting:
+            return StatusPresentation(title: "連線中…", detail: "正在連到本機語音服務。", symbolName: "point.3.connected.trianglepath.dotted", tint: .systemBlue)
+        case .loading:
+            return StatusPresentation(title: "模型準備中…", detail: "第一次開始聆聽可能需要幾秒鐘。", symbolName: "arrow.down.circle", tint: .systemOrange)
+        case .standby:
+            return StatusPresentation(title: "服務待命", detail: "模型尚未載入；開始聆聽時會自動準備。", symbolName: "moon.zzz.fill", tint: .systemOrange)
+        case .ready:
+            return StatusPresentation(title: "服務就緒", detail: "可以開始聽寫或開啟會議記錄。", symbolName: "checkmark.circle.fill", tint: .systemGreen)
+        case .listening(let mode, let preview):
+            let modeText = mode == .meeting ? "會議記錄" : "聽寫"
+            let previewText = preview ? "，含即時預覽" : ""
+            return StatusPresentation(title: "正在\(modeText)", detail: "正在接收麥克風音訊\(previewText)。", symbolName: "waveform.circle.fill", tint: .systemRed)
+        case .retryable(let issue):
+            return StatusPresentation(title: "可以重試", detail: issue.message, symbolName: "arrow.clockwise.circle", tint: .systemOrange)
+        case .failed(let issue):
+            return StatusPresentation(title: "需要處理", detail: issue.message, symbolName: "exclamationmark.triangle.fill", tint: .systemRed)
+        }
+    }
+
+    private func statusBadge(title: String, tint: NSColor) -> NSView {
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = tint
+        label.alignment = .center
+        label.lineBreakMode = .byTruncatingTail
+        let badge = NSVisualEffectView()
+        badge.material = .selection
+        badge.state = .active
+        badge.wantsLayer = true
+        badge.layer?.cornerRadius = 8
+        badge.layer?.borderWidth = 1
+        badge.layer?.borderColor = tint.withAlphaComponent(0.25).cgColor
+        badge.addSubview(label)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: badge.leadingAnchor, constant: 9),
+            label.trailingAnchor.constraint(equalTo: badge.trailingAnchor, constant: -9),
+            label.topAnchor.constraint(equalTo: badge.topAnchor, constant: 4),
+            label.bottomAnchor.constraint(equalTo: badge.bottomAnchor, constant: -4),
+        ])
+        badge.setContentHuggingPriority(.required, for: .horizontal)
+        return badge
+    }
+
+    private func metricPair(_ cards: [NSView]) -> NSView {
+        let pair = NSStackView(views: cards)
+        pair.orientation = .horizontal
+        pair.alignment = .top
+        pair.distribution = .fillEqually
+        pair.spacing = 12
+        return pair
+    }
+
+    private func metricCard(title: String, value: String, symbolName: String, tint: NSColor) -> NSView {
+        let icon = NSImageView(
+            image: NSImage(systemSymbolName: symbolName, accessibilityDescription: title) ?? NSImage()
+        )
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
+        icon.contentTintColor = tint
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        let valueLabel = NSTextField(wrappingLabelWithString: value)
+        valueLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        let heading = NSStackView(views: [icon, label])
+        heading.orientation = .horizontal
+        heading.alignment = .centerY
+        heading.spacing = 7
+        return cardStack([heading, valueLabel], material: .contentBackground, accent: tint)
+    }
+
+    private func recentTextCard() -> NSView {
+        let text = appState.lastText ?? "尚無定稿文字"
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = .systemFont(ofSize: 14)
+        label.maximumNumberOfLines = 3
+        if appState.lastText == nil {
+            label.textColor = .secondaryLabelColor
+        }
+        return cardStack([label], title: "最近文字", symbolName: "text.quote")
+    }
+
+    private func cardStack(
+        _ views: [NSView],
+        title: String? = nil,
+        symbolName: String? = nil,
+        material: NSVisualEffectView.Material = .contentBackground,
+        accent: NSColor? = nil
+    ) -> NSView {
+        let contentViews: [NSView]
+        if let title {
+            let heading = NSTextField(labelWithString: title)
+            heading.font = .systemFont(ofSize: 12, weight: .semibold)
+            heading.textColor = .secondaryLabelColor
+            if let symbolName,
+               let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title) {
+                let icon = NSImageView(image: image)
+                icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+                icon.contentTintColor = accent ?? .secondaryLabelColor
+                let row = NSStackView(views: [icon, heading])
+                row.orientation = .horizontal
+                row.alignment = .centerY
+                row.spacing = 7
+                contentViews = [row] + views
+            } else {
+                contentViews = [heading] + views
+            }
+        } else {
+            contentViews = views
+        }
+
+        let content = NSStackView(views: contentViews)
+        content.orientation = .vertical
+        content.alignment = .width
+        content.spacing = 10
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let card = NSVisualEffectView()
+        card.material = material
+        card.blendingMode = .withinWindow
+        card.state = .active
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 13
+        card.layer?.borderWidth = 1
+        card.layer?.borderColor = (accent ?? NSColor.separatorColor).withAlphaComponent(accent == nil ? 0.42 : 0.26).cgColor
+        card.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+            content.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
+            content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14),
+        ])
+        return card
     }
 
     private func valueRow(_ title: String, _ value: String) -> NSView {
@@ -794,6 +1104,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private func actionButton(title: String, action: Selector) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
         button.bezelStyle = .rounded
+        button.controlSize = .large
+        button.contentTintColor = .controlAccentColor
+        button.setContentHuggingPriority(.required, for: .horizontal)
         return button
     }
 
@@ -810,12 +1123,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         textView.isEditable = false
         textView.isRichText = false
         textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        textView.textColor = .labelColor
+        textView.backgroundColor = .clear
         textView.textContainerInset = NSSize(width: 10, height: 10)
         textView.string = transcriptString()
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
         scroll.documentView = textView
+        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
         return scroll
     }
 
@@ -857,12 +1174,26 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         guard let snapshot = appState.serviceSnapshot else {
             return appState.serviceReachable == false ? "無法連線" : "檢查中…"
         }
-        return snapshot.readyzOK ? "可用（\(settings.host):\(settings.port)）" : "未就緒"
+        switch snapshot.status.modelState.lowercased() {
+        case "idle_unloaded", "standby":
+            return "待命（\(settings.host):\(settings.port)）"
+        default:
+            return snapshot.readyzOK ? "可用（\(settings.host):\(settings.port)）" : "未就緒"
+        }
     }
 
     private func modelSummary() -> String {
         guard let status = appState.serviceSnapshot?.status else { return "尚未取得" }
-        var value = "\(status.modelState) · \(status.model)"
+        let state: String
+        switch status.modelState.lowercased() {
+        case "idle_unloaded", "standby": state = "待命（尚未載入）"
+        case "loading": state = "載入中"
+        case "ready": state = "就緒"
+        case "recovering": state = "恢復中"
+        case "failed": state = "失敗"
+        default: state = status.modelState
+        }
+        var value = "\(state) · \(status.model)"
         if let load = status.workerLoadMs {
             value += " · 載入 \(load) ms"
         }
@@ -873,17 +1204,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         guard let diagnostics = audioDiagnostics else { return "尚未開始擷取" }
         let device = diagnostics.inputDeviceName ?? "預設輸入裝置未知"
         let rms = diagnostics.rms.map { String(format: "%.3f", $0) } ?? "--"
-        return "\(device) · \(diagnostics.isRunning ? "執行中" : "已停止") · RMS \(rms) · \(diagnostics.framesProduced) frames"
+        return "\(device) · \(diagnostics.isRunning ? "執行中" : "已停止") · RMS \(rms) · \(diagnostics.framesProduced) 幀"
     }
 
     private func clientStateSummary() -> String {
         switch appState.clientState {
-        case .idle: return "idle"
-        case .connecting: return "connecting"
-        case .loadingModel: return "loading model"
+        case .idle: return "閒置"
+        case .connecting: return "連線中"
+        case .loadingModel: return "模型載入中"
         case .listening(let version, let preview):
-            return "listening · protocol \(version) · preview \(preview ? "on" : "off")"
-        case .failed(let issue): return "failed · \(issue.code): \(issue.message)"
+            return "聆聽中 · 協定 \(version) · 預覽 \(preview ? "開" : "關")"
+        case .failed(let issue): return "失敗 · \(issue.code)：\(issue.message)"
         }
     }
 
