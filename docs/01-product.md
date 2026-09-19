@@ -48,19 +48,20 @@ Intel Mac 推論、Windows server、多人伺服器叢集、帳號系統、雲�
 
 ## 使用體驗
 
-以下是將來應達成的命令介面，現在尚不可執行：
+以下命令介面目前可用；在repo中以 `uv run tea-asr ...` 執行，安裝套件後可直接使用 `tea-asr ...`：
 
 ```text
 tea-asr doctor
-tea-asr model prepare
+tea-asr model-prepare
 tea-asr serve
 tea-asr status
 tea-asr transcribe sample.wav
-tea-asr service install       # v0.2，使用者選擇登入自啟
+tea-asr service install
+tea-asr service status
 tea-asr service uninstall
 ```
 
-第一次下載模型時顯示大小、進度、快取路徑；下載中斷可重試。缺模型時 `serve` 明確提示 prepare，不在背景無限下載。完成準備後，辨識在斷網環境仍應可用。
+第一次下載模型時顯示大小、進度、快取路徑；下載中斷可重試。缺模型時 `serve` 明確提示 `tea-asr model-prepare`，不在背景無限下載。完成準備後，辨識在斷網環境仍應可用。模型與 runtime 準備由 server 明確擁有；Mac GUI 只能呼叫、引導或診斷 `tea-asr model-prepare`，不得靜默下載模型，也不得自行建立另一套 ASR runtime。
 
 狀態只用少數明確文字：尚未準備、載入中、可辨識、忙碌、需要處理。出錯時提供原因與一個建議動作；不讓使用者判讀 Python traceback。
 

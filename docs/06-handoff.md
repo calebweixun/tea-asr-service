@@ -1,6 +1,6 @@
 # 06｜給 Sol 與其他實作模型的交接
 
-> 原始交付為文件。**2026-09-19更新：** P0已在M4 Pro實測（效能通過、品質未通過），P1與P2的utterance切片已實作並在真模型上驗證，進度表見 [README](../README.md#實作進度)。
+> 原始交付為文件。**2026-09-19更新：** P0–P3與P2a已完成並實測；P2一小時soak與N=1..4併發容量測試已完成，進度表見 [README](../README.md#實作進度)。
 > 以下各階段的完成條件仍然有效，勾選狀態寫在每節開頭。
 
 ## 開發方式
@@ -53,7 +53,7 @@ tea-asr-service/
 
 **工作：** 建立最小pyproject與spike；固定snapshot、載入修正、strict validation、離線推論、量測、VAD adapter可行性。另依07量測累積音訊重辨識與後文修訂，提早驗證P2a可行性。只為必要程式加入測試，不先寫API／GUI／完整服務管理。
 
-**狀態：效能通過、品質未通過。** 報告見 [benchmarks/p0-report.md](benchmarks/p0-report.md)；私用區字元leak未解，真實語料corpus尚未建立。
+**狀態：已通過。** 報告見 [benchmarks/p0-report.md](benchmarks/p0-report.md)；指定checkpoint的效能與品質驗證均已完成。
 
 **完成條件：** 相容層能載入指定checkpoint；至少中文／混英／短詞／靜音有實測；報告含memory、RTF、token限制與版本；models.lock與uv.lock可重現。若未有可用硬體或音訊，交付可執行spike與明確未驗證狀態，不能標P0通過。
 
@@ -61,7 +61,7 @@ tea-asr-service/
 
 **前置：** P0確認後端；無硬體時只可先做標明mock的契約工作。
 
-**工作：** 設定、bearer驗證、CLI serve/doctor/status/model prepare、supervisor＋IPC、HTTP transcription、health/ready/capabilities、typed errors、單模型與資源上限。Pydantic生成OpenAPI，開始WS event schema。只做PCM與WAV CLI轉換，暫不安裝FFmpeg。
+**工作：** 設定、bearer驗證、CLI serve/doctor/status/`tea-asr model-prepare`、supervisor＋IPC、HTTP transcription、health/ready/capabilities、typed errors、單模型與資源上限。模型與 runtime 準備由 server 明確擁有；Mac GUI 僅可呼叫、引導或診斷 `tea-asr model-prepare`，不得靜默下載模型或自行建立 ASR runtime。Pydantic生成OpenAPI，開始WS event schema。只做PCM與WAV CLI轉換，暫不安裝FFmpeg。
 
 **狀態：已完成。** `tea-asr transcribe` 經HTTP取得真結果；worker以受監督子程序隔離、stdout只走IPC；bounded scheduler提供真實 `queue_ms` 與 `queue_full`；typed error envelope、Pydantic wire models與 [docs/api/](api/) 的OpenAPI／WS schema皆已產生並由測試檢查。
 
@@ -73,11 +73,11 @@ tea-asr-service/
 
 **工作：** WS狀態機、binary seq header、sample clock、utterance commit、continuous VAD、排程、公平性、flow window、取消與slow reader。建立 `stream_wav.py` 以真實時間送frame，不需先取得麥克風權限。
 
-**狀態：已實作，長跑未測。** WS狀態機、binary seq header、sample clock、flow window、commit/stop/cancel、audio.ack、segment終局事件、bounded outgoing queue與慢client偵測已完成。Silero VAD以ONNX Runtime接上（每session獨立recurrent state，不引進Torch），`models.lock.json` 已固定 revision 與 sha256。continuous profile由VAD切段，pre-roll 600 ms、句尾靜音 500 ms（revisable 900 ms）、最短語音 160 ms、12秒上限＋2秒grace（校準依據見 [P2切段報告](benchmarks/p2-segmentation-report.md)）；片段經有限佇列交給單一consumer依序處理，推論不阻塞收音。
+**狀態：已實作，長跑與併發容量測試完成。** WS狀態機、binary seq header、sample clock、flow window、commit/stop/cancel、audio.ack、segment終局事件、bounded outgoing queue與慢client偵測已完成。Silero VAD以ONNX Runtime接上（每session獨立recurrent state，不引進Torch），`models.lock.json` 已固定 revision 與 sha256。continuous profile由VAD切段，pre-roll 600 ms、句尾靜音 500 ms（revisable 900 ms）、最短語音 160 ms、12秒上限＋2秒grace（校準依據見 [P2切段報告](benchmarks/p2-segmentation-report.md)）；片段經有限佇列交給單一consumer依序處理，推論不阻塞收音。
 **一小時長跑已通過**（386段0錯誤、延遲p95 0.57秒、記憶體平穩，見 [長跑報告](benchmarks/p2-soak-report.md)），VAD參數也已用真實口語校準。
-**尚未完成：** 多路併發容量實測；`max_continuous_sessions=1` 仍是依文件設定而非實測結果。
+**併發容量：** 已測試 N=1..4；預設 `max_continuous_sessions=2`，以實測結果作為 continuous 的預設上限。
 
-**完成條件：** 按sample順序產生不可變final；ASR推論中仍能收音；一小時不持續增加RAM／lag；停止時flush；每個已排片段都有終局；profile與能力宣告符合實際。根據單路實測設定max continuous sessions。
+**完成條件：** 按sample順序產生不可變final；ASR推論中仍能收音；一小時不持續增加RAM／lag；停止時flush；每個已排片段都有終局；profile與能力宣告符合實際。根據併發實測設定max continuous sessions。
 
 **v0.1可發行條件：** P0–P2通过；README標明ephemeral、無resume、無精準timestamps、無翻譯。發布測試用wheel或可重現uv安裝說明；不要稱為完整會議產品。
 
@@ -100,7 +100,7 @@ final 與 final-only 模式完全一致、混合負載下 23/23 HTTP 辨識成�
 
 **工作：** 安裝流程、模型下載進度、設定路徑、診斷訊息、idle unload/keep_warm、rotation、singleton、LaunchAgent install/uninstall、sleep/wake。
 
-**狀態：大致完成，sleep/wake未實測。** `tea-asr service install/uninstall/status` 以絕對路徑建立 LaunchAgent，
+**狀態：已完成並實測。** `tea-asr service install/uninstall/status` 以絕對路徑建立 LaunchAgent，
 只有明確 install 才會動登入設定；`KeepAlive` 僅在 crash 時重啟，避免「已有實例」的正常退出被無限重啟。
 singleton 採 flock lock file ＋ port 檢查，第二份實例會被拒絕並回報持有者的 PID 與 port（已實測 LaunchAgent
 與手動同時啟動只會有一份模型）。閒置逾時卸載 worker 後 `model_state=idle_unloaded`，第一個請求觸發重新載入
@@ -123,7 +123,9 @@ log 為 JSON lines 並輪替，明確過濾 token、PCM 與逐字稿。關閉時
 
 ## P5｜挑一種client整合
 
-**P5a（已有可用版本，見 [clients/macos](../clients/macos/)）：** Swift選單列聽寫client，以驗證真正日常使用的延遲、短詞、焦點與剪貼簿行為。採AVAudioEngine收音及可靠resampling；partial在自有浮動視窗更新，final才貼入。不要為了顯示partial而回刪使用者已打的字。
+**P5a（已有可用版本，見 [clients/macos](../clients/macos/)）：** Swift選單列聽寫client，以驗證真正日常使用的延遲、短詞、焦點與剪貼簿行為。採AVAudioEngine收音及可靠resampling；partial在自有浮動視窗更新，final才貼入。不要為了顯示partial而回刪使用者已打的字。模型與 runtime 準備由 server 明確擁有；Mac GUI 只能呼叫、引導或診斷 `tea-asr model-prepare`，不得靜默下載模型，也不得自行建立另一套 ASR runtime。
+
+**P5a驗收條件：** 可設定輸入裝置與聲道；可設定熱鍵並支援 push-to-talk；開始／停止回饋可選；partial/status overlay 必須是不啟用其他app、不搶焦點的浮動視窗。目前client仍使用系統預設輸入、固定熱鍵，且沒有 overlay。
 
 **P5b：** InputMethodKit輸入法整合，把partial呈現在自己持有的marked text／組字區，final才commit，交付游標處直接修訂體驗。涵蓋組字生命週期、使用者編輯、焦點變更、取消與安全輸入；實際app相容測試見07。一般選單列app不能直接取代此層。P5a與P5b分開交付，server協定共用。
 
@@ -159,19 +161,17 @@ server repo只放reference clients与protocol測試；正式Swift app／OBS plug
 ## 可直接交給實作模型的提示
 
 ```text
-請在此repo實作TEA ASR Service，先完成P0模型可行性驗證。
+請在此repo延續TEA ASR Service；不要從P0重新開始，先閱讀本文件的目前狀態與P4／P5當前優先事項。
 
 先閱讀README.md、docs/02-research.md、docs/03-architecture.md、
 docs/05-validation.md、docs/06-handoff.md與docs/07-contextual-streaming.md；
 API實作時以docs/04-api.md為準。
-這些是設計規格，尚未有server或效能測試結果。
+目前P0–P3與P2a已完成並實測；server與效能驗證結果以本repo的實作、README及`docs/benchmarks/`報告為準。P4尚未開始，P5a Mac client可用但未完整驗收，P5b尚未實作。
 
 使用Apple Silicon原生Python 3.12、uv與MLX；優先模型為
 Alkd/TEA-ASR-1.1-MLX-4bit，固定文件中revision。
-先驗證mlx-audio v0.4.5的混合量化相容層、strict load、真實音訊輸出、
-離線運行、RAM、RTF與依賴體積，產出可重現report與lock files。
-P0也需量測累積音訊重辨識的總成本與後文修訂效果。
-P0通過後按P1→P2→P2a逐步實作；本輪若只要求P0，就停在P0交付。
+如需修改後端，先閱讀既有P0／P2／P2a報告與測試，僅針對當前工作重跑必要驗證；不要重新建立已完成的P0 spike。
+新的工作優先完成P4長檔案／保存／恢復，或依明確任務完成P5a Mac client驗收；按本文件各節的完成條件與未驗證限制逐步交付。
 P2a是正式的邊說邊修訂需求，使用partial完整替換與不可變final，
 先保留單一ASR模型，不預設增加常駐LLM。Mac client分浮動預覽P5a與IME組字P5b。
 

@@ -74,6 +74,18 @@ upstream會為短於1秒音訊補零。公開sample範圍、audio_ms與RTF分母
 
 後端介面保持小型：`load()`、`transcribe(AudioSegment, DecodeOptions)`、`capabilities()`、`close()`。Domain 結果不可洩漏 MLX array 或 upstream 結構。v0.1 不設動態 plugin loader。
 
+### 模型與 runtime 準備邊界
+
+模型資產與推論 runtime 的準備由 server／CLI 擁有，不能由 GUI 偷渡一條平行生命週期。
+只有使用者明確執行 `tea-asr model-prepare` 時才下載、驗證並準備固定資產；`serve` 遇到
+`unprepared` 應回報可操作的 prepare 提示，不在背景靜默下載。GUI 只負責呼叫或引導使用者
+執行 `tea-asr model-prepare`，以及顯示狀態、進度與診斷；它不得自行下載模型，也不得靜默
+啟動另一個 competing runtime／worker。GUI 可以控制並探測唯一的 server service，但模型
+準備與推論生命週期仍以 server 為單一 owner。
+
+這個邊界是基礎設施契約，與 Mac client 的 P5a／P5b 輸入體驗分開；不因 GUI 的輸入法工作
+而增加第二個模型 runtime。
+
 ## 音訊與端點
 
 HTTP／WS 即時入口只接受 16,000Hz、mono、signed 16-bit little-endian PCM。float32 轉換用 `/32768.0`。不信任 request 宣告後仍當 16kHz；格式不符直接拒絕。client 用可靠 resampler（Mac 可用 AVAudioConverter），不可沿用無抗混疊保證的簡單線性降採樣作為品質基準。
@@ -119,7 +131,7 @@ v0.2 斷線 session 保留10分鐘可 resume；超過期限 flush 已持久化�
 
 只 bind `127.0.0.1:8327`。即使是 localhost，仍使用隨機256-bit bearer token，設定檔權限0600；驗證 Host 與 WS Origin，預設不開 CORS。native client 可無 Origin；若有 Origin 只允許明確 allowlist。v0.1 不支援瀏覽器 token query parameter、token 放 URL 或廣泛 `*` origin。OBS browser overlay 由 bridge 提供呈現，不直接暴露 server 管理 token。
 
-HTTP 健康探針只回最小狀態；其餘需授權。log 不包含 bearer、PCM、prompt、逐字稿或任意使用者檔案路徑。關閉預設 telemetry，模型 prepare 才連外取得固定資產。
+HTTP 健康探針只回最小狀態；其餘需授權。log 不包含 bearer、PCM、prompt、逐字稿或任意使用者檔案路徑。關閉預設 telemetry，只有明確執行 `tea-asr model-prepare` 才連外取得固定資產。
 
 v0.2 LaunchAgent 用目前使用者登入工作階段、絕對 executable 路徑、固定 config 路徑，不依賴 shell PATH。`service install/uninstall/status` 保持冪等，不提權、不建立 system daemon。退出時停止 admission，最多30秒 drain，持久化狀態並清理子程序。使用 lock file＋port 檢查避免手動與 agent 啟動兩份服務。睡眠喚醒後先檢查 worker health；client 開新 session 或 durable resume，時間軸缺口必須明示。
 

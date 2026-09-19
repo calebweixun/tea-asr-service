@@ -13,7 +13,7 @@
 | 元件 | 狀態 |
 |---|---|
 | Server（`src/tea_asr/`） | P0–P3、P2a 完成並實測；全 Unicode PUA 過濾與兩個實測競態修復完成。143 個測試通過（`uv run pytest tests/unit tests/integration -q`） |
-| Mac client（`clients/macos/`） | 可用：聽寫、會議記錄、選單列狀態、服務啟停；M0 typed `AppState`／`ServiceProbe` 完成，6 個測試通過。M1 原生 status/settings UI 尚未開始 |
+| Mac client（`clients/macos/`） | 可用：聽寫、會議記錄、選單列狀態、服務啟停；M0 typed `AppState`／`ServiceProbe` 完成。原生 unified macOS UI（主視窗、狀態、權限、設定、診斷與逐字稿）已完成並通過目前 client 測試；P5a 的收音裝置／聲道、快捷鍵／PTT、feedback、non-activating overlay 與 deterministic 後處理仍按 [06](06-handoff.md) 驗收，P5b 尚未開始 |
 | OBS 外掛（另一個倉庫） | Phase A 完成：錯誤與連線狀態只在 Tools／設定診斷，不進字幕畫布；新 source 預設 Fixed 960px，舊 source migration 保留 Auto；CJK effective defaults 已修復。strict two-line layout 延至 Phase B |
 | P4 長檔案與保存 | 未開始，`/v1/jobs` 回 404 |
 
@@ -24,6 +24,30 @@ cd /Users/c2leb/Codes/tea-asr-service && uv run tea-asr serve
 ```
 
 健康檢查端點是 **`/healthz`**（不是 `/health`）。服務只聽 `127.0.0.1:8327`。
+
+### 1.1 Mac client 的文字與保存邊界
+
+Mac client 收到 server 的 final 後，依序使用以下概念；server 的 final、
+`segment_id`、`start_sample`／`end_sample`、revision 與 timestamp quality 都是
+不可變資料：
+
+- `rawTranscript`：server final event 的 `text`，作為 client 後處理唯一輸入；server
+  另外提供的 `raw_text` 只供 PUA／模型診斷，不直接貼入。
+- `cleanedText`：client 端 deterministic 規則（例如明確 opt-in 的字典／格式化）產生
+  的文字；規則不回寫 server，也不改 wire metadata。
+- `pasteText`：依目標 app 與輸出政策，由 `cleanedText` 產生的最後貼上文字。
+- `appliedSteps`：按順序記錄實際套用的規則 ID；若沒有規則則為空，不以猜測結果補寫。
+
+P5a 只允許本機、可重現的 deterministic 後處理，不引入 LLM 或 cloud formatter。
+partial 只能更新自己的預覽；只有 final 的 `rawTranscript` 才能進入
+`cleanedText`／`pasteText` 與貼上流程。目標保存邊界是聽寫歷史預設關閉；meeting
+autosave 只在使用者明確開始的 meeting session 內啟用。**目前實作尚未符合這條邊界：**
+`MainWindowController` 的 dictation final 也會經 `appendTranscriptEntry` 呼叫
+`autosaveTranscript`，寫入 `~/Library/Application Support/TEA ASR/meetings/`，因此目前仍會
+自動保存聽寫 final。這是待後續 phase 修正的 code issue，不是已完成的 opt-in 保證。未來若
+提供文字歷史，必須 opt-in、顯示 retention 與 delete；音訊歷史永不預設保存。這項保存邊界
+修正與 P5b（InputMethodKit 組字／游標處修訂）分開，P5b 仍按 [06](06-handoff.md) 驗收
+且尚未開始。
 
 ---
 
