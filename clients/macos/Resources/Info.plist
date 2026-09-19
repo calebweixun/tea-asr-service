@@ -22,7 +22,7 @@
   <string>1</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
-  <!-- Menu bar only: no Dock icon, no main window on launch. -->
+  <!-- Menu bar resident: no Dock icon; Finder/open reveals the main window. -->
   <key>LSUIElement</key>
   <true/>
   <key>NSMicrophoneUsageDescription</key>

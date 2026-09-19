@@ -1,6 +1,18 @@
 import AppKit
 import Carbon.HIToolbox
 
+/// Chooses the section shown when macOS launches or re-opens the app.
+///
+/// The menu bar action can still explicitly select a section, but Finder/open
+/// and a second open request should always reveal the same management window.
+/// Keeping this policy separate also makes the permission-first launch path
+/// easy to verify without constructing AppKit windows in tests.
+enum MainWindowLaunchPolicy {
+    static func section(requiredPermissionsGranted: Bool) -> MainWindowController.Section {
+        requiredPermissionsGranted ? .overview : .permissions
+    }
+}
+
 /// Menu bar app: dictation into the focused app, or a meeting transcript window.
 @MainActor
 final class AppController: NSObject, NSApplicationDelegate {
@@ -68,9 +80,28 @@ final class AppController: NSObject, NSApplicationDelegate {
             }
         }
         render()
-        if !permissions.state.requiredPermissionsGranted {
-            window.show(section: .permissions)
-        }
+        window.show(
+            section: MainWindowLaunchPolicy.section(
+                requiredPermissionsGranted: permissions.state.requiredPermissionsGranted
+            )
+        )
+    }
+
+    /// Finder/open sends a reopen request to an already-running accessory app.
+    /// Reuse the controller created at launch so there is one management window
+    /// even if the user opens the app repeatedly.
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        guard let window = mainWindow else { return false }
+        let requiredPermissionsGranted = permissionCoordinator?.state.requiredPermissionsGranted ?? true
+        window.show(
+            section: MainWindowLaunchPolicy.section(
+                requiredPermissionsGranted: requiredPermissionsGranted
+            )
+        )
+        return false
     }
 
     func applicationWillTerminate(_ notification: Notification) {

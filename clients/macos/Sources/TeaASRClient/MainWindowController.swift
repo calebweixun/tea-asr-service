@@ -108,6 +108,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.toolbarStyle = .unifiedCompact
         window.titlebarAppearsTransparent = false
         window.backgroundColor = .windowBackgroundColor
+        // The app is a menu-bar resident process, so closing the management
+        // window must not release it. Reopen requests should reveal this same
+        // controller instead of forcing a second window to be constructed.
+        window.isReleasedWhenClosed = false
         window.center()
         super.init(window: window)
         window.delegate = self
@@ -191,7 +195,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             button.translatesAutoresizingMaskIntoConstraints = false
             button.controlSize = .large
             button.heightAnchor.constraint(equalToConstant: 34).isActive = true
-            button.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             stack.addArrangedSubview(button)
             return button
         }
@@ -205,6 +208,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         root.addSubview(hint)
         root.addSubview(stack)
         root.addSubview(footer)
+        // Activate this constraint only after the stack has joined the root's
+        // hierarchy. Activating it while both views are detached makes AppKit
+        // raise an Auto Layout exception because there is no common ancestor.
+        for button in sectionButtons {
+            button.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
         NSLayoutConstraint.activate([
             heading.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
             heading.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
