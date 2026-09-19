@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
 import tarfile
 import time
 from dataclasses import dataclass
@@ -75,7 +74,6 @@ def load_samples(limit: int) -> list[Sample]:
 
 
 def decode_mp3_to_wav_array(data: bytes):
-    import io
     import subprocess
 
     import numpy as np

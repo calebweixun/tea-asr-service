@@ -20,11 +20,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from quality_eval import DATASET_ID, DATASET_REVISION, decode_mp3, load_samples  # noqa: E402
+from quality_eval import DATASET_ID, DATASET_REVISION, decode_mp3, load_samples
 
-from tea_asr.backend import TeaMlxBackend  # noqa: E402
-from tea_asr.model_manager import locate_prepared_model  # noqa: E402
-from tea_asr.model_spec import TEA_ASR_1_1_MLX_4BIT  # noqa: E402
+from tea_asr.backend import TeaMlxBackend
+from tea_asr.model_manager import locate_prepared_model
+from tea_asr.model_spec import TEA_ASR_1_1_MLX_4BIT
 
 PUA = re.compile(r"[-]")
 

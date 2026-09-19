@@ -25,9 +25,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from quality_eval import DATASET_ID, DATASET_REVISION, decode_mp3, load_samples  # noqa: E402
+from quality_eval import DATASET_ID, DATASET_REVISION, decode_mp3, load_samples
 
-from tea_asr.backend import TeaMlxBackend  # noqa: E402
+from tea_asr.backend import TeaMlxBackend
 
 # 跟 pua_ab_mlx_pass.py / pua_ab_bf16_pass.py 用同一個範圍（BMP 私用區），
 # 才能跟既有兩組數字直接比較。

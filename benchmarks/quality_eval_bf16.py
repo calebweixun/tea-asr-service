@@ -28,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from quality_eval import (  # noqa: E402
+from quality_eval import (
     DATASET_ID,
     DATASET_REVISION,
     PRIVATE_USE,
@@ -46,7 +46,6 @@ MODELS_DIR = REPO_ROOT / "models"
 
 
 def decode_mp3_to_wav_array(data: bytes):
-    import io
     import subprocess
 
     import numpy as np

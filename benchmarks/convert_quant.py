@@ -30,8 +30,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from tea_asr.model_manager import locate_prepared_model  # noqa: E402
-from tea_asr.model_spec import ModelSpec  # noqa: E402
+from tea_asr.model_manager import locate_prepared_model
+from tea_asr.model_spec import ModelSpec
 
 UPSTREAM_BF16 = ModelSpec(
     repo_id="JacobLinCool/TEA-ASR-1.1",
