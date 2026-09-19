@@ -8,6 +8,11 @@ let package = Package(
         .executableTarget(
             name: "TeaASRClient",
             path: "Sources/TeaASRClient"
+        ),
+        .testTarget(
+            name: "TeaASRClientTests",
+            dependencies: ["TeaASRClient"],
+            path: "Tests/TeaASRClientTests"
         )
     ]
 )

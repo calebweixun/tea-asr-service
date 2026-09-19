@@ -12,6 +12,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     private let settings = Settings()
     private let capture = AudioCapture()
     private lazy var client = ASRClient(settings: settings)
+    private let appState = AppState()
+    private let serviceProbe = ServiceProbe()
 
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
@@ -40,6 +42,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         buildMenu()
         wireClient()
+        appState.onChange = { [weak self] in self?.render() }
         registerHotKey()
         refreshServiceState()
         healthTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
@@ -136,32 +139,16 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     private func render() {
         let state: String
-        switch (mode, client.state) {
-        case (_, .failed):
+        switch appState.displayStatus {
+        case .failed, .retryable:
             state = "error"
-        case (.idle, _):
-            state = "idle"
-        default:
+        case .listening:
             state = "listening"
+        default:
+            state = "idle"
         }
         statusItem.button?.image = Self.menuBarImage(state)
-
-        switch client.state {
-        case .idle:
-            if mode == .idle {
-                statusEntry.title = serviceRunning ? "服務就緒，可開始聆聽" : "服務未執行"
-            } else {
-                statusEntry.title = "連線中…"
-            }
-        case .connecting:
-            statusEntry.title = "連線中…"
-        case .loadingModel:
-            statusEntry.title = "模型載入中…"
-        case .listening(_, let preview):
-            statusEntry.title = preview ? "聆聽中（含串流預覽）" : "聆聽中"
-        case .failed(let message):
-            statusEntry.title = "錯誤：\(message.prefix(60))"
-        }
+        statusEntry.title = appState.displayStatus.title
 
         toggleEntry.title = (mode == .dictation ? "停止聽寫" : "開始聽寫")
             + (hotKeyRegistered ? "" : "（⌥⌘D 被其他 app 占用）")
@@ -191,11 +178,12 @@ final class AppController: NSObject, NSApplicationDelegate {
     // MARK: - Service
 
     private func refreshServiceState() {
-        ServiceControl.probeHealth(host: settings.host, port: settings.port) { [weak self] ok in
+        let token = try? settings.token()
+        serviceProbe.refresh(host: settings.host, port: settings.port, token: token) { [weak self] result in
             guard let self else { return }
-            let changed = self.serviceRunning != ok
-            self.serviceRunning = ok
-            if changed { self.render() }
+            self.appState.updateService(result)
+            self.serviceRunning = self.appState.serviceReachable == true
+            self.render()
         }
     }
 
@@ -299,11 +287,13 @@ final class AppController: NSObject, NSApplicationDelegate {
             meeting = window
         }
         mode = newMode
+        appState.setMode(newMode == .meeting ? .meeting : .dictation)
         capture.onFrame = { [weak self] frame in self?.client.send(pcm: frame) }
         do {
             try capture.start()
         } catch {
             mode = .idle
+            appState.setMode(.idle)
             meeting?.close()
             meeting = nil
             alert("無法開始錄音", error.localizedDescription)
@@ -319,6 +309,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         capture.stop()
         client.stop()
         mode = .idle
+        appState.setMode(.idle)
         meeting?.setStatus("已停止")
         render()
     }
@@ -326,13 +317,15 @@ final class AppController: NSObject, NSApplicationDelegate {
     // MARK: - Client wiring
 
     private func wireClient() {
-        client.onState = { [weak self] _ in
+        client.onState = { [weak self] state in
             guard let self else { return }
+            self.appState.updateClientState(state)
             self.render()
-            if case .failed(let message) = self.client.state {
+            if case .failed(let issue) = state {
                 self.capture.stop()
                 self.mode = .idle
-                self.meeting?.setStatus("錯誤：\(message)")
+                self.appState.setMode(.idle)
+                self.meeting?.setStatus("錯誤：\(issue.message)")
                 self.render()
             }
         }
@@ -379,6 +372,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     /// Show the last final in the menu so the user can tell recognition from
     /// insertion problems without any extra permission.
     private func showLastText(_ text: String) {
+        appState.updateLastText(text)
         let trimmed = text.count > 48 ? String(text.prefix(48)) + "…" : text
         lastTextEntry.title = "最近一句：\(trimmed)"
         lastTextEntry.isHidden = trimmed.isEmpty

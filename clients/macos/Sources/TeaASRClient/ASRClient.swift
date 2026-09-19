@@ -11,7 +11,7 @@ final class ASRClient: NSObject {
         case connecting
         case loadingModel
         case listening(protocolVersion: String, preview: Bool)
-        case failed(String)
+        case failed(ConnectionIssue)
     }
 
     /// The service unloads the model when idle, and the first connection is what
@@ -82,7 +82,14 @@ final class ASRClient: NSObject {
         do {
             token = try settings.token()
         } catch {
-            state = .failed("找不到服務的 token：\(settings.tokenFile.path)\n請先啟動 tea-asr serve。")
+            state = .failed(
+                ConnectionIssue(
+                    code: "token_missing",
+                    message: "找不到服務的 token：\(settings.tokenFile.path)\n請先啟動 tea-asr serve。",
+                    retryable: false,
+                    closeCode: nil
+                )
+            )
             return
         }
 
@@ -132,7 +139,14 @@ final class ASRClient: NSObject {
                 // clock kept counting, so the server would see a continuous
                 // timeline that never happened. docs/04 forbids that, so the
                 // session ends loudly instead.
-                self.fail("送出速度跟不上服務的流量窗口，session 已停止（不會靜默丟掉音訊）。")
+                self.fail(
+                    ConnectionIssue(
+                        code: "flow_control_backlog",
+                        message: "送出速度跟不上服務的流量窗口，session 已停止（不會靜默丟掉音訊）。",
+                        retryable: true,
+                        closeCode: nil
+                    )
+                )
                 return
             }
             self.drain()
@@ -149,7 +163,17 @@ final class ASRClient: NSObject {
             nextSeq += 1
             nextSample += samples
             task.send(.data(message)) { [weak self] error in
-                if let error { self?.fail("送出音訊失敗：\(error.localizedDescription)") }
+                guard let self, let error else { return }
+                let issue = ConnectionIssue(
+                    code: "audio_send_failed",
+                    message: "送出音訊失敗：\(error.localizedDescription)",
+                    retryable: true,
+                    closeCode: nil
+                )
+                self.queue.async { [weak self] in
+                    guard let self, self.task === task else { return }
+                    self.fail(issue)
+                }
             }
         }
     }
@@ -161,7 +185,17 @@ final class ASRClient: NSObject {
             let text = String(data: data, encoding: .utf8)
         else { return }
         task.send(.string(text)) { [weak self] error in
-            if let error { self?.fail("送出控制訊息失敗：\(error.localizedDescription)") }
+            guard let self, let error else { return }
+            let issue = ConnectionIssue(
+                code: "control_send_failed",
+                message: "送出控制訊息失敗：\(error.localizedDescription)",
+                retryable: true,
+                closeCode: nil
+            )
+            self.queue.async { [weak self] in
+                guard let self, self.task === task else { return }
+                self.fail(issue)
+            }
         }
     }
 
@@ -179,7 +213,12 @@ final class ASRClient: NSObject {
                         self.teardown()
                         return
                     }
-                    self.fail("連線中斷：\(error.localizedDescription)")
+                    self.fail(
+                        ConnectionIssue.fromCloseCode(
+                            task.closeCode.rawValue,
+                            message: "連線中斷：\(error.localizedDescription)"
+                        )
+                    )
                 }
             case .success(let message):
                 if case .string(let text) = message {
@@ -211,7 +250,14 @@ final class ASRClient: NSObject {
                     hello.modelState == "loading" || hello.modelState == "idle_unloaded",
                     modelWaits < Self.modelWaitAttempts
                 else {
-                    fail("模型無法使用（\(hello.modelState)）。")
+                    fail(
+                        ConnectionIssue(
+                            code: "model_unavailable",
+                            message: "模型無法使用（\(hello.modelState)）。",
+                            retryable: false,
+                            closeCode: nil
+                        )
+                    )
                     return
                 }
                 modelWaits += 1
@@ -263,7 +309,7 @@ final class ASRClient: NSObject {
                 DispatchQueue.main.async { [weak self] in self?.onTimelineGap?(message) }
                 return
             }
-            fail("\(item.code)：\(item.message)")
+            fail(ConnectionIssue.fromWire(code: item.code, message: item.message, retryable: item.retryable))
         case "session.stopped", "session.cancelled":
             teardown()
         default:
@@ -287,8 +333,8 @@ final class ASRClient: NSObject {
         DispatchQueue.main.async { [weak self] in self?.onNotice?(message) }
     }
 
-    private func fail(_ message: String) {
-        state = .failed(message)
+    private func fail(_ issue: ConnectionIssue) {
+        state = .failed(issue)
         task?.cancel(with: .normalClosure, reason: nil)
         teardown(keepState: true)
     }

@@ -37,8 +37,8 @@ enum SelfTest {
             switch state {
             case .listening(_, let preview):
                 print("session 已建立\(preview ? "（含串流預覽）" : "")")
-            case .failed(let message):
-                failure = message
+            case .failed(let issue):
+                failure = issue.message
                 finished = true
             case .idle:
                 finished = true
