@@ -298,6 +298,32 @@ final class M0StateTests: XCTestCase {
         XCTAssertEqual(notReadyIssue.code, "service_not_ready")
     }
 
+    func testAppStateDistinguishesIdleUnloadedFromLoading() {
+        let standby = AppState.displayStatus(
+            clientState: .idle,
+            mode: .idle,
+            serviceSnapshot: makeSnapshot(modelState: "idle_unloaded", lastError: nil),
+            serviceReachable: true,
+            serviceError: nil
+        )
+        XCTAssertEqual(standby, .standby)
+        XCTAssertEqual(standby.title, "模型待命中，使用時會載入")
+
+        for modelState in ["loading", "unprepared"] {
+            XCTAssertEqual(
+                AppState.displayStatus(
+                    clientState: .idle,
+                    mode: .idle,
+                    serviceSnapshot: makeSnapshot(modelState: modelState, lastError: nil),
+                    serviceReachable: true,
+                    serviceError: nil
+                ),
+                .loading,
+                "\(modelState) must remain a loading state"
+            )
+        }
+    }
+
     private func makeSnapshot(modelState: String, lastError: String?) -> ServiceSnapshot {
         ServiceSnapshot(
             healthzOK: true,

@@ -75,6 +75,7 @@ enum AppDisplayStatus: Equatable {
     case offline
     case connecting
     case loading
+    case standby
     case ready
     case listening(mode: AppMode, preview: Bool)
     case retryable(ConnectionIssue)
@@ -90,6 +91,8 @@ enum AppDisplayStatus: Equatable {
             return "連線中…"
         case .loading:
             return "模型載入中…"
+        case .standby:
+            return "模型待命中，使用時會載入"
         case .ready:
             return "服務就緒，可開始聆聽"
         case .listening(_, let preview):
@@ -189,8 +192,10 @@ final class AppState {
                 return serviceReachable == false ? .offline : .checking
             }
             switch serviceSnapshot.status.modelState {
-            case "loading", "idle_unloaded", "unprepared":
+            case "loading", "unprepared":
                 return .loading
+            case "idle_unloaded":
+                return .standby
             case "recovering":
                 return .retryable(Self.workerIssue(from: serviceSnapshot.status, retryable: true))
             case "failed":
