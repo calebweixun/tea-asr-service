@@ -2,6 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 
 /// Menu bar app: dictation into the focused app, or a meeting transcript window.
+@MainActor
 final class AppController: NSObject, NSApplicationDelegate {
     private enum Mode {
         case idle
@@ -30,8 +31,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var healthTimer: Timer?
 
     private var mode: Mode = .idle
-    private var meeting: MeetingWindow?
-    private var preferences: PreferencesWindow?
+    private var mainWindow: MainWindowController?
+    private var permissionCoordinator: PermissionCoordinator?
     private var hotKeyRef: EventHotKeyRef?
     private var hotKeyRegistered = false
     /// Wall clock of the current session's sample 0, so a session restarted after
@@ -41,14 +42,34 @@ final class AppController: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         buildMenu()
+        let permissions = PermissionCoordinator()
+        permissionCoordinator = permissions
+        let window = MainWindowController(settings: settings, appState: appState, permissions: permissions)
+        permissions.updateAutoInsertRequirement(settings.autoInsert)
+        window.onStartDictation = { [weak self] in self?.toggleDictation() }
+        window.onStartMeeting = { [weak self] in self?.toggleMeeting() }
+        window.onStopSession = { [weak self] in self?.stopSession() }
+        window.onRefreshService = { [weak self] in self?.refreshServiceState() }
+        window.onSettingsChanged = { [weak self] in
+            self?.permissionCoordinator?.updateAutoInsertRequirement(self?.settings.autoInsert ?? true)
+        }
+        mainWindow = window
         wireClient()
-        appState.onChange = { [weak self] in self?.render() }
+        appState.onChange = { [weak self] in
+            self?.mainWindow?.refresh()
+            self?.render()
+        }
         registerHotKey()
         refreshServiceState()
         healthTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            self?.refreshServiceState()
+            Task { @MainActor [weak self] in
+                self?.refreshServiceState()
+            }
         }
         render()
+        if !permissions.state.requiredPermissionsGranted {
+            window.show(section: .permissions)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -103,6 +124,11 @@ final class AppController: NSObject, NSApplicationDelegate {
         menu.addItem(autoStartEntry)
 
         menu.addItem(.separator())
+        let mainWindowEntry = NSMenuItem(
+            title: "主畫面…", action: #selector(showMainWindow), keyEquivalent: "0"
+        )
+        mainWindowEntry.target = self
+        menu.addItem(mainWindowEntry)
         let settingsEntry = NSMenuItem(
             title: "設定…", action: #selector(showPreferences), keyEquivalent: ","
         )
@@ -168,7 +194,9 @@ final class AppController: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     @objc private func toggleDictation() {
-        mode == .dictation ? stopSession() : start(mode: .dictation)
+        mode == .dictation
+            ? stopSession()
+            : start(mode: .dictation)
     }
 
     @objc private func toggleMeeting() {
@@ -230,20 +258,16 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showPreferences() {
-        if preferences == nil {
-            let window = PreferencesWindow(settings: settings)
-            window.onClose = { [weak self] in
-                self?.preferences = nil
-                self?.render()
-            }
-            preferences = window
-        }
-        preferences?.showWindow(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        mainWindow?.show(section: .settings)
+    }
+
+    @objc private func showMainWindow() {
+        mainWindow?.show(section: .overview)
     }
 
     @objc private func toggleAutoInsert() {
         settings.autoInsert.toggle()
+        permissionCoordinator?.updateAutoInsertRequirement(settings.autoInsert)
         if settings.autoInsert, !TextInjector.isTrusted {
             TextInjector.requestTrust()
             alert(
@@ -279,38 +303,47 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func reallyStart(mode newMode: Mode) {
-        if newMode == .meeting {
-            let window = MeetingWindow()
-            window.onClose = { [weak self] in self?.stopSession() }
-            window.showWindow(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            meeting = window
-        }
         mode = newMode
         appState.setMode(newMode == .meeting ? .meeting : .dictation)
         capture.onFrame = { [weak self] frame in self?.client.send(pcm: frame) }
+        capture.onDiagnostics = { [weak self] diagnostics in
+            DispatchQueue.main.async {
+                self?.mainWindow?.setAudioDiagnostics(diagnostics)
+            }
+        }
         do {
             try capture.start()
         } catch {
             mode = .idle
             appState.setMode(.idle)
-            meeting?.close()
-            meeting = nil
+            mainWindow?.setStatus("無法開始錄音：\(error.localizedDescription)")
             alert("無法開始錄音", error.localizedDescription)
             return
+        }
+        if newMode == .dictation {
+            // The final text is inserted into the app that was active before
+            // the user opened TEA ASR. Hiding the management window from every
+            // dictation entry point before the socket can produce a final
+            // prevents TEA ASR from becoming the paste target.
+            mainWindow?.hideForDictation()
         }
         // Dictation only ever inserts finals, so a preview there would cost
         // inference nobody sees.
         client.connect(wantsPreview: newMode == .meeting && settings.revisablePreview)
+        if newMode == .meeting {
+            mainWindow?.show(section: .operations)
+        }
         render()
     }
 
     private func stopSession() {
         capture.stop()
         client.stop()
-        mode = .idle
-        appState.setMode(.idle)
-        meeting?.setStatus("已停止")
+        // Keep the active mode until ASRClient receives the server's
+        // session.stopped. The server may emit one last transcript.final while
+        // draining the requested through_seq; switching to idle here would
+        // silently discard that final in wireClient.
+        mainWindow?.setStatus("停止中…等待最後一句")
         render()
     }
 
@@ -320,12 +353,22 @@ final class AppController: NSObject, NSApplicationDelegate {
         client.onState = { [weak self] state in
             guard let self else { return }
             self.appState.updateClientState(state)
+            self.mainWindow?.setSessionState(state)
             self.render()
-            if case .failed(let issue) = state {
+            if case .idle = state, self.mode != .idle {
+                // This is the completion edge of a normal stop. It is also
+                // where a new session is allowed to begin, so the old mode is
+                // retained until all final callbacks have been delivered.
                 self.capture.stop()
                 self.mode = .idle
                 self.appState.setMode(.idle)
-                self.meeting?.setStatus("錯誤：\(issue.message)")
+                self.mainWindow?.setStatus("已停止")
+                self.render()
+            } else if case .failed(let issue) = state {
+                self.capture.stop()
+                self.mode = .idle
+                self.appState.setMode(.idle)
+                self.mainWindow?.setStatus("錯誤：\(issue.message)")
                 self.render()
             }
         }
@@ -336,7 +379,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
         client.onTimelineGap = { [weak self] reason in
             guard let self else { return }
-            self.meeting?.appendGap(reason)
+            self.mainWindow?.appendGap(reason)
             guard self.mode != .idle else { return }
             // Keep recording: a closed lid should not silently end a meeting.
             self.client.connect(wantsPreview: self.mode == .meeting && self.settings.revisablePreview)
@@ -344,14 +387,19 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
         client.onPartial = { [weak self] item in
             guard let self else { return }
-            self.meeting?.showPartial(item.text, spokenAt: self.spokenAt(item.startSample))
+            self.mainWindow?.showPartial(item.text, spokenAt: self.spokenAt(item.startSample))
         }
         client.onFinal = { [weak self] item in
             guard let self else { return }
             switch self.mode {
             case .meeting:
-                self.meeting?.appendFinal(item.text, spokenAt: self.spokenAt(item.startSample))
+                self.mainWindow?.appendFinal(item.text, spokenAt: self.spokenAt(item.startSample))
             case .dictation:
+                // Keep both modes visible in the same management window. The
+                // clipboard/insertion path remains independent of presentation
+                // so a dictation final is still inspectable when auto-insert is
+                // disabled or Accessibility permission is missing.
+                self.mainWindow?.appendFinal(item.text, spokenAt: self.spokenAt(item.startSample))
                 self.showLastText(item.text)
                 if self.settings.autoInsert, TextInjector.isTrusted {
                     TextInjector.insert(item.text)
@@ -365,7 +413,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             }
         }
         client.onNotice = { [weak self] message in
-            self?.meeting?.setStatus(message)
+            self?.mainWindow?.setStatus(message)
         }
     }
 

@@ -14,7 +14,12 @@ if let index = arguments.firstIndex(of: "--selftest"), index + 1 < arguments.cou
     )
 }
 
-let application = NSApplication.shared
-let controller = AppController()
-application.delegate = controller
-application.run()
+// AppKit enters on the main thread, so make the actor boundary explicit for
+// the permission and window controllers while keeping the tiny executable
+// entry point synchronous.
+MainActor.assumeIsolated {
+    let application = NSApplication.shared
+    let controller = AppController()
+    application.delegate = controller
+    application.run()
+}
