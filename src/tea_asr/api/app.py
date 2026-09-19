@@ -14,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from tea_asr.api.stream import (
+    ContinuousSessionAdmission,
     StreamSession,
     filter_private_use_characters,
     private_use_warnings,
@@ -124,6 +125,9 @@ def create_app(
     activity = Activity()
     loading = asyncio.Lock()
     sessions: set[StreamSession] = set()
+    continuous_admission = ContinuousSessionAdmission(
+        settings.max_continuous_sessions if vad is not None else None
+    )
 
     async def ensure_loaded() -> None:
         """Bring the worker back after an idle unload.
@@ -284,8 +288,16 @@ def create_app(
 
     @app.websocket("/v1/stream")
     async def stream(websocket: WebSocket) -> None:
+        model_state = worker.state
         if worker.state == "idle_unloaded":
+            # Reload is intentionally asynchronous so opening a stream never
+            # blocks for model load.  Publish the transient state captured for
+            # this connection before the task can advance the worker; passing
+            # the stale `idle_unloaded` value would make session.start report
+            # non-retryable `model_unavailable` and strand clients that arrived
+            # during the reload window.
             asyncio.create_task(ensure_loaded())
+            model_state = "loading"
         activity.sessions += 1
         activity.touch()
         try:
@@ -294,10 +306,10 @@ def create_app(
                 scheduler,
                 auth_token=auth_token,
                 config=settings,
-                model_state=worker.state,
+                model_state=model_state,
                 vad=vad,
                 registry=sessions,
-                max_continuous_sessions=settings.max_continuous_sessions if vad is not None else 0,
+                continuous_admission=continuous_admission,
             )
         finally:
             activity.sessions -= 1

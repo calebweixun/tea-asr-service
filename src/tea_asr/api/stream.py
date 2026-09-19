@@ -77,6 +77,16 @@ REVISABLE_END_SILENCE_MS = 900
 
 logger = logging.getLogger("tea_asr.stream")
 
+# Unicode reserves three disjoint ranges for application-private characters.
+# ASR output is ordinary human text, so none of these code points is a valid
+# Traditional Chinese character or punctuation mark. Keep the ranges explicit
+# instead of applying broad Unicode normalization/sanitization.
+PRIVATE_USE_RANGES: tuple[tuple[int, int], ...] = (
+    (0xE000, 0xF8FF),  # Basic Multilingual Plane
+    (0xF0000, 0xFFFFD),  # Supplementary Private Use Area-A (Plane 15)
+    (0x100000, 0x10FFFD),  # Supplementary Private Use Area-B (Plane 16)
+)
+
 
 class StreamScheduler(Protocol):
     async def transcribe(
@@ -84,12 +94,23 @@ class StreamScheduler(Protocol):
     ) -> tuple[dict[str, Any], int]: ...
 
 
+def _is_private_use_codepoint(codepoint: int) -> bool:
+    return any(start <= codepoint <= end for start, end in PRIVATE_USE_RANGES)
+
+
 def private_use_warnings(text: str) -> list[str]:
-    return ["private_use_characters"] if any(0xE000 <= ord(c) <= 0xF8FF for c in text) else []
+    return ["private_use_characters"] if any(
+        _is_private_use_codepoint(ord(char)) for char in text
+    ) else []
 
 
 def filter_private_use_characters(text: str) -> str:
-    """Strip Unicode Private Use Area characters (U+E000-U+F8FF).
+    """Strip all Unicode Private Use Area characters.
+
+    This covers BMP U+E000-U+F8FF, Plane 15 U+F0000-U+FFFFD, and Plane 16
+    U+100000-U+10FFFD. It deliberately does not apply NFKC or remove other
+    symbols/control categories: the server must preserve legitimate CJK,
+    punctuation, emoji, and mixed-language text.
 
     Stopgap for a defect in `Alkd/TEA-ASR-1.1-MLX-4bit`, not a permanent
     feature. Measurements in docs/benchmarks/pua-bf16-ab-report.md show:
@@ -101,16 +122,19 @@ def filter_private_use_characters(text: str) -> str:
       memory and +20% latency, so changing bit width does not fix it.
     - Sentence-by-sentence diffing confirms PUA codepoints are *inserted*
       between otherwise-identical, correct text, never substituted for it,
-      and the U+E000-U+F8FF range never legitimately appears in Traditional
-      Chinese, punctuation, or mixed CJK/Latin output. Stripping it therefore
-      cannot delete real content.
+      the tested BMP PUA range never legitimately appears in Traditional
+      Chinese, punctuation, or mixed CJK/Latin output. Stripping PUA therefore
+      cannot delete real ASR content; raw output remains available for
+      diagnostics.
 
     Remove this function and `ServiceConfig.filter_pua` once the service
     switches to a model revision (e.g. a clean BF16 or a correctly quantized
     checkpoint) that upstream confirms no longer emits PUA output.
     """
 
-    return "".join(ch for ch in text if not (0xE000 <= ord(ch) <= 0xF8FF))
+    return "".join(
+        char for char in text if not _is_private_use_codepoint(ord(char))
+    )
 
 
 @dataclass(slots=True)
@@ -144,6 +168,46 @@ class SessionState:
     cancelled: bool = False
 
 
+class ContinuousSessionAdmission:
+    """Atomically reserve slots for live ``continuous`` sessions.
+
+    The WebSocket handshake for each connection runs in its own task.  A plain
+    count of the sessions whose profile has already been assigned has a race:
+    two tasks can both inspect the count before either task reaches
+    ``StreamSession.run``'s profile assignment.  Reservations are made while
+    holding one event-loop lock, so an admitted-but-not-yet-started session is
+    counted immediately.
+    """
+
+    def __init__(self, max_sessions: int | None) -> None:
+        self.max_sessions = max_sessions
+        self._reserved: set[object] = set()
+        self._lock = asyncio.Lock()
+
+    async def try_acquire(self, session: object) -> bool:
+        """Reserve one slot, returning ``False`` when the limit is reached."""
+
+        if self.max_sessions is None:
+            return True
+        async with self._lock:
+            if len(self._reserved) >= self.max_sessions:
+                return False
+            self._reserved.add(session)
+            return True
+
+    def release(self, session: object) -> None:
+        """Release a reservation.
+
+        This is intentionally synchronous.  All callers run on the same
+        asyncio event loop, and ``try_acquire`` has no suspension point after
+        entering its critical section, so a discard cannot interleave with the
+        count-and-add operation.  Keeping release non-awaiting also means a
+        cancelled WebSocket task cannot leak a slot while tearing down.
+        """
+
+        self._reserved.discard(session)
+
+
 class StreamSession:
     """One WebSocket connection: one audio timeline, one ordered segment stream.
 
@@ -161,20 +225,20 @@ class StreamSession:
         model_state: str,
         vad: SileroVad | None = None,
         registry: set[StreamSession] | None = None,
-        max_continuous_sessions: int | None = None,
+        continuous_admission: ContinuousSessionAdmission | None = None,
     ) -> None:
         self._websocket = websocket
         self._scheduler = scheduler
         self._config = config
         self._model_state = model_state
         self._vad = vad
-        #: Other live sessions on this service, so `_read_session_start` can
-        #: count how many are already `continuous` before admitting one more
-        #: (docs/benchmarks/concurrency-report.md). `None` in tests that build
-        #: a `StreamSession` directly without a registry — such a session is
-        #: never capacity-limited, matching the pre-existing behaviour.
+        #: Other live sessions on this service, used by the sleep watcher.
         self._registry = registry
-        self._max_continuous_sessions = max_continuous_sessions
+        #: Shared, atomic admission state for continuous sessions.  ``None``
+        #: in tests that build a ``StreamSession`` directly keeps the old
+        #: unbounded test-double behaviour.
+        self._continuous_admission = continuous_admission
+        self._continuous_reserved = False
         self._state = SessionState()
         self._writer = EventWriter(websocket, self._state.session_id)
         self._profile = "utterance"
@@ -206,22 +270,14 @@ class StreamSession:
                 "unsupported_option",
                 "continuous profile 需要 VAD 資產；請先執行 tea-asr model-prepare。",
             )
-        if (
-            start.profile == "continuous"
-            and self._registry is not None
-            and self._max_continuous_sessions is not None
-        ):
-            active = sum(
-                1
-                for other in self._registry
-                if other is not self and other.is_continuous
-            )
-            if active >= self._max_continuous_sessions:
+        if start.profile == "continuous" and self._continuous_admission is not None:
+            if not await self._continuous_admission.try_acquire(self):
                 raise ApiError(
                     "concurrent_session_limit",
-                    f"併發 continuous session 已達上限（{self._max_continuous_sessions}）"
+                    f"併發 continuous session 已達上限（{self._continuous_admission.max_sessions}）"
                     "，請稍後再試或等其他 session 結束。",
                 )
+            self._continuous_reserved = True
         if start.durable:
             raise ApiError("unsupported_option", "durable session 要等 P4 完成才提供。")
         if start.transcript_mode == "revisable" and not self._config.revisable_preview:
@@ -859,6 +915,15 @@ class StreamSession:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    def release_continuous_admission(self) -> None:
+        """Return this session's reserved continuous slot, if any."""
+
+        if not self._continuous_reserved:
+            return
+        self._continuous_reserved = False
+        if self._continuous_admission is not None:
+            self._continuous_admission.release(self)
+
     @property
     def writer(self) -> EventWriter:
         return self._writer
@@ -867,9 +932,9 @@ class StreamSession:
     def is_continuous(self) -> bool:
         """True once this session's `session.start` picked the continuous profile.
 
-        False before `session.start` is processed (default is "utterance"),
-        so a session still being admitted never counts against itself in the
-        concurrency check above.
+        The admission limit uses ``ContinuousSessionAdmission`` reservations,
+        so a session still being admitted is counted there before this profile
+        field is assigned by ``run``.
         """
 
         return self._profile == "continuous"
@@ -906,7 +971,7 @@ async def run_stream(
     model_state: str,
     vad: SileroVad | None = None,
     registry: set[StreamSession] | None = None,
-    max_continuous_sessions: int | None = None,
+    continuous_admission: ContinuousSessionAdmission | None = None,
 ) -> None:
     if websocket.headers.get("authorization") != f"Bearer {auth_token}":
         await websocket.close(code=1008, reason="unauthenticated")
@@ -924,7 +989,7 @@ async def run_stream(
         model_state=model_state,
         vad=vad,
         registry=registry,
-        max_continuous_sessions=max_continuous_sessions,
+        continuous_admission=continuous_admission,
     )
     if registry is not None:
         registry.add(session)
@@ -946,6 +1011,7 @@ async def run_stream(
     finally:
         if registry is not None:
             registry.discard(session)
+        session.release_continuous_admission()
         for task in (main_task, writer_task, watchdog_task):
             task.cancel()
         # Teardown runs while the connection is already going away, so a

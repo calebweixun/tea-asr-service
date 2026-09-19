@@ -67,8 +67,9 @@ class ServiceConfig:
     """
 
     revisable_preview: bool = True
-    #: Strip Unicode Private Use Area characters (U+E000-U+F8FF) from
-    #: recognized text before it reaches the client. This is a stopgap for a
+    #: Strip Unicode Private Use Area characters (BMP U+E000-U+F8FF and
+    #: supplementary U+F0000-U+FFFFD/U+100000-U+10FFFD) from recognized text
+    #: before it reaches the client. This is a stopgap for a
     #: defect in the deployed MLX 4bit quantization of the model, not a
     #: permanent feature — see `filter_private_use_characters` in
     #: `tea_asr/api/stream.py` for the measurements and the removal

@@ -15,6 +15,19 @@ def test_filters_the_full_pua_range() -> None:
     assert filter_private_use_characters(text) == ""
 
 
+def test_filters_all_unicode_private_use_ranges_but_not_adjacent_codepoints() -> None:
+    private_use = "".join(
+        chr(codepoint)
+        for codepoint in (0xE000, 0xF8FF, 0xF0000, 0xFFFFD, 0x100000, 0x10FFFD)
+    )
+    adjacent = "".join(
+        chr(codepoint) for codepoint in (0xDFFF, 0xF900, 0xEFFFF, 0xFFFFE, 0x10FFFE)
+    )
+
+    assert filter_private_use_characters(f"前{private_use}後") == "前後"
+    assert filter_private_use_characters(adjacent) == adjacent
+
+
 def test_does_not_touch_normal_traditional_chinese_punctuation_or_mixed_text() -> None:
     samples = [
         "下午跟 client 開會。",
@@ -29,5 +42,12 @@ def test_does_not_touch_normal_traditional_chinese_punctuation_or_mixed_text() -
 
 def test_warnings_are_reported_from_the_original_unfiltered_text() -> None:
     raw = "測試文字"
+    assert private_use_warnings(raw) == ["private_use_characters"]
+    assert private_use_warnings(filter_private_use_characters(raw)) == []
+
+
+def test_warnings_cover_all_unicode_private_use_ranges() -> None:
+    raw = "".join(chr(codepoint) for codepoint in (0xF0000, 0xFFFFD, 0x100000, 0x10FFFD))
+
     assert private_use_warnings(raw) == ["private_use_characters"]
     assert private_use_warnings(filter_private_use_characters(raw)) == []

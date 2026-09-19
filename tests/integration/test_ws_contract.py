@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import struct
+import threading
 from typing import Any
 
 import numpy as np
@@ -217,6 +219,29 @@ def test_final_transcript_is_filtered_of_pua_by_default(supervisor: FakeSupervis
         assert final["warnings"] == ["private_use_characters"]
 
 
+def test_final_transcript_filters_all_private_use_ranges(
+    supervisor: FakeSupervisor,
+) -> None:
+    raw = "測試" + "".join(
+        chr(codepoint) for codepoint in (0xF0000, 0xFFFFD, 0x100000, 0x10FFFD)
+    ) + "文字"
+    supervisor.text = raw
+    with build_client(supervisor) as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as socket:
+        socket.receive_json()
+        socket.send_json(START)
+        socket.receive_json()
+        send_audio(socket, 10)
+        socket.send_json({"type": "audio.commit", "request_id": "c1", "through_seq": 9})
+        events = drain_until(socket, "transcript.final")
+        final = next(event for event in events if event["type"] == "transcript.final")
+
+    assert final["text"] == "測試文字"
+    assert final["raw_text"] == raw
+    assert final["warnings"] == ["private_use_characters"]
+
+
 def test_final_transcript_keeps_pua_when_filter_is_disabled(
     supervisor: FakeSupervisor,
 ) -> None:
@@ -250,6 +275,24 @@ def test_segment_entirely_pua_is_skipped_as_empty_not_no_speech(
         events = drain_until(socket, "segment.skipped")
         assert events[-1]["reason"] == "empty"
         assert not any(event["type"] == "transcript.final" for event in events)
+
+
+def test_extended_private_use_only_segment_is_skipped_as_empty(
+    supervisor: FakeSupervisor,
+) -> None:
+    supervisor.text = "".join(chr(codepoint) for codepoint in (0xF0000, 0x100000))
+    with build_client(supervisor) as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as socket:
+        socket.receive_json()
+        socket.send_json(START)
+        socket.receive_json()
+        send_audio(socket, 10)
+        socket.send_json({"type": "audio.commit", "request_id": "c1", "through_seq": 9})
+        events = drain_until(socket, "segment.skipped")
+
+    assert events[-1]["reason"] == "empty"
+    assert not any(event["type"] == "transcript.final" for event in events)
 
 
 def test_silent_segment_is_skipped_not_invented(supervisor: FakeSupervisor) -> None:
@@ -391,9 +434,45 @@ def test_partial_preview_is_also_filtered_of_pua(supervisor: FakeSupervisor) -> 
         assert partial["text"] == "測試"
 
 
+def test_partial_preview_filters_supplementary_private_use_ranges(
+    supervisor: FakeSupervisor,
+) -> None:
+    raw = "測試" + "".join(chr(codepoint) for codepoint in (0xF0000, 0x100000))
+    supervisor.text = raw
+    with build_client(supervisor, revisable_preview=True) as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as socket:
+        socket.receive_json()
+        socket.send_json({**START, "transcript_mode": "revisable"})
+        socket.receive_json()
+        for seq in range(10):
+            socket.send_bytes(frame(seq, seq * 1600))
+        partial = drain_until(socket, "transcript.partial")[-1]
+
+    assert partial["text"] == "測試"
+
+
 # --- continuous profile -----------------------------------------------------
 
 CONTINUOUS = {**START, "profile": "continuous"}
+
+
+class ReloadingSupervisor(FakeSupervisor):
+    """Hold an idle-unloaded reload open so WS state reporting is observable."""
+
+    def __init__(self) -> None:
+        super().__init__(state="ready")
+        self.reload_started = threading.Event()
+        self.allow_reload = threading.Event()
+
+    async def start(self) -> None:
+        if self.state != "idle_unloaded":
+            return
+        self.state = "loading"
+        self.reload_started.set()
+        while not self.allow_reload.is_set():
+            await asyncio.sleep(0.001)
+        self.state = "ready"
 
 
 def tone_frame(seq: int, start_sample: int) -> bytes:
@@ -420,6 +499,27 @@ def test_continuous_is_refused_without_a_vad_asset(client: TestClient) -> None:
         error = socket.receive_json()
         assert error["code"] == "unsupported_option"
         assert "VAD" in error["message"]
+
+
+def test_idle_unloaded_stream_reports_retryable_loading_during_reload() -> None:
+    supervisor = ReloadingSupervisor()
+    client = build_client(supervisor, vad=FakeVad())
+    with client as http:
+        supervisor.state = "idle_unloaded"
+        with http.websocket_connect("/v1/stream", headers=AUTH) as socket:
+            try:
+                hello = socket.receive_json()
+                assert hello["model_state"] == "loading"
+                assert supervisor.reload_started.wait(timeout=1)
+
+                socket.send_json(CONTINUOUS)
+                error = socket.receive_json()
+                assert error["code"] == "model_loading"
+                assert error["retryable"] is True
+            finally:
+                # Do not leave the background reload task blocked when the
+                # socket exits, including when an assertion fails.
+                supervisor.allow_reload.set()
 
 
 def test_capabilities_advertise_continuous_only_with_a_vad(
@@ -695,3 +795,22 @@ def test_continuous_slot_is_freed_after_session_stop(supervisor: FakeSupervisor)
             second.receive_json()
             second.send_json({**CONTINUOUS, "request_id": "start-2"})
             assert second.receive_json()["type"] == "session.started"
+
+
+def test_continuous_slot_is_freed_after_start_validation_failure(
+    supervisor: FakeSupervisor,
+) -> None:
+    """A reservation made before later handshake validation must not leak."""
+
+    client = build_client(supervisor, vad=FakeVad(), max_continuous_sessions=1)
+    with client as http:
+        with http.websocket_connect("/v1/stream", headers=AUTH) as rejected:
+            rejected.receive_json()
+            rejected.send_json({**CONTINUOUS, "transcript_mode": "revisable"})
+            error = rejected.receive_json()
+            assert error["code"] == "unsupported_option"
+
+        with http.websocket_connect("/v1/stream", headers=AUTH) as admitted:
+            admitted.receive_json()
+            admitted.send_json({**CONTINUOUS, "request_id": "start-2"})
+            assert admitted.receive_json()["type"] == "session.started"

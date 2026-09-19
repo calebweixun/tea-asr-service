@@ -83,6 +83,21 @@ def test_private_use_characters_are_filtered_by_default(supervisor: FakeSupervis
         assert "" not in body["text"]
 
 
+def test_all_private_use_ranges_are_filtered_and_raw_text_is_preserved(
+    supervisor: FakeSupervisor,
+) -> None:
+    raw = "測試" + "".join(
+        chr(codepoint) for codepoint in (0xF0000, 0xFFFFD, 0x100000, 0x10FFFD)
+    ) + "文字"
+    supervisor.text = raw
+    with build_client(supervisor) as http:
+        body = http.post(TRANSCRIBE, content=b"\0\0" * 1600, headers=AUTH).json()
+
+    assert body["warnings"] == ["private_use_characters"]
+    assert body["text"] == "測試文字"
+    assert body["raw_text"] == raw
+
+
 def test_private_use_filter_can_be_disabled(supervisor: FakeSupervisor) -> None:
     supervisor.text = "測試文字"
     with build_client(supervisor, filter_pua=False) as http:
@@ -102,6 +117,19 @@ def test_transcript_entirely_made_of_pua_is_reported_empty_not_no_speech(
         assert body["raw_text"] == ""
         assert body["segments"] == []
         assert body["warnings"] == ["private_use_characters", "empty_after_filter"]
+
+
+def test_extended_private_use_only_transcript_is_also_empty_after_filter(
+    supervisor: FakeSupervisor,
+) -> None:
+    supervisor.text = "".join(chr(codepoint) for codepoint in (0xF0000, 0x100000))
+    with build_client(supervisor) as http:
+        body = http.post(TRANSCRIBE, content=b"\0\0" * 1600, headers=AUTH).json()
+
+    assert body["text"] == ""
+    assert body["raw_text"] == supervisor.text
+    assert body["segments"] == []
+    assert body["warnings"] == ["private_use_characters", "empty_after_filter"]
 
 
 def test_silence_returns_no_speech(supervisor: FakeSupervisor) -> None:
