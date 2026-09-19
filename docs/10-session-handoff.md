@@ -12,9 +12,9 @@
 
 | 元件 | 狀態 |
 |---|---|
-| Server（`src/tea_asr/`） | P0–P3、P2a 完成並實測。133 個測試通過（`uv run pytest tests/unit tests/integration -q`） |
-| Mac client（`clients/macos/`） | 可用：聽寫、會議記錄、選單列狀態、服務啟停 |
-| OBS 外掛（另一個倉庫） | M1+M2 完成，CI 三平台綠，**尚未實機驗證字幕真的會出現** |
+| Server（`src/tea_asr/`） | P0–P3、P2a 完成並實測；全 Unicode PUA 過濾與兩個實測競態修復完成。143 個測試通過（`uv run pytest tests/unit tests/integration -q`） |
+| Mac client（`clients/macos/`） | 可用：聽寫、會議記錄、選單列狀態、服務啟停；M0 typed `AppState`／`ServiceProbe` 完成，6 個測試通過。M1 原生 status/settings UI 尚未開始 |
+| OBS 外掛（另一個倉庫） | Phase A 完成：錯誤與連線狀態只在 Tools／設定診斷，不進字幕畫布；新 source 預設 Fixed 960px，舊 source migration 保留 Auto；CJK effective defaults 已修復。strict two-line layout 延至 Phase B |
 | P4 長檔案與保存 | 未開始，`/v1/jobs` 回 404 |
 
 啟動服務：
@@ -44,8 +44,9 @@ cd /Users/c2leb/Codes/tea-asr-service && uv run tea-asr serve
 Alkd 那一版轉換流程特有（自轉 4bit 與正式版輸出逐字相同）、不是位元寬不夠
 （8bit 只降 6.7 個百分點，代價卻是體積 +92%、記憶體 +74%、延遲 +20%）。
 
-**現行對策**：服務端預設過濾（`ServiceConfig.filter_pua`，`TEA_ASR_FILTER_PUA=0`
-可關）。`text` 是過濾後結果，`raw_text` 保留原始辨識供除錯。整段被過濾成空字串時
+**現行對策**：服務端預設過濾全部 Unicode 私用區（BMP U+E000–F8FF、Plane 15
+U+F0000–FFFFD、Plane 16 U+100000–10FFFD；`ServiceConfig.filter_pua`，
+`TEA_ASR_FILTER_PUA=0` 可關）。`text` 是過濾後結果，`raw_text` 保留原始辨識供除錯。整段被過濾成空字串時
 送 `segment.skipped` + `reason="empty"`，不送假的空 final。
 
 **這是權宜之計**。`filter_private_use_characters()` 的 docstring 寫了移除條件：
@@ -111,27 +112,55 @@ macOS 曾經把 `~/Library/Caches/TEA ASR/` 整個清掉（1.2 GB 模型消失�
 
 ## 4. 待辦（依重要性）
 
-### 4.1 OBS 外掛：實機驗證字幕真的會出現 ★最高
+### 4.1 OBS 外掛：4029／CJK 預設字型修復送 CI ★最高
 
 倉庫 `/Users/c2leb/Codes/obs-plugins/tea-live-subtitle`（`git@github.com:calebweixun/tea-live-subtitle.git`）。
 
 M1 已實機確認載入（OBS 32.2.2 log 出現 `[tea-live-subtitle] loaded version 0.1.0`，
 外掛以 `pkgutil --expand-full` 取出 bundle 放進 `~/Library/Application Support/obs-studio/plugins/`，
-不需要 sudo）。**但沒有人實際對著麥克風講話、確認字幕出現在畫面上。** 這是目前
-最大的未知。
+不需要 sudo）。2026-09-19 後續已下載 workflow run `35423344854`、commit `36c5f12`
+的 macOS artifact，使用 `/Users/c2leb/tea-asr-takes/take1.wav`（16 kHz mono，約 75 秒）
+實機驗證。OBS 畫布最後以 `Heiti TC Light` 顯示出可讀字幕：
+「這個 pr 已經 merge 了，我要 take 一個 release。」證據截圖在
+`/tmp/tea-obs-heiti-tc-20260919.png` 與 `/tmp/tea-obs-heiti-caption-large.png`，log 是
+`~/Library/Application Support/obs-studio/logs/2026-09-19 14-03-49.txt`。
 
 驗收報告在該倉庫的 `docs/m2-verification.md` 與 `docs/m2-reverification.md`，
 **務必先讀**。特別是覆驗那份：上一輪的「多來源防護」修復建立在錯誤前提上
 （以為伺服器會拒絕、以為 `session_limit` 代表「別人占用」），後來已退回
 （commit `6edbb58`），改成一律信任伺服器 `error` 事件的 `retryable` 欄位。
 
-**還沒做**：伺服器現在會送 `concurrent_session_limit` + close **4029**（§2.3），
-client 端**尚未對應**。這是下一個該接的東西。
+**已做、尚未送 CI**：client 已對應 `concurrent_session_limit` + close **4029**（§2.3），
+會保留伺服器較完整的 error message；若 error text frame 遺失，也會由 4029 產生可操作、
+且保持 retryable 的 fallback。錯誤判斷抽成不依賴 Qt/OBS 的 policy，已有 standalone C++
+測試覆蓋 4029、1013、舊錯誤污染及 non-retryable 行為。
+
+第一次實機驗證也抓到 Arial 會把中文畫成方框，`PingFang TC` 雖是 macOS 字型名稱，
+OBS FreeType 實測卻載入失敗。程式碼預設已改為 Fontconfig 可見的 macOS 系統 family
+`Heiti TC`（Windows `Microsoft JhengHei`、Linux `Noto Sans CJK TC`），不覆寫既有 scene
+或使用者自訂字型。這份修改仍需推送並讓三平台 CI 建置，再安裝新 artifact 驗證「新建
+source 不手動改字型也能直接顯示中文」。
+
+**Phase A（字幕資料流與固定寬度）已完成**：`TeaAsrClient::setStatus()` 的錯誤與連線
+狀態只提供給 Tools／設定診斷視窗，字幕 canvas 只畫 partial/final transcript；沒有字幕
+時的等待提示由 source 自己顯示，不會把 server error 當成字幕。新建 source 預設為
+Fixed 960px，舊 scene 沒有 layout marker 時 migration 保留 Auto 與原本的
+`custom_width` 語意；CJK font effective defaults 也會實際傳給 private child source。
+這一階段只保證固定寬度與 native wrapping；像 YouTube 的嚴格最多雙行／截切規則延到
+Phase B，不能把目前的 `Max Lines` 誤當成 visual two-line 保證。
+
+伺服器本輪另修了兩個實測才發現的競態：
+- continuous admission 原本用 registry 計數，兩個同時 `session.start` 可能都通過；現在用
+  共享 lock + reservation set 原子預留，並有 barrier 並發測試與失敗清理測試。
+- `idle_unloaded` 的 WS 連線原本先背景 reload、卻把舊狀態傳進 session，client 會收到
+  non-retryable `model_unavailable`；現在該次連線回 `model_loading` + `retryable=true`，
+  背景 reload 行為不變。
 
 殘留缺陷（覆驗列出，未處理）：
 - `~TeaAsrClient()` 逾時後的 `terminate()` 兜底可能造成行程級鎖損毀，風險已從
   「卡死呼叫端」轉成「影響範圍更大但機率低」。
-- 外掛沒有任何自動化測試。
+- 外掛現在只有不依賴 OBS/Qt 的 error policy 與字型預設靜態測試；WebSocket framing、
+  音訊擷取、caption state 與真實 OBS 整合仍沒有自動化測試。
 
 ### 4.2 OBS M3
 
