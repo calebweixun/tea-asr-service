@@ -9,13 +9,23 @@
 # 全尺寸與 .icns。
 #
 # 只依賴 Python 與 Pillow，不需要 Swift——圖示資產不該因為 Xcode 壞掉就做不出來。
+# Pillow 用 uv 臨時拉取，不依賴系統 Python 裝了什麼（系統更新會把它清掉）。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 SOURCE="${1:-tools/source-cup.png}"
 
-python3 tools/make-icon.py "$SOURCE" Resources/icons AppIcon
-python3 tools/make-menubar-icon.py Resources/icons
+PY=(uv run --quiet --with pillow python)
+if ! command -v uv >/dev/null 2>&1; then
+  PY=(python3)
+  python3 -c "import PIL" 2>/dev/null || {
+    echo "需要 Pillow：請安裝 uv，或 pip install pillow" >&2
+    exit 1
+  }
+fi
+
+"${PY[@]}" tools/make-icon.py "$SOURCE" Resources/icons AppIcon
+"${PY[@]}" tools/make-menubar-icon.py Resources/icons
 
 echo
 echo "完成。重新建置 app 會帶上新圖示：./scripts/build-app.sh"
