@@ -9,6 +9,7 @@ struct Settings {
         static let port = "serverPort"
         static let autoInsert = "autoInsertOnFinal"
         static let revisablePreview = "requestRevisablePreview"
+        static let serviceExecutable = "serviceExecutablePath"
     }
 
     private let defaults = UserDefaults.standard
@@ -42,6 +43,12 @@ struct Settings {
 
     /// Set by `--url` in self-test runs; otherwise derived from host and port.
     var overrideStreamURL: URL?
+
+    /// Explicit path to the `tea-asr` binary. Empty means "go and find it".
+    var serviceExecutable: String {
+        get { defaults.string(forKey: Key.serviceExecutable) ?? "" }
+        nonmutating set { defaults.set(newValue, forKey: Key.serviceExecutable) }
+    }
 
     var streamURL: URL {
         overrideStreamURL ?? URL(string: "ws://\(host):\(port)/v1/stream")!

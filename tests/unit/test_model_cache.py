@@ -18,7 +18,25 @@ def test_model_is_not_kept_in_a_purgeable_cache() -> None:
     assert purgeable not in path.parents, f"{path} sits under a purgeable cache"
 
 
-def test_model_cache_follows_the_hugging_face_default() -> None:
-    from huggingface_hub.constants import HF_HUB_CACHE
+def test_model_lives_beside_the_checkout_when_there_is_one() -> None:
+    from tea_asr.model_spec import project_root
 
-    assert default_model_cache() == Path(HF_HUB_CACHE)
+    root = project_root()
+    assert root is not None, "the tests run from a source checkout"
+    assert default_model_cache() == root / "models"
+
+
+def test_an_explicit_override_wins(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("TEA_ASR_MODELS_DIR", "/tmp/somewhere-else")
+    assert default_model_cache() == Path("/tmp/somewhere-else")
+
+
+def test_models_directory_is_not_tracked_by_git() -> None:
+    from tea_asr.model_spec import project_root
+
+    root = project_root()
+    assert root is not None
+    ignored = (root / ".gitignore").read_text().splitlines()
+    assert any(line.strip() in {"models/", "/models/"} for line in ignored), (
+        "a 1.2 GB download must never be committable"
+    )

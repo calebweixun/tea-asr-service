@@ -6,6 +6,8 @@
   <string>zh_TW</string>
   <key>CFBundleExecutable</key>
   <string>TeaASRClient</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
   <string>com.tea-asr.client</string>
   <key>CFBundleInfoDictionaryVersion</key>

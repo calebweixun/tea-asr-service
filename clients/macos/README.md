@@ -50,6 +50,24 @@ uv run tea-asr serve
 加 `--no-realtime` 會用最快速度送，通常會撞到服務的流量窗口；加 `--preview` 要求串流預覽；
 `--url ws://127.0.0.1:PORT/v1/stream` 可以指向別的服務（測試用）。
 
+## 圖示
+
+app 圖示與選單列圖示都由 `Resources/icons/` 提供，來源圖在 `tools/source-*.png`。
+要換圖或重新產生：
+
+```bash
+./scripts/make-icon.sh [來源.png]
+```
+
+腳本會裁掉來源自帶的外框與描邊、套上 Apple 的 squircle 遮罩讓四角真的透明、
+內縮到 macOS 的比例，再輸出 16–1024 全尺寸與 `.icns`，並重畫選單列的 template。
+
+選單列**不是**把 app 圖示縮小：那是實心插畫，18pt 下會糊成一團。
+`tools/make-menubar-icon.py` 另外畫一個同語言的線稿版（杯子＋音量條），
+並依狀態分成閒置、聆聽中、錯誤三張，由系統依深淺色自動染色。
+
+這條管線只依賴 Python 與 Pillow，不需要 Swift——圖示資產不該因為 Xcode 壞掉就做不出來。
+
 ## 設定
 
 選單列 →「設定…」可以改服務位址與 port、開關自動貼上與串流預覽，並直接測試連線。

@@ -22,6 +22,10 @@ final class AppController: NSObject, NSApplicationDelegate {
     private let previewEntry = NSMenuItem()
     private let lastTextEntry = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private var warnedAboutAccessibility = false
+    private let serviceEntry = NSMenuItem()
+    private let autoStartEntry = NSMenuItem()
+    private var serviceRunning = false
+    private var healthTimer: Timer?
 
     private var mode: Mode = .idle
     private var meeting: MeetingWindow?
@@ -37,6 +41,10 @@ final class AppController: NSObject, NSApplicationDelegate {
         buildMenu()
         wireClient()
         registerHotKey()
+        refreshServiceState()
+        healthTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            self?.refreshServiceState()
+        }
         render()
     }
 
@@ -81,6 +89,17 @@ final class AppController: NSObject, NSApplicationDelegate {
         menu.addItem(previewEntry)
 
         menu.addItem(.separator())
+        serviceEntry.action = #selector(toggleService)
+        serviceEntry.target = self
+        serviceEntry.title = "啟動服務"
+        menu.addItem(serviceEntry)
+
+        autoStartEntry.title = "登入時自動啟動服務"
+        autoStartEntry.action = #selector(toggleAutoStart)
+        autoStartEntry.target = self
+        menu.addItem(autoStartEntry)
+
+        menu.addItem(.separator())
         let settingsEntry = NSMenuItem(
             title: "設定…", action: #selector(showPreferences), keyEquivalent: ","
         )
@@ -92,25 +111,48 @@ final class AppController: NSObject, NSApplicationDelegate {
         menu.addItem(quit)
     }
 
+    /// The status item's mark, drawn to read at 18pt. A shrunken app icon is
+    /// a solid illustration and turns to mush at that size, so the bundle ships
+    /// a separate line-art template per state.
+    private static var menuBarImages: [String: NSImage] = [:]
+
+    private static func menuBarImage(_ state: String) -> NSImage? {
+        if let cached = menuBarImages[state] { return cached }
+        guard
+            let url = Bundle.main.url(forResource: "MenuBar-\(state)", withExtension: "png"),
+            let image = NSImage(contentsOf: url)
+        else {
+            // Running from a plain binary rather than the built bundle.
+            return NSImage(
+                systemSymbolName: state == "error" ? "exclamationmark.triangle" : "cup.and.saucer",
+                accessibilityDescription: "TEA ASR"
+            )
+        }
+        image.isTemplate = true
+        image.size = NSSize(width: 18, height: 18)
+        menuBarImages[state] = image
+        return image
+    }
+
     private func render() {
-        let symbol: String
+        let state: String
         switch (mode, client.state) {
         case (_, .failed):
-            symbol = "exclamationmark.triangle"
+            state = "error"
         case (.idle, _):
-            symbol = "mic"
-        case (_, .connecting), (_, .loadingModel):
-            symbol = "mic.badge.plus"
+            state = "idle"
         default:
-            symbol = "waveform"
+            state = "listening"
         }
-        statusItem.button?.image = NSImage(
-            systemSymbolName: symbol, accessibilityDescription: "TEA ASR"
-        )
+        statusItem.button?.image = Self.menuBarImage(state)
 
         switch client.state {
         case .idle:
-            statusEntry.title = mode == .idle ? "未啟動" : "連線中…"
+            if mode == .idle {
+                statusEntry.title = serviceRunning ? "服務就緒，可開始聆聽" : "服務未執行"
+            } else {
+                statusEntry.title = "連線中…"
+            }
         case .connecting:
             statusEntry.title = "連線中…"
         case .loadingModel:
@@ -124,6 +166,14 @@ final class AppController: NSObject, NSApplicationDelegate {
         toggleEntry.title = (mode == .dictation ? "停止聽寫" : "開始聽寫")
             + (hotKeyRegistered ? "" : "（⌥⌘D 被其他 app 占用）")
         meetingEntry.title = mode == .meeting ? "停止會議記錄" : "開始會議記錄"
+        serviceEntry.title = serviceRunning ? "服務執行中" : "啟動服務"
+        serviceEntry.isEnabled = !serviceRunning
+        if let binary = executable() {
+            autoStartEntry.state = ServiceControl.agentInstalled(executable: binary) ? .on : .off
+            autoStartEntry.isEnabled = true
+        } else {
+            autoStartEntry.isEnabled = false
+        }
         autoInsertEntry.state = settings.autoInsert ? .on : .off
         previewEntry.state = settings.revisablePreview ? .on : .off
     }
@@ -136,6 +186,59 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     @objc private func toggleMeeting() {
         mode == .meeting ? stopSession() : start(mode: .meeting)
+    }
+
+    // MARK: - Service
+
+    private func refreshServiceState() {
+        ServiceControl.probeHealth(host: settings.host, port: settings.port) { [weak self] ok in
+            guard let self else { return }
+            let changed = self.serviceRunning != ok
+            self.serviceRunning = ok
+            if changed { self.render() }
+        }
+    }
+
+    private func executable() -> URL? {
+        ServiceControl.resolveExecutable(configured: settings.serviceExecutable)
+    }
+
+    @objc private func toggleService() {
+        guard let binary = executable() else {
+            alert("找不到服務執行檔", ServiceControl.ControlError.executableNotFound.localizedDescription)
+            return
+        }
+        if serviceRunning {
+            alert(
+                "請從啟動服務的終端機停止",
+                "服務是獨立的程序，可能由 LaunchAgent 或你自己的終端機啟動。"
+                    + "要停止請在終端機執行：pkill -f 'tea-asr serve'"
+            )
+            return
+        }
+        do {
+            try ServiceControl.start(executable: binary)
+            statusEntry.title = "服務啟動中，模型載入需要幾秒…"
+        } catch {
+            alert("無法啟動服務", error.localizedDescription)
+        }
+    }
+
+    @objc private func toggleAutoStart() {
+        guard let binary = executable() else {
+            alert("找不到服務執行檔", ServiceControl.ControlError.executableNotFound.localizedDescription)
+            return
+        }
+        let installed = ServiceControl.agentInstalled(executable: binary)
+        do {
+            let output = try ServiceControl.run(
+                executable: binary, arguments: ["service", installed ? "uninstall" : "install"]
+            )
+            alert(installed ? "已取消登入時自動啟動" : "已設定登入時自動啟動", output)
+        } catch {
+            alert("設定失敗", error.localizedDescription)
+        }
+        render()
     }
 
     @objc private func showPreferences() {
