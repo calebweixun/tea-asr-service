@@ -19,5 +19,15 @@ TEA_ASR_1_1_MLX_4BIT = ModelSpec(
 
 
 def default_model_cache() -> Path:
-    return Path.home() / "Library" / "Caches" / "TEA ASR" / "models"
+    """The standard Hugging Face cache, as docs/03 specifies.
+
+    An earlier implementation used `~/Library/Caches/TEA ASR/models`. macOS
+    treats `~/Library/Caches` as purgeable and deleted the whole 1.2 GB model
+    under disk pressure, leaving a service that looked healthy until the first
+    request. Anything expensive to re-download does not belong there.
+    """
+
+    from huggingface_hub.constants import HF_HUB_CACHE
+
+    return Path(HF_HUB_CACHE)
 

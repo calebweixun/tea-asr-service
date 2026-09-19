@@ -93,7 +93,18 @@ uv run python benchmarks/replay_segmenter.py ~/tea-asr-takes/take2.wav --transcr
 - **一直講不停會在 12 秒附近被切段**，切點會挑最近的安靜處。
 - **同音詞與人名仍會認錯**（「姿勢」→「知識」、「林佳蓉」→「林嘉蓉」），這是模型層的限制。
 
-## 七、回報問題時附上什麼
+## 七、模型不見了怎麼辦
+
+`doctor` 回報 `model_prepared: false` 但服務還跑得起來，通常表示資產被刪了
+（曾發生過：磁碟剩不到 6 GB 時 macOS 清掉快取）。服務要到下一個辨識請求才會失敗。
+
+```bash
+uv run tea-asr model-prepare
+```
+
+資產現在放標準的 Hugging Face cache，不再放在系統會回收的 `~/Library/Caches`。
+
+## 八、回報問題時附上什麼
 
 ```bash
 uv run tea-asr doctor > doctor.json
