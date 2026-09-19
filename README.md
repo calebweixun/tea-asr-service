@@ -2,7 +2,7 @@
 
 在 Apple Silicon Mac 上運行的本機語音辨識服務，讓輸入工具、字幕工具、OBS 與會議紀錄共用一份模型。
 
-**目前狀態：P0效能可行、品質驗收尚未通過；P1–P3與P2a已完成並實測，Mac選單列client可用。** 指定模型已在M4 Pro真實載入與推論，私用區字元問題仍未解決，那是唯一擋住v0.1的項目。Silero VAD已接上並用真實口語校準，串流預覽通過驗收且預設開啟。
+**目前狀態：P0–P3與P2a已完成並實測，Mac選單列client可用。** 指定模型已在M4 Pro真實載入與推論。私用區字元的成因已定位在MLX量化本身（上游BF16為0%），服務端預設過濾，見 [PUA A/B報告](docs/benchmarks/pua-bf16-ab-report.md)。Silero VAD已接上並用真實口語校準，串流預覽通過驗收且預設開啟。
 
 ## 先看這裡
 
@@ -107,15 +107,15 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 
 體驗時會看到的已知限制：一直講不停會在 12 秒附近硬切（`boundary="max_duration"`，會先找安靜點）、utterance 單段最多 30 秒。辨識結果原本會夾帶私用區字元，根因已定位在 `Alkd/TEA-ASR-1.1-MLX-4bit` 的 4bit 量化本身（上游 BF16 checkpoint 是 0%，見 [PUA vs BF16 A/B 報告](docs/benchmarks/pua-bf16-ab-report.md)），現在服務預設會把這些字元從 `text` 過濾掉（`filter_pua` 設定／`TEA_ASR_FILTER_PUA` 環境變數可關閉），`raw_text` 與 `warnings:["private_use_characters"]` 仍保留原始資訊供除錯；這是繞過量化缺陷的暫時措施，換掉模型量化方式才是根本解。VAD 參數（句尾靜音 500 ms、最短語音 160 ms、pre-roll 600 ms、最大 12 秒）已用真實口語校準過一次，但只有單一語者與單一麥克風。
 
-模型與 VAD 資產放在標準的 Hugging Face cache（`~/.cache/huggingface`，可用 `HF_HOME` 改），**不放 `~/Library/Caches`**——macOS 會在磁碟吃緊時把那裡整個清掉。服務只監聽 `127.0.0.1:8327`（電話鍵盤上的 T-E-A；刻意避開 8765 那類 AI 工具常用的 port）。首次啟動會在 `~/Library/Application Support/TEA ASR/token` 建立權限0600的token。短音訊端點與WS utterance session都接受最多30秒、16 kHz mono PCM s16le；詳見 [API契約](docs/04-api.md)，機器可讀版本在 [docs/api/](docs/api/)（`uv run tea-asr export-schemas` 重新產生，測試會檢查是否過期）。本機結果見 [P0報告](docs/benchmarks/p0-report.md)。
+模型與 VAD 資產放在倉庫內的 `models/`（已 gitignore，可用 `TEA_ASR_MODELS_DIR` 改），**不放 `~/Library/Caches`**——macOS 會在磁碟吃緊時把那裡整個清掉，實際發生過一次。服務只監聽 `127.0.0.1:8327`（電話鍵盤上的 T-E-A；刻意避開 8765 那類 AI 工具常用的 port）。首次啟動會在 `~/Library/Application Support/TEA ASR/token` 建立權限0600的token。短音訊端點與WS utterance session都接受最多30秒、16 kHz mono PCM s16le；詳見 [API契約](docs/04-api.md)，機器可讀版本在 [docs/api/](docs/api/)（`uv run tea-asr export-schemas` 重新產生，測試會檢查是否過期）。本機結果見 [P0報告](docs/benchmarks/p0-report.md)。
 
 ## 實作進度
 
 | 階段 | 狀態 | 說明 |
 |---|---|---|
-| P0 模型可行性 | 效能通過、品質未通過 | 真實語料CER 4.92%（200筆）、真人口語MER 3.97%，但私用區字元leak在七成以上的句子重現。定位成因需與上游BF16做A/B，目前卡在磁碟空間，見 [品質報告](docs/benchmarks/p0-quality-report.md) |
+| P0 模型可行性 | 通過 | 真實語料CER 4.92%（200筆）、真人口語MER 3.97%。私用區字元leak已定位為MLX量化造成（上游BF16 0%、自轉8bit仍63.3%），服務端預設過濾，見 [品質報告](docs/benchmarks/p0-quality-report.md)、[PUA A/B](docs/benchmarks/pua-bf16-ab-report.md) |
 | P1 短音訊API | 已實作 | HTTP transcription、健康探針、capabilities、status、bounded scheduler、typed errors、OpenAPI／WS schema |
-| P2 即時音訊 | 已實作、已校準、已長跑 | WS utterance與continuous皆可用：Silero VAD自動斷句、有序片段管線、推論不阻塞收音。真人口語MER 3.97%（[切段報告](docs/benchmarks/p2-segmentation-report.md)）；連續一小時386段0錯誤、延遲p95 0.57秒、記憶體平穩（[長跑報告](docs/benchmarks/p2-soak-report.md)）。多路併發尚未測 |
+| P2 即時音訊 | 已實作、已校準、已長跑 | WS utterance與continuous皆可用：Silero VAD自動斷句、有序片段管線、推論不阻塞收音。真人口語MER 3.97%（[切段報告](docs/benchmarks/p2-segmentation-report.md)）；連續一小時386段0錯誤、延遲p95 0.57秒、記憶體平穩（[長跑報告](docs/benchmarks/p2-soak-report.md)）。多路併發已實測，N=1..4零錯誤，預設上限2（[併發報告](docs/benchmarks/concurrency-report.md)）|
 | P2a 串流修訂 | 已驗收，預設開啟 | 首次可見延遲 p95 0.91 秒、final 與 final-only 完全一致、混合負載不互相阻塞，見 [P2a 報告](docs/benchmarks/p2a-preview-report.md)。`TEA_ASR_REVISABLE_PREVIEW=0` 可關閉 |
 | P3 服務管理 | 完成 | LaunchAgent install/uninstall/status、singleton lock、port 檢查、idle unload 與重新載入、TOML 設定、JSON log 輪替、關閉時 drain、睡眠喚醒偵測與 worker 健康探測 |
 | P4 長檔案與保存 | 未開始 | `/v1/jobs` 不存在，回404 |
