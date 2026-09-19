@@ -165,12 +165,28 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--out", type=Path, default=Path("benchmarks/results/quality.json"))
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        default=None,
+        help="本機 MLX 模型資料夾（例如自轉的 mini 4bit/8bit），省略則用生產用的 Alkd 4bit",
+    )
+    parser.add_argument(
+        "--model-label",
+        type=str,
+        default=None,
+        help="寫入 summary.model 的標籤；搭配 --model-path 時預設用該路徑本身",
+    )
     args = parser.parse_args()
 
     samples = load_samples(args.limit)
     print(f"樣本 {len(samples)} 筆，語料 {DATASET_ID}@{DATASET_REVISION[:12]}")
 
-    backend = TeaMlxBackend(locate_prepared_model(TEA_ASR_1_1_MLX_4BIT))
+    model_path = args.model_path if args.model_path is not None else locate_prepared_model(TEA_ASR_1_1_MLX_4BIT)
+    model_label = args.model_label or (str(args.model_path) if args.model_path is not None else TEA_ASR_1_1_MLX_4BIT.repo_id)
+    model_revision = "local-selfconv" if args.model_path is not None else TEA_ASR_1_1_MLX_4BIT.revision
+
+    backend = TeaMlxBackend(model_path)
     backend.load()
 
     report = Report()
@@ -219,8 +235,8 @@ def main() -> int:
     summary = {
         "dataset": DATASET_ID,
         "dataset_revision": DATASET_REVISION,
-        "model": TEA_ASR_1_1_MLX_4BIT.repo_id,
-        "model_revision": TEA_ASR_1_1_MLX_4BIT.revision,
+        "model": model_label,
+        "model_revision": model_revision,
         "samples": len(samples),
         "raw_mer": round(report.raw_mer.rate, 4),
         "normalized_mer": round(report.norm_mer.rate, 4),

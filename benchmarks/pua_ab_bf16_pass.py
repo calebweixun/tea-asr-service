@@ -94,7 +94,28 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--out", type=Path, default=Path("benchmarks/results/pua_ab_bf16.json"))
+    parser.add_argument(
+        "--repo",
+        type=str,
+        default=UPSTREAM_REPO,
+        help="上游 BF16 repo id，預設 TEA-ASR-1.1 full；也可指定 mini 等其他變體",
+    )
+    parser.add_argument(
+        "--revision",
+        type=str,
+        default=UPSTREAM_REVISION,
+        help="對應 --repo 的 revision，預設值只適用於 full 版本",
+    )
+    parser.add_argument(
+        "--pass-name",
+        type=str,
+        default="bf16-upstream",
+        help="寫入 summary 的 pass 名稱，跑非 full 模型時建議改名以免跟既有結果混淆",
+    )
     args = parser.parse_args()
+
+    upstream_repo = args.repo
+    upstream_revision = args.revision
 
     import os
 
@@ -102,10 +123,10 @@ def main() -> int:
 
     from huggingface_hub import snapshot_download
 
-    print(f"下載/定位上游模型 {UPSTREAM_REPO}@{UPSTREAM_REVISION[:12]} -> {MODELS_DIR}")
+    print(f"下載/定位上游模型 {upstream_repo}@{upstream_revision[:12]} -> {MODELS_DIR}")
     snapshot_path = snapshot_download(
-        repo_id=UPSTREAM_REPO,
-        revision=UPSTREAM_REVISION,
+        repo_id=upstream_repo,
+        revision=upstream_revision,
         cache_dir=MODELS_DIR,
     )
     print(f"模型快照：{snapshot_path}")
@@ -138,14 +159,15 @@ def main() -> int:
         print(f"  {index}/{len(samples)}: pua={len(pua_chars)}")
 
     summary = {
-        "pass": "bf16-upstream",
-        "model": UPSTREAM_REPO,
-        "model_revision": UPSTREAM_REVISION,
+        "pass": args.pass_name,
+        "model": upstream_repo,
+        "model_revision": upstream_revision,
         "dataset": DATASET_ID,
         "dataset_revision": DATASET_REVISION,
         "samples": len(samples),
         "sentences_with_pua": sum(1 for r in rows if r["pua_count"] > 0),
         "pua_occurrences": sum(r["pua_count"] for r in rows),
+        "mean_inference_s": round(sum(r["inference_s"] for r in rows) / len(rows), 3) if rows else 0.0,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps({"summary": summary, "rows": rows}, ensure_ascii=False, indent=2) + "\n")
