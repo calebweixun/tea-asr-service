@@ -96,4 +96,67 @@ final class PermissionPolicyTests: XCTestCase {
         XCTAssertTrue(state.requiredPermissionsGranted)
         XCTAssertTrue(state.optionalPermissionsNeedAttention)
     }
+
+    func testActivationRefreshPolicyUsesImmediateAndBoundedFollowUps() {
+        XCTAssertEqual(
+            PermissionRefreshPolicy.applicationActivationDelays,
+            [250_000_000, 1_000_000_000]
+        )
+    }
+
+    @MainActor
+    func testCoordinatorRechecksAccessibilityAfterApplicationActivation() {
+        let platform = FakePermissionPlatform(
+            microphoneAuthorization: .authorized,
+            accessibilityTrusted: false
+        )
+        let coordinator = PermissionCoordinator(platform: platform)
+        XCTAssertFalse(coordinator.state.accessibility.isSatisfied)
+
+        platform.accessibilityTrusted = true
+        coordinator.refreshAfterApplicationActivation()
+
+        XCTAssertTrue(coordinator.state.accessibility.isSatisfied)
+        XCTAssertFalse(coordinator.consumeAccessibilityRestartHint())
+    }
+
+    @MainActor
+    func testCoordinatorOnlySuggestsRestartAfterAnUntrustedSettingsReturn() {
+        let platform = FakePermissionPlatform(
+            microphoneAuthorization: .authorized,
+            accessibilityTrusted: false
+        )
+        let coordinator = PermissionCoordinator(platform: platform)
+
+        XCTAssertTrue(coordinator.openSettings(for: .accessibility))
+        coordinator.refreshAfterApplicationActivation()
+
+        XCTAssertTrue(coordinator.consumeAccessibilityRestartHint())
+        XCTAssertFalse(coordinator.consumeAccessibilityRestartHint())
+    }
+}
+
+private final class FakePermissionPlatform: PermissionPlatform {
+    var microphoneAuthorization: PermissionAuthorization
+    var accessibilityTrusted: Bool
+
+    init(
+        microphoneAuthorization: PermissionAuthorization,
+        accessibilityTrusted: Bool
+    ) {
+        self.microphoneAuthorization = microphoneAuthorization
+        self.accessibilityTrusted = accessibilityTrusted
+    }
+
+    func requestMicrophoneAccess(completion: @escaping (Bool) -> Void) {
+        completion(microphoneAuthorization == .authorized)
+    }
+
+    func promptAccessibility() -> Bool {
+        accessibilityTrusted
+    }
+
+    func openSettings(for kind: PermissionKind) -> Bool {
+        true
+    }
 }

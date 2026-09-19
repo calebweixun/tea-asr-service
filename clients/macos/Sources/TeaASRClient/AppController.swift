@@ -29,6 +29,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private let autoStartEntry = NSMenuItem()
     private var serviceRunning = false
     private var healthTimer: Timer?
+    private var accessibilityHintTask: Task<Void, Never>?
 
     private var mode: Mode = .idle
     private var mainWindow: MainWindowController?
@@ -73,8 +74,39 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        accessibilityHintTask?.cancel()
         capture.stop()
         client.cancel()
+    }
+
+    /// System Settings changes TCC while this process is suspended in the
+    /// background. Window focus alone is not a reliable lifecycle signal (the
+    /// window may stay key, or dictation may have hidden it), so always refresh
+    /// on app activation and give ApplicationServices a short settling window.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard let permissions = permissionCoordinator else { return }
+        permissions.refreshAfterApplicationActivation()
+
+        accessibilityHintTask?.cancel()
+        accessibilityHintTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 1_200_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self,
+                  let permissions = self.permissionCoordinator,
+                  permissions.consumeAccessibilityRestartHint()
+            else { return }
+
+            self.alert(
+                "仍未偵測到輔助使用權限",
+                "macOS 目前仍回報這個 TEA ASR 程序沒有輔助使用權限。"
+                    + "如果你剛在系統設定打開開關，請先完全結束 TEA ASR，再重新開啟目前的 app。"
+                    + "若這是 ad-hoc 開發版，重建後可能需要在輔助使用清單移除舊的 TEA ASR，"
+                    + "再加入目前這個 build；只有 Developer ID 簽章才能讓 TCC 身分跨重建穩定。"
+            )
+        }
     }
 
     // MARK: - Menu

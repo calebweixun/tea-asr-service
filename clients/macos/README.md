@@ -14,8 +14,15 @@
 ```
 
 用 Command Line Tools 的 Swift，**不需要接受 Xcode 授權條款，也不需要 sudo**。
-產物是 `build/TEA ASR.app`，採 ad-hoc 簽章：本機可執行，但不能發給別人
-（那需要開發者憑證與公證）。
+產物是 `build/TEA ASR.app`。腳本會優先使用 Keychain 裡的
+`Developer ID Application` 憑證；沒有憑證時仍會 fallback 到 ad-hoc，讓本機可以直接開發，
+但 ad-hoc 只能本機執行，不能發給別人（那需要開發者憑證與公證）。
+
+也可以明確指定簽章身分：
+
+```bash
+TEA_ASR_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/build-app.sh
+```
 
 ```bash
 open "build/TEA ASR.app"
@@ -37,7 +44,18 @@ uv run tea-asr serve
 | 輔助使用 | 只有「自動貼上」需要 | 定稿文字仍會放進剪貼簿，你自己貼 |
 
 輔助使用要手動到「系統設定 → 隱私權與安全性 → 輔助使用」打開。
-每次用 `build-app.sh` 重建都是同一個簽章識別碼，所以權限不會每次重問。
+從系統設定回到 TEA ASR 後，app 會立即並在短暫延遲後重新檢查權限；若 macOS
+仍回報未授權，app 會明確提示完全結束後重新開啟，而不會把未確認的狀態顯示成已允許。
+
+TCC 會綁定程式的簽章身分，不是只看 app 路徑。使用 Developer ID 時，授權可跨重建保留；
+ad-hoc 的 designated requirement 會以 `cdhash` 識別，改動 binary 後可能需要：
+
+1. 完全結束 TEA ASR。
+2. 在「輔助使用」清單移除舊的 TEA ASR 項目，再加入目前的 `build/TEA ASR.app`。
+3. 重新啟動 app，回到「權限」頁按「重新檢查權限」。
+
+若剛授權但仍顯示未允許，先完成一次完整退出／重開；這是 macOS 對目前程式簽章身分的
+真實回報，不代表 app 可以安全地假設授權已生效。
 
 ## 自測（不需要任何權限）
 

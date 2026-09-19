@@ -39,10 +39,36 @@ else
   echo "  產生方式：./scripts/make-icon.sh <來源.png>）"
 fi
 
-echo "==> ad-hoc 簽章"
-# TCC 用簽章識別 app。沒有穩定的簽章，每次重建都會重新詢問麥克風權限。
-codesign --force --sign - --identifier com.tea-asr.client "$APP"
-codesign --verify --verbose=1 "$APP"
+echo "==> 簽章"
+# TCC binds permissions to the code-signing requirement, not just the bundle
+# path. Prefer a Developer ID identity when one is installed so microphone and
+# Accessibility grants survive rebuilds. A local machine without a private
+# certificate still gets a runnable ad-hoc build, but its cdhash changes when
+# the binary changes and macOS may require both permissions to be granted again.
+IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+SIGN_IDENTITY="${TEA_ASR_SIGN_IDENTITY:-}"
+if [ -z "$SIGN_IDENTITY" ]; then
+  while IFS= read -r identity_line; do
+    case "$identity_line" in
+      *'"Developer ID Application: '*)
+        SIGN_IDENTITY="${identity_line#*\"}"
+        SIGN_IDENTITY="${SIGN_IDENTITY%%\"*}"
+        break
+        ;;
+    esac
+  done <<< "$IDENTITIES"
+fi
+
+if [ -n "$SIGN_IDENTITY" ]; then
+  codesign --force --sign "$SIGN_IDENTITY" --identifier com.tea-asr.client "$APP"
+  echo "==> Developer ID 簽章：$SIGN_IDENTITY"
+else
+  echo "==> WARNING：找不到 Developer ID Application 憑證，使用 ad-hoc 簽章。" >&2
+  echo "    這個 build 可以執行，但重建後 TCC 可能需要重新授權麥克風與輔助使用。" >&2
+  echo "    若已安裝憑證，可設定 TEA_ASR_SIGN_IDENTITY，或在 Keychain 加入 Developer ID Application。" >&2
+  codesign --force --sign - --identifier com.tea-asr.client "$APP"
+fi
+codesign --verify --strict --verbose=1 "$APP"
 
 echo
 echo "完成：$(pwd)/$APP"
