@@ -1,20 +1,27 @@
 #!/bin/bash
 # 組出可執行的 TEA ASR.app。
 #
-# 用 Command Line Tools 的 Swift，不需要接受 Xcode 授權條款，也不需要 sudo。
+# 優先用 Command Line Tools 的 Swift：不需要接受 Xcode 授權條款，也不需要 sudo。
+# 系統更新後 CLT 可能落後於 Xcode（swift-package 會因缺符號而 abort），
+# 這時自動改用 Xcode 內建的工具鏈。
 # 簽章是 ad-hoc：本機可執行，但不能發給別人（那需要開發者憑證與公證）。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-export DEVELOPER_DIR="${DEVELOPER_DIR:-/Library/Developer/CommandLineTools}"
 
 CONFIG="${1:-release}"
 APP="build/TEA ASR.app"
 
-echo "==> swift build -c $CONFIG"
-swift build -c "$CONFIG"
+SWIFT=/Library/Developer/CommandLineTools/usr/bin/swift
+if ! "$SWIFT" package --help >/dev/null 2>&1; then
+  SWIFT="$(xcrun --find swift)"
+  echo "==> Command Line Tools 的 Swift 不可用，改用 $SWIFT"
+fi
 
-BINARY="$(swift build -c "$CONFIG" --show-bin-path)/TeaASRClient"
+echo "==> swift build -c $CONFIG"
+"$SWIFT" build -c "$CONFIG"
+
+BINARY="$("$SWIFT" build -c "$CONFIG" --show-bin-path)/TeaASRClient"
 
 echo "==> 組裝 $APP"
 rm -rf "$APP"
