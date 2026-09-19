@@ -75,6 +75,19 @@ class ServiceConfig:
     #: condition. Default on since docs/benchmarks/pua-bf16-ab-report.md.
     filter_pua: bool = True
     max_total_connections: int = 4
+    #: Concurrent `continuous` profile sessions the single MLX worker admits
+    #: before `/v1/stream` rejects an additional session.start with
+    #: `concurrent_session_limit`. Measured, not guessed — see
+    #: docs/benchmarks/concurrency-report.md for the methodology and the
+    #: reasoning behind this default. Correctness held up to 4 (the most
+    #: tested): no queue backlog growth, no dropped/garbled segments, and
+    #: HTTP interactive requests were never starved. The default ships at 2
+    #: — below the tested ceiling — because median end-to-end latency grows
+    #: roughly linearly with session count (~0.4s at 1, ~0.7s at 2, ~1.1s at
+    #: 4) and this is a single-user local desktop service, not a multi-tenant
+    #: server; raise it in config.toml if a deployment genuinely needs more,
+    #: with the tested ceiling of 4 as the known-safe upper bound.
+    max_continuous_sessions: int = 2
     #: Stop the worker after this long with no work, freeing Metal memory.
     #: 0 disables unloading.
     idle_unload_s: int = 15 * 60

@@ -91,7 +91,11 @@ class CapabilityFeatures(ServerModel):
 class CapabilityLimits(ServerModel):
     max_frame_pcm_bytes: int = MAX_FRAME_PCM_BYTES
     max_utterance_ms: int = MAX_UTTERANCE_MS
-    max_continuous_sessions: int = 1
+    #: The value the server actually enforces (`/v1/stream` rejects an
+    #: additional `continuous` session past this with `concurrent_session_limit`
+    #: once it is reached), not a document-derived guess — see
+    #: docs/benchmarks/concurrency-report.md and `ServiceConfig.max_continuous_sessions`.
+    max_continuous_sessions: int = 2
     max_total_connections: int = 4
 
 

@@ -258,7 +258,7 @@ def create_app(
                 partial_transcripts=settings.revisable_preview,
             ),
             limits=CapabilityLimits(
-                max_continuous_sessions=1 if vad is not None else 0,
+                max_continuous_sessions=settings.max_continuous_sessions if vad is not None else 0,
                 max_total_connections=settings.max_total_connections,
             ),
         )
@@ -297,6 +297,7 @@ def create_app(
                 model_state=worker.state,
                 vad=vad,
                 registry=sessions,
+                max_continuous_sessions=settings.max_continuous_sessions if vad is not None else 0,
             )
         finally:
             activity.sessions -= 1

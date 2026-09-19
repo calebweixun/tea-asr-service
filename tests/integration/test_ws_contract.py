@@ -600,3 +600,98 @@ def test_an_unexpected_segment_failure_does_not_wedge_the_session(
         assert failures[0]["code"] == "internal_error"
         assert finals, "the session must keep working after a bad segment"
         assert events[-1]["status"] == "completed_with_errors"
+
+
+# --- concurrent continuous session limit -------------------------------------
+#
+# docs/benchmarks/concurrency-report.md is the measurement behind the default
+# (ServiceConfig.max_continuous_sessions); these tests only check that the
+# limit, whatever it is configured to, is actually enforced.
+
+
+def test_second_continuous_session_is_refused_past_the_limit(
+    supervisor: FakeSupervisor,
+) -> None:
+    client = build_client(supervisor, vad=FakeVad(), max_continuous_sessions=1)
+    with client as http, http.websocket_connect("/v1/stream", headers=AUTH) as first:
+        first.receive_json()
+        first.send_json(CONTINUOUS)
+        first.receive_json()  # session.started
+
+        with http.websocket_connect("/v1/stream", headers=AUTH) as second:
+            second.receive_json()
+            second.send_json({**CONTINUOUS, "request_id": "start-2"})
+            error = second.receive_json()
+            assert error["type"] == "error"
+            assert error["code"] == "concurrent_session_limit"
+            assert error["retryable"] is True
+            with pytest.raises(WebSocketDisconnect) as excinfo:
+                second.receive_json()
+            assert excinfo.value.code == 4029
+
+        # The first session is untouched by the second one's rejection.
+        seq = send_continuous(first, [("silence", 3), ("tone", 8), ("silence", 12)])
+        first.send_json({"type": "session.stop", "request_id": "s1", "through_seq": seq - 1})
+        events = drain_until(first, "session.stopped")
+        assert events[-1]["status"] == "completed"
+
+
+def test_continuous_sessions_within_the_limit_both_run(supervisor: FakeSupervisor) -> None:
+    client = build_client(supervisor, vad=FakeVad(), max_continuous_sessions=2)
+    with client as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as first, http.websocket_connect("/v1/stream", headers=AUTH) as second:
+        first.receive_json()
+        first.send_json(CONTINUOUS)
+        assert first.receive_json()["type"] == "session.started"
+
+        second.receive_json()
+        second.send_json({**CONTINUOUS, "request_id": "start-2"})
+        assert second.receive_json()["type"] == "session.started"
+
+        for socket in (first, second):
+            seq = send_continuous(socket, [("silence", 3), ("tone", 8), ("silence", 12)])
+            socket.send_json(
+                {"type": "session.stop", "request_id": "stop", "through_seq": seq - 1}
+            )
+        for socket in (first, second):
+            events = drain_until(socket, "session.stopped")
+            assert events[-1]["status"] == "completed"
+
+
+def test_continuous_limit_does_not_count_utterance_sessions(
+    supervisor: FakeSupervisor,
+) -> None:
+    """The limit is about `continuous`; a plain utterance session is unaffected."""
+
+    client = build_client(supervisor, vad=FakeVad(), max_continuous_sessions=1)
+    with client as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as utterance, http.websocket_connect("/v1/stream", headers=AUTH) as continuous:
+        utterance.receive_json()
+        utterance.send_json(START)
+        assert utterance.receive_json()["type"] == "session.started"
+
+        continuous.receive_json()
+        continuous.send_json(CONTINUOUS)
+        assert continuous.receive_json()["type"] == "session.started"
+
+
+def test_continuous_slot_is_freed_after_session_stop(supervisor: FakeSupervisor) -> None:
+    client = build_client(supervisor, vad=FakeVad(), max_continuous_sessions=1)
+    with client as http:
+        with http.websocket_connect("/v1/stream", headers=AUTH) as first:
+            first.receive_json()
+            first.send_json(CONTINUOUS)
+            first.receive_json()
+            seq = send_continuous(first, [("silence", 3), ("tone", 8), ("silence", 12)])
+            first.send_json(
+                {"type": "session.stop", "request_id": "s1", "through_seq": seq - 1}
+            )
+            drain_until(first, "session.stopped")
+
+        # The first session is fully closed now; a new one must be admitted.
+        with http.websocket_connect("/v1/stream", headers=AUTH) as second:
+            second.receive_json()
+            second.send_json({**CONTINUOUS, "request_id": "start-2"})
+            assert second.receive_json()["type"] == "session.started"

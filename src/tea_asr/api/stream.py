@@ -160,12 +160,21 @@ class StreamSession:
         config: ServiceConfig,
         model_state: str,
         vad: SileroVad | None = None,
+        registry: set[StreamSession] | None = None,
+        max_continuous_sessions: int | None = None,
     ) -> None:
         self._websocket = websocket
         self._scheduler = scheduler
         self._config = config
         self._model_state = model_state
         self._vad = vad
+        #: Other live sessions on this service, so `_read_session_start` can
+        #: count how many are already `continuous` before admitting one more
+        #: (docs/benchmarks/concurrency-report.md). `None` in tests that build
+        #: a `StreamSession` directly without a registry — such a session is
+        #: never capacity-limited, matching the pre-existing behaviour.
+        self._registry = registry
+        self._max_continuous_sessions = max_continuous_sessions
         self._state = SessionState()
         self._writer = EventWriter(websocket, self._state.session_id)
         self._profile = "utterance"
@@ -197,6 +206,22 @@ class StreamSession:
                 "unsupported_option",
                 "continuous profile 需要 VAD 資產；請先執行 tea-asr model-prepare。",
             )
+        if (
+            start.profile == "continuous"
+            and self._registry is not None
+            and self._max_continuous_sessions is not None
+        ):
+            active = sum(
+                1
+                for other in self._registry
+                if other is not self and other.is_continuous
+            )
+            if active >= self._max_continuous_sessions:
+                raise ApiError(
+                    "concurrent_session_limit",
+                    f"併發 continuous session 已達上限（{self._max_continuous_sessions}）"
+                    "，請稍後再試或等其他 session 結束。",
+                )
         if start.durable:
             raise ApiError("unsupported_option", "durable session 要等 P4 完成才提供。")
         if start.transcript_mode == "revisable" and not self._config.revisable_preview:
@@ -838,6 +863,17 @@ class StreamSession:
     def writer(self) -> EventWriter:
         return self._writer
 
+    @property
+    def is_continuous(self) -> bool:
+        """True once this session's `session.start` picked the continuous profile.
+
+        False before `session.start` is processed (default is "utterance"),
+        so a session still being admitted never counts against itself in the
+        concurrency check above.
+        """
+
+        return self._profile == "continuous"
+
 
 _KNOWN_TYPES = {"session.start", "audio.commit", "session.stop", "session.cancel", "ping"}
 
@@ -870,6 +906,7 @@ async def run_stream(
     model_state: str,
     vad: SileroVad | None = None,
     registry: set[StreamSession] | None = None,
+    max_continuous_sessions: int | None = None,
 ) -> None:
     if websocket.headers.get("authorization") != f"Bearer {auth_token}":
         await websocket.close(code=1008, reason="unauthenticated")
@@ -881,7 +918,13 @@ async def run_stream(
 
     await websocket.accept()
     session = StreamSession(
-        websocket, scheduler, config=config, model_state=model_state, vad=vad
+        websocket,
+        scheduler,
+        config=config,
+        model_state=model_state,
+        vad=vad,
+        registry=registry,
+        max_continuous_sessions=max_continuous_sessions,
     )
     if registry is not None:
         registry.add(session)

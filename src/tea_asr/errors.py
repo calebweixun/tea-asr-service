@@ -12,6 +12,7 @@ ERROR_HTTP_STATUS: dict[str, int] = {
     "payload_too_large": 413,
     "queue_full": 429,
     "session_limit": 429,
+    "concurrent_session_limit": 429,
     "model_loading": 503,
     "model_unavailable": 503,
     "model_incompatible": 503,
@@ -37,12 +38,22 @@ ERROR_WS_CLOSE: dict[str, int] = {
     "slow_client": 1013,
     # 1012 "service restart": the session cannot continue on the old clock.
     "timeline_gap": 1012,
+    # `queue_full` / `session_limit` / `slow_client` all share 1013, so a
+    # client cannot tell "my own segment queue is full" apart from "the
+    # server is shedding load" from the close code alone (see docs/04). This
+    # is a *different* condition again — the connection was refused before a
+    # session even started, admission-side, not mid-session backpressure —
+    # so it gets its own code in the private-use range (3000-3999 is IANA
+    # registered; 4000-4999 is reserved for private/application use by
+    # RFC 6455 §7.4.2) instead of joining that pile-up.
+    "concurrent_session_limit": 4029,
 }
 
 RETRYABLE_CODES = frozenset(
     {
         "queue_full",
         "session_limit",
+        "concurrent_session_limit",
         "model_loading",
         "inference_failed",
         "inference_timeout",

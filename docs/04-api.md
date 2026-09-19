@@ -69,11 +69,14 @@ Capabilities 最少有：
   "audio":{"sample_rate":16000,"channels":1,"format":"pcm_s16le"},
   "profiles":["utterance","continuous"],
   "features":{"native_audio_streaming":false,"partial_transcripts":false,"word_timestamps":false,"translation":false,"diarization":false,"hotwords":false,"durable_sessions":false,"batch_jobs":false},
-  "limits":{"max_frame_pcm_bytes":6400,"max_utterance_ms":30000,"max_continuous_sessions":1,"max_total_connections":5}
+  "limits":{"max_frame_pcm_bytes":6400,"max_utterance_ms":30000,"max_continuous_sessions":2,"max_total_connections":5}
 }
 ```
 
 feature 只有完成該功能驗收才變 true；即使 mock mode 也不能假稱真模型。
+
+`limits.max_continuous_sessions` 回報的是伺服器**實際會擋**的上限，不是文件推導值：超過時 `/v1/stream` 對新的 `session.start`（`profile=continuous`）回 `concurrent_session_limit`（見下方錯誤表），既有 session 不受影響。預設 2，量測方法與依據見
+[docs/benchmarks/concurrency-report.md](benchmarks/concurrency-report.md)；可用 `config.toml` 的 `service.max_continuous_sessions` 調整，已量測安全上限為 4。
 
 ## WebSocket：v0.1
 
@@ -166,10 +169,13 @@ outgoing events 最多256項或1MiB，先到為準。flow/ACK可合併成最新�
 | invalid_audio／unsupported_option | 422 | error；協定損壞close1008 |
 | payload_too_large | 413 | close1009 |
 | queue_full／session_limit | 429 | start拒絕或flow pause；超配close1013 |
+| concurrent_session_limit | 429 | 併發 continuous session 數已達 `limits.max_continuous_sessions`；`session.start` 被拒，close **4029**（不與queue_full／session_limit／slow_client共用的1013混在一起，這三者目前仍共用1013，client無法從close code分辨，見下方已知限制）；retryable=true，client應該退避後重試或等其他session結束 |
 | model_loading／model_unavailable | 503 | start拒絕；既有session送狀態相關error |
 | inference_failed／inference_timeout | 500／504 | segment.error；必要時worker復原 |
 | timeline_gap | 409 | 機器睡眠等原因使 sample clock 出現缺口；送 error 後close1012，client 須開新 session |
 | storage_full（v0.2） | 507 | 停止 durable ACK、error、close1013 |
+
+**已知限制（尚未修）：** `queue_full`／`session_limit`／`slow_client` 三者仍共用 close 1013，client 無法單從 close code 分辨是「自己這個 session 的待轉錄佇列滿了」還是「被伺服器整體限速」。`concurrent_session_limit` 是唯一一個在本次改動中拿到獨立 close code（4029）的錯誤，因為它是連線admission階段就拒絕、語意與那三者都不同；把既有三者也拆開是更大範圍的改動，不在本次範圍內。
 
 ## P2a／v0.1.1：可修訂預覽擴充
 

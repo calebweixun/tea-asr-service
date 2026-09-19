@@ -117,7 +117,7 @@
         "additionalProperties": false,
         "properties": {
           "max_continuous_sessions": {
-            "default": 1,
+            "default": 2,
             "title": "Max Continuous Sessions",
             "type": "integer"
           },

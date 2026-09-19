@@ -72,12 +72,17 @@ def build_client(
     revisable_preview: bool = False,
     filter_pua: bool = True,
     vad: Any = None,
+    max_continuous_sessions: int = 1,
 ) -> TestClient:
     app = create_app(
         Path("unused"),
         token="test-token",
         supervisor=supervisor,
-        config=ServiceConfig(revisable_preview=revisable_preview, filter_pua=filter_pua),
+        config=ServiceConfig(
+            revisable_preview=revisable_preview,
+            filter_pua=filter_pua,
+            max_continuous_sessions=max_continuous_sessions,
+        ),
         vad_model=vad,
     )
     return TestClient(app)

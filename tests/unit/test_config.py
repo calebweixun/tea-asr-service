@@ -20,6 +20,18 @@ def test_defaults_match_what_has_been_accepted() -> None:
     # docs/benchmarks/pua-bf16-ab-report.md: the deployed MLX 4bit checkpoint
     # leaks PUA characters into 70% of sentences, so filtering ships on.
     assert config.filter_pua is True
+    # docs/benchmarks/concurrency-report.md: measured safe up to 4 concurrent
+    # continuous sessions; ships at 2 for latency-budget reasons on a
+    # single-user desktop service, not because more was found unsafe.
+    assert config.max_continuous_sessions == 2
+
+
+def test_max_continuous_sessions_is_configurable(tmp_path: Path) -> None:
+    paths = app_paths(tmp_path)
+    paths.support.mkdir(parents=True)
+    paths.config_file.write_text("[service]\nmax_continuous_sessions = 4\n")
+    config = ServiceConfig.load(paths, env={})
+    assert config.max_continuous_sessions == 4
 
 
 def test_pua_filter_can_be_turned_off_explicitly() -> None:
