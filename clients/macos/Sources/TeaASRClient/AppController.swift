@@ -41,6 +41,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private let settings = Settings()
     private let capture = AudioCapture()
     private lazy var client = ASRClient(settings: settings)
+    private let transcriptEvents = TranscriptEventProcessor()
     private let appState = AppState()
     private let serviceProbe = ServiceProbe()
 
@@ -464,21 +465,27 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
         client.onFinal = { [weak self] item in
             guard let self else { return }
+            guard let processed = self.transcriptEvents.process(
+                .final(item),
+                timestamp: self.spokenAt(item.startSample)
+            ) else { return }
             switch self.mode {
             case .meeting:
-                self.mainWindow?.appendFinal(item.text, spokenAt: self.spokenAt(item.startSample))
+                self.mainWindow?.appendFinal(processed)
             case .dictation:
                 // Keep both modes visible in the same management window. The
                 // clipboard/insertion path remains independent of presentation
                 // so a dictation final is still inspectable when auto-insert is
                 // disabled or Accessibility permission is missing.
-                self.mainWindow?.appendFinal(item.text, spokenAt: self.spokenAt(item.startSample))
-                self.showLastText(item.text)
+                self.mainWindow?.appendFinal(processed)
+                let insertionText = TranscriptOutputPolicy.insertionText(from: processed)
+                self.showLastText(TranscriptOutputPolicy.presentationText(from: processed))
+                guard !insertionText.isEmpty else { return }
                 if self.settings.autoInsert, TextInjector.isTrusted {
-                    TextInjector.insert(item.text)
+                    TextInjector.insert(insertionText)
                 } else {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(item.text, forType: .string)
+                    NSPasteboard.general.setString(insertionText, forType: .string)
                     self.warnAboutAccessibilityOnce()
                 }
             case .idle:

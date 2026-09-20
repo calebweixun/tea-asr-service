@@ -65,6 +65,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let text: String
         let kind: TranscriptEntryKind
         let sequence: Int
+        let metadata: TranscriptSegmentMetadata?
     }
 
     private var audioDiagnostics: AudioDiagnostics?
@@ -293,19 +294,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    func appendFinal(_ text: String, spokenAt: Date) {
+    func appendFinal(_ processed: ProcessedTranscript) {
         partialText = ""
         partialSpokenAt = nil
-        guard !text.isEmpty else { return }
+        guard !processed.cleanedText.isEmpty else { return }
         appendTranscriptEntry(
             TranscriptEntry(
-                spokenAt: spokenAt,
-                text: text,
+                spokenAt: processed.metadata.timestamp,
+                text: processed.cleanedText,
                 kind: .finalText,
-                sequence: nextTranscriptSequence
+                sequence: nextTranscriptSequence,
+                metadata: processed.metadata
             )
         )
-        appState.updateLastText(text)
+        appState.updateLastText(processed.cleanedText)
         if selectedSection == .operations || selectedSection == .overview {
             renderDetail()
         }
@@ -319,7 +321,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                 spokenAt: Date(),
                 text: reason,
                 kind: .gap,
-                sequence: nextTranscriptSequence
+                sequence: nextTranscriptSequence,
+                metadata: nil
             )
         )
         sessionStatus = "錄音有間隔：\(reason)"

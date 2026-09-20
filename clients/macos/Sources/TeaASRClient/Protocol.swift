@@ -45,6 +45,7 @@ enum Wire {
         let revision: Int
         let startSample: Int
         let endSample: Int
+        let timestampQuality: String
         let text: String
         let warnings: [String]?
 
@@ -54,8 +55,47 @@ enum Wire {
             case revision
             case startSample = "start_sample"
             case endSample = "end_sample"
+            case timestampQuality = "timestamp_quality"
             case text
             case warnings
+        }
+
+        init(
+            segmentId: String,
+            segmentIndex: Int,
+            revision: Int,
+            startSample: Int,
+            endSample: Int,
+            timestampQuality: String = "segment",
+            text: String,
+            warnings: [String]? = nil
+        ) {
+            self.segmentId = segmentId
+            self.segmentIndex = segmentIndex
+            self.revision = revision
+            self.startSample = startSample
+            self.endSample = endSample
+            self.timestampQuality = timestampQuality
+            self.text = text
+            self.warnings = warnings
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            segmentId = try container.decode(String.self, forKey: .segmentId)
+            segmentIndex = try container.decode(Int.self, forKey: .segmentIndex)
+            revision = try container.decode(Int.self, forKey: .revision)
+            startSample = try container.decode(Int.self, forKey: .startSample)
+            endSample = try container.decode(Int.self, forKey: .endSample)
+            // The API schema declares this field with a default. Keep an
+            // explicitly supplied value unchanged, while accepting older
+            // events that omit it instead of dropping the final silently.
+            timestampQuality = try container.decodeIfPresent(
+                String.self,
+                forKey: .timestampQuality
+            ) ?? "segment"
+            text = try container.decode(String.self, forKey: .text)
+            warnings = try container.decodeIfPresent([String].self, forKey: .warnings)
         }
     }
 

@@ -37,6 +37,13 @@ open "build/TEA ASR.app"
 uv run tea-asr serve
 ```
 
+## 文字處理邊界
+
+每個 server `final` 都依序保留 `rawTranscript`、產生 `cleanedText`，再產生最後貼上的
+`pasteText`，並記錄實際套用且依序發生的 `appliedSteps`。目前預設 pipeline 是嚴格 no-op，
+因此不改動任何文字；partial 只更新預覽，不會進入清理或貼上流程。segment、sample、revision
+與時間戳 metadata 也會隨 final 保留，處理規則只在本機執行，不回寫 server。
+
 ## 權限
 
 | 權限 | 什麼時候要 | 沒有會怎樣 |
