@@ -33,6 +33,14 @@ enum MenuBarImageLoader {
     }
 }
 
+/// Gives an image-only status item a stable, non-zero capture width.
+///
+/// Keep this independent of the image load result: Thaw needs a valid window
+/// geometry even during the brief interval before the first image is assigned.
+enum MenuBarStatusItemSizing {
+    static let length = max(MenuBarImageLoader.logicalSize.width, 1)
+}
+
 /// Menu bar app: dictation into the focused app, or a meeting transcript window.
 @MainActor
 final class AppController: NSObject, NSApplicationDelegate {
@@ -72,10 +80,12 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var globalKeyUpMonitor: Any?
     private var localKeyUpMonitor: Any?
     private var hotKeyRegistered = false
+    private var hotKeyRegistrationOutcome: ShortcutRegistrationOutcome = .unavailable
     private var interactionMachine = DictationInteractionStateMachine(mode: .toggle)
     private let dictationOverlay = DictationOverlayController()
     private var workspaceObservers: [NSObjectProtocol] = []
     private var insertedDictationSegments = Set<String>()
+    private var dictationInsertionTarget: TextInsertionTarget?
     /// Wall clock of the current session's sample 0, so a session restarted after
     /// a timeline gap still lands on one continuous meeting timeline.
     private var sessionOrigin = Date()
@@ -195,7 +205,11 @@ final class AppController: NSObject, NSApplicationDelegate {
     // MARK: - Menu
 
     private func buildMenu() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        let initialImage = Self.menuBarImage("idle")
+        statusItem = NSStatusBar.system.statusItem(
+            withLength: MenuBarStatusItemSizing.length
+        )
+        statusItem.button?.image = initialImage
         statusItem.menu = menu
 
         statusEntry.isEnabled = false
@@ -314,6 +328,9 @@ final class AppController: NSObject, NSApplicationDelegate {
             return
         }
         handleShortcut(.shortcutDown(isRepeat: false))
+        // A menu item click has no physical key-up event. Release the latch
+        // immediately so the next click remains a distinct toggle press.
+        _ = interactionMachine.handle(.shortcutUp)
     }
 
     private func beginDictationFromUI() {
@@ -415,10 +432,21 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     private func start(mode newMode: Mode) {
         guard mode == .idle else { stopSession(); return }
+        if newMode == .dictation {
+            // Capture before the asynchronous microphone-consent flow can
+            // activate our app or its prompt. The target is the app/field that
+            // owned focus when this dictation request actually began.
+            dictationInsertionTarget = TextInjector.captureFocusedTarget(
+                excluding: NSRunningApplication.current.processIdentifier
+            )
+        } else {
+            dictationInsertionTarget = nil
+        }
         AudioCapture.requestPermission { [weak self] granted in
             guard let self else { return }
             guard granted else {
                 if newMode == .dictation {
+                    self.dictationInsertionTarget = nil
                     self.interactionMachine.resetAfterStartFailure()
                     self.dictationOverlay.showError("沒有麥克風權限")
                 }
@@ -434,6 +462,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             if newMode == .dictation,
                self.settings.interactionMode == .pushToTalk,
                !self.interactionMachine.active {
+                self.dictationInsertionTarget = nil
                 return
             }
             self.reallyStart(mode: newMode)
@@ -466,6 +495,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             try capture.start(configuration: settings.audioInputConfiguration)
         } catch {
             interactionMachine.resetAfterStartFailure()
+            dictationInsertionTarget = nil
             mode = .idle
             appState.setMode(.idle)
             if newMode == .dictation {
@@ -526,6 +556,7 @@ final class AppController: NSObject, NSApplicationDelegate {
                 self.capture.stop()
                 self.mode = .idle
                 self.appState.setMode(.idle)
+                self.dictationInsertionTarget = nil
                 self.mainWindow?.setStatus("已停止")
                 self.interactionMachine.resetAfterSessionEnd()
                 if wasDictation { self.dictationOverlay.stopped() }
@@ -534,6 +565,7 @@ final class AppController: NSObject, NSApplicationDelegate {
                 self.capture.stop()
                 self.mode = .idle
                 self.appState.setMode(.idle)
+                self.dictationInsertionTarget = nil
                 self.mainWindow?.setStatus("錯誤：\(issue.message)")
                 self.interactionMachine.resetAfterSessionEnd()
                 if wasDictation {
@@ -587,11 +619,26 @@ final class AppController: NSObject, NSApplicationDelegate {
                 self.showLastText(TranscriptOutputPolicy.presentationText(from: processed))
                 guard !insertionText.isEmpty else { return }
                 if self.settings.autoInsert, TextInjector.isTrusted {
-                    TextInjector.insert(insertionText)
+                    guard let target = self.dictationInsertionTarget else {
+                        TextInjector.copyToClipboard(insertionText)
+                        self.mainWindow?.setStatus(
+                            "沒有可安全貼上的原始焦點；文字已複製到剪貼簿，請確認後按 ⌘V"
+                        )
+                        return
+                    }
+                    switch TextInjector.insert(insertionText, ifCurrent: target) {
+                    case .inserted:
+                        break
+                    case .copiedBecauseFocusChanged:
+                        self.mainWindow?.setStatus(
+                            "原始輸入焦點已變更；文字已複製到剪貼簿，請確認後按 ⌘V"
+                        )
+                    }
                 } else {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(insertionText, forType: .string)
-                    self.warnAboutAccessibilityOnce()
+                    TextInjector.copyToClipboard(insertionText)
+                    if self.settings.autoInsert {
+                        self.warnAboutAccessibilityOnce()
+                    }
                 }
             case .idle:
                 break
@@ -637,21 +684,31 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
 
         if hotKeyEventHandler == nil {
-            var eventType = EventTypeSpec(
-                eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)
-            )
+            var eventTypes = [
+                EventTypeSpec(
+                    eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)
+                ),
+                EventTypeSpec(
+                    eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)
+                ),
+            ]
             InstallEventHandler(
                 GetApplicationEventTarget(),
-                { _, _, userData in
+                { _, event, userData in
                     guard let userData else { return noErr }
                     let controller = Unmanaged<AppController>.fromOpaque(userData).takeUnretainedValue()
+                    let eventKind = event.map(GetEventKind)
                     DispatchQueue.main.async {
-                        controller.handleShortcut(.shortcutDown(isRepeat: false))
+                        if eventKind == UInt32(kEventHotKeyReleased) {
+                            controller.handleShortcut(.shortcutUp)
+                        } else {
+                            controller.handleShortcut(.shortcutDown(isRepeat: false))
+                        }
                     }
                     return noErr
                 },
-                1,
-                &eventType,
+                eventTypes.count,
+                &eventTypes,
                 Unmanaged.passUnretained(self).toOpaque(),
                 &hotKeyEventHandler
             )
@@ -661,6 +718,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             || permissionCoordinator?.state.inputMonitoring.isSatisfied == true
         else {
             hotKeyRegistered = false
+            hotKeyRegistrationOutcome = .unavailable
             removeKeyUpMonitors()
             mainWindow?.setShortcutStatus("需要輸入監控權限；請到權限頁開啟")
             return
@@ -673,12 +731,14 @@ final class AppController: NSObject, NSApplicationDelegate {
             shortcut.carbonModifierFlags,
             id,
             GetApplicationEventTarget(),
-            0,
+            UInt32(kEventHotKeyExclusive),
             &hotKeyRef
         )
-        // Another app may already own the combination. Saying so beats letting
-        // the user press it and wonder why nothing happens.
-        hotKeyRegistered = status == noErr
+        // Ask Carbon for exclusive ownership. A non-exclusive registration
+        // can succeed while another process already owns the same key, which
+        // made the old UI falsely claim that the shortcut was available.
+        hotKeyRegistrationOutcome = ShortcutRegistrationPolicy.outcome(for: status)
+        hotKeyRegistered = hotKeyRegistrationOutcome.isRegistered
         if hotKeyRegistered, settings.interactionMode == .pushToTalk {
             installKeyUpMonitors()
         } else {
@@ -692,23 +752,38 @@ final class AppController: NSObject, NSApplicationDelegate {
            permissionCoordinator?.state.inputMonitoring.isSatisfied != true {
             return "需要輸入監控權限"
         }
-        return hotKeyRegistered ? "快捷鍵已啟用" : "快捷鍵被其他 app 占用或無法註冊"
+        switch hotKeyRegistrationOutcome {
+        case .registered:
+            return "快捷鍵已啟用"
+        case .conflict:
+            return "快捷鍵已被其他 app 占用"
+        case .unavailable:
+            return "快捷鍵無法註冊"
+        }
     }
 
     private func installKeyUpMonitors() {
-        guard globalKeyUpMonitor == nil, localKeyUpMonitor == nil else { return }
-        globalKeyUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
-            guard let self else { return }
-            Task { @MainActor [weak self] in
-                self?.handleKeyUp(event)
+        for kind in InputMonitorInstallPolicy.missing(
+            globalInstalled: globalKeyUpMonitor != nil,
+            localInstalled: localKeyUpMonitor != nil
+        ) {
+            switch kind {
+            case .globalKeyUp:
+                globalKeyUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
+                    guard let self else { return }
+                    Task { @MainActor [weak self] in
+                        self?.handleKeyUp(event)
+                    }
+                }
+            case .localKeyUp:
+                localKeyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
+                    guard let self else { return event }
+                    self.handleKeyUp(event)
+                    return event
+                }
             }
         }
-        localKeyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
-            guard let self else { return event }
-            self.handleKeyUp(event)
-            return event
-        }
-        if globalKeyUpMonitor == nil {
+        if globalKeyUpMonitor == nil || localKeyUpMonitor == nil {
             mainWindow?.setShortcutStatus("無法監聽按鍵放開；請確認輸入監控權限")
         }
     }
@@ -732,6 +807,15 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func handleShortcut(_ event: DictationInteractionEvent) {
+        if mode == .meeting, case .shortcutDown = event {
+            for command in interactionMachine.handle(.shortcutWhileMeeting) {
+                if command == .ignoredDuringMeeting {
+                    mainWindow?.setStatus("會議記錄進行中；快捷鍵已忽略，會議不會停止")
+                    playFeedback(.ignoredDuringMeeting)
+                }
+            }
+            return
+        }
         let commands = interactionMachine.handle(event)
         for command in commands {
             switch command {
@@ -739,6 +823,9 @@ final class AppController: NSObject, NSApplicationDelegate {
                 start(mode: .dictation)
             case .stop:
                 stopSession()
+            case .ignoredDuringMeeting:
+                mainWindow?.setStatus("會議記錄進行中；快捷鍵已忽略，會議不會停止")
+                playFeedback(.ignoredDuringMeeting)
             }
         }
     }
@@ -759,7 +846,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         let center = NSWorkspace.shared.notificationCenter
         workspaceObservers.append(
             center.addObserver(
-                forName: NSWorkspace.sessionDidResignActiveNotification,
+                forName: NSWorkspace.willSleepNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
@@ -778,6 +865,13 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func cancelInteraction(_ event: DictationInteractionEvent) {
+        if event == .systemSleep {
+            // A meeting is not driven by the shortcut state machine, but it
+            // still owns an audio/server session and must stop before sleep.
+            _ = interactionMachine.handle(event)
+            if mode != .idle { stopSession() }
+            return
+        }
         handleShortcut(event)
     }
 

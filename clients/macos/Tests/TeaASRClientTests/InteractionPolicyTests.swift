@@ -1,4 +1,5 @@
 import XCTest
+import Carbon.HIToolbox
 @testable import TeaASRClient
 
 final class InteractionPolicyTests: XCTestCase {
@@ -9,6 +10,11 @@ final class InteractionPolicyTests: XCTestCase {
         XCTAssertTrue(machine.active)
         XCTAssertEqual(machine.handle(.shortcutDown(isRepeat: true)), [])
         XCTAssertTrue(machine.active)
+        // Carbon may deliver another callback without marking it as a
+        // repeat. The physical latch still suppresses it until release.
+        XCTAssertEqual(machine.handle(.shortcutDown(isRepeat: false)), [])
+        XCTAssertTrue(machine.shortcutIsDown)
+        XCTAssertEqual(machine.handle(.shortcutUp), [])
         XCTAssertEqual(machine.handle(.shortcutDown(isRepeat: false)), [.stop])
         XCTAssertFalse(machine.active)
     }
@@ -54,6 +60,46 @@ final class InteractionPolicyTests: XCTestCase {
         XCTAssertFalse(InteractionFeedbackPolicy.shouldPlay(enabled: false, event: .started))
         XCTAssertTrue(InteractionFeedbackPolicy.shouldPlay(enabled: true, event: .started))
         XCTAssertTrue(InteractionFeedbackPolicy.shouldPlay(enabled: true, event: .stopped))
+        XCTAssertTrue(InteractionFeedbackPolicy.shouldPlay(enabled: true, event: .ignoredDuringMeeting))
         XCTAssertFalse(InteractionFeedbackPolicy.shouldPlay(enabled: true, event: .failed))
+    }
+
+    func testShortcutWhileMeetingProducesOnlyTheSafeIgnoreCommand() {
+        var machine = DictationInteractionStateMachine(mode: .toggle)
+
+        XCTAssertEqual(machine.handle(.shortcutWhileMeeting), [.ignoredDuringMeeting])
+        XCTAssertFalse(machine.active)
+        XCTAssertFalse(machine.shortcutIsDown)
+    }
+
+    func testExclusiveRegistrationDistinguishesConflictFromOtherFailures() {
+        XCTAssertEqual(
+            ShortcutRegistrationPolicy.outcome(for: noErr),
+            .registered
+        )
+        XCTAssertEqual(
+            ShortcutRegistrationPolicy.outcome(for: OSStatus(eventHotKeyExistsErr)),
+            .conflict
+        )
+        XCTAssertEqual(
+            ShortcutRegistrationPolicy.outcome(for: -1),
+            .unavailable
+        )
+    }
+
+    func testMissingInputMonitorsAreRetriedIndependently() {
+        XCTAssertEqual(
+            InputMonitorInstallPolicy.missing(globalInstalled: false, localInstalled: false),
+            [.globalKeyUp, .localKeyUp]
+        )
+        XCTAssertEqual(
+            InputMonitorInstallPolicy.missing(globalInstalled: false, localInstalled: true),
+            [.globalKeyUp]
+        )
+        XCTAssertEqual(
+            InputMonitorInstallPolicy.missing(globalInstalled: true, localInstalled: false),
+            [.localKeyUp]
+        )
+        XCTAssertTrue(InputMonitorInstallPolicy.missing(globalInstalled: true, localInstalled: true).isEmpty)
     }
 }

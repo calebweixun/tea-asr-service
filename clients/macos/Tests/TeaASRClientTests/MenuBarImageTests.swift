@@ -45,4 +45,12 @@ final class MenuBarImageTests: XCTestCase {
             Set(["18x18", "36x36", "54x54"])
         )
     }
+
+    func testStatusItemSizingUsesFixedNonZeroLengthForImageOnlyItems() {
+        XCTAssertEqual(
+            MenuBarStatusItemSizing.length,
+            MenuBarImageLoader.logicalSize.width
+        )
+        XCTAssertGreaterThan(MenuBarStatusItemSizing.length, 0)
+    }
 }
