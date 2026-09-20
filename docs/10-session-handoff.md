@@ -13,7 +13,7 @@
 | 元件 | 狀態 |
 |---|---|
 | Server（`src/tea_asr/`） | P0–P3、P2a 完成並實測；全 Unicode PUA 過濾與兩個實測競態修復完成。143 個測試通過（`uv run pytest tests/unit tests/integration -q`） |
-| Mac client（`clients/macos/`） | 可用：聽寫、會議記錄、選單列狀態、服務啟停；M0 typed `AppState`／`ServiceProbe` 完成。原生 unified macOS UI（主視窗、狀態、權限、設定、診斷與逐字稿）已完成並通過目前 client 測試；P5a 的收音裝置／聲道、快捷鍵／PTT、feedback、non-activating overlay 與 deterministic 後處理仍按 [06](06-handoff.md) 驗收，P5b 尚未開始 |
+| Mac client（`clients/macos/`） | 可用：聽寫、會議記錄、選單列狀態、服務啟停；M0 typed `AppState`／`ServiceProbe` 完成。原生 unified macOS UI（主視窗、狀態、權限、設定、診斷與逐字稿）已完成並通過目前 client 測試；P5a 的收音裝置／聲道、快捷鍵／PTT、feedback、non-activating overlay 與 deterministic 後處理都已實作，`swift build` 與 65 個 client 測試通過；焦點、跨 app key-up 與熱鍵衝突仍待實機驗收，細節見 [06](06-handoff.md)。P5b 尚未開始 |
 | OBS 外掛（另一個倉庫） | Phase A 完成：錯誤與連線狀態只在 Tools／設定診斷，不進字幕畫布；新 source 預設 Fixed 960px，舊 source migration 保留 Auto；CJK effective defaults 已修復。strict two-line layout 延至 Phase B |
 | P4 長檔案與保存 | 未開始，`/v1/jobs` 回 404 |
 

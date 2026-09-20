@@ -125,7 +125,9 @@ log 為 JSON lines 並輪替，明確過濾 token、PCM 與逐字稿。關閉時
 
 **P5a（已有可用版本，見 [clients/macos](../clients/macos/)）：** Swift選單列聽寫client，以驗證真正日常使用的延遲、短詞、焦點與剪貼簿行為。採AVAudioEngine收音及可靠resampling；partial在自有浮動視窗更新，final才貼入。不要為了顯示partial而回刪使用者已打的字。模型與 runtime 準備由 server 明確擁有；Mac GUI 只能呼叫、引導或診斷 `tea-asr model-prepare`，不得靜默下載模型，也不得自行建立另一套 ASR runtime。
 
-**P5a驗收條件：** 可設定輸入裝置與聲道；可設定熱鍵並支援 push-to-talk；開始／停止回饋可選；partial/status overlay 必須是不啟用其他app、不搶焦點的浮動視窗。目前client仍使用系統預設輸入、固定熱鍵，且沒有 overlay。
+**P5a驗收條件：** 可設定輸入裝置與聲道；可設定熱鍵並支援 push-to-talk；開始／停止回饋可選；partial/status overlay 必須是不啟用其他app、不搶焦點的浮動視窗。
+
+四項的實作與單元測試都已完成（收音裝置／聲道、可設定熱鍵與 push-to-talk、可選的開始／停止提示音、`NSPanel` 非啟用 overlay，以及 push-to-talk 才要求的輸入監控權限）；`swift build` 與 65 個 client 測試通過。**尚未實機驗收**：overlay 是否真的不搶前景 app 焦點、push-to-talk 跨 app 的 key-up、熱鍵與選單 key equivalent 是否重複觸發，都只有 policy 層測試，沒有真機證據。另有兩個已知落差待處理：睡眠取消綁在 `sessionDidResignActiveNotification` 而非 `willSleepNotification`，以及 push-to-talk 漏收 key-up 時沒有逾時保護。
 
 **P5b：** InputMethodKit輸入法整合，把partial呈現在自己持有的marked text／組字區，final才commit，交付游標處直接修訂體驗。涵蓋組字生命週期、使用者編輯、焦點變更、取消與安全輸入；實際app相容測試見07。一般選單列app不能直接取代此層。P5a與P5b分開交付，server協定共用。
 
@@ -166,7 +168,7 @@ server repo只放reference clients与protocol測試；正式Swift app／OBS plug
 先閱讀README.md、docs/02-research.md、docs/03-architecture.md、
 docs/05-validation.md、docs/06-handoff.md與docs/07-contextual-streaming.md；
 API實作時以docs/04-api.md為準。
-目前P0–P3與P2a已完成並實測；server與效能驗證結果以本repo的實作、README及`docs/benchmarks/`報告為準。P4尚未開始，P5a Mac client可用但未完整驗收，P5b尚未實作。
+目前P0–P3與P2a已完成並實測；server與效能驗證結果以本repo的實作、README及`docs/benchmarks/`報告為準。P4尚未開始，P5a Mac client 的驗收項目已實作並通過單元測試但尚未實機驗收，P5b尚未實作。
 
 使用Apple Silicon原生Python 3.12、uv與MLX；優先模型為
 Alkd/TEA-ASR-1.1-MLX-4bit，固定文件中revision。
