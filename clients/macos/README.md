@@ -81,9 +81,9 @@ app 圖示與選單列圖示都由 `Resources/icons/` 提供，來源圖在 `too
 腳本會裁掉來源自帶的外框與描邊、套上 Apple 的 squircle 遮罩讓四角真的透明、
 內縮到 macOS 的比例，再輸出 16–1024 全尺寸與 `.icns`，並重畫選單列的 template。
 
-選單列**不是**把 app 圖示縮小：那是實心插畫，18pt 下會糊成一團。
-`tools/make-menubar-icon.py` 另外畫一個同語言的線稿版（杯子＋音量條），
-並依狀態分成閒置、聆聽中、錯誤三張，由系統依深淺色自動染色。
+選單列**不是**把 app 圖示縮小：`tools/make-menubar-icon.py` 會從來源稿
+保留原本的實心杯子、蒸氣與錯誤徽章，依狀態輸出閒置、聆聽中、錯誤三張
+template，由系統依深淺色自動染色。
 
 這條管線只依賴 Python 與 Pillow，不需要 Swift——圖示資產不該因為 Xcode 壞掉就做不出來。
 

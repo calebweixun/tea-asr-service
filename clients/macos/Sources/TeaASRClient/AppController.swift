@@ -13,6 +13,22 @@ enum MainWindowLaunchPolicy {
     }
 }
 
+/// Loads a menu-bar template by its base resource name so AppKit can discover
+/// the matching @2x and @3x representations in the bundle. Loading one PNG by
+/// URL would keep only the 1x representation and make the Retina icon blurry.
+enum MenuBarImageLoader {
+    static let logicalSize = NSSize(width: 18, height: 18)
+
+    static func image(state: String, bundle: Bundle = .main) -> NSImage? {
+        guard let image = bundle.image(forResource: NSImage.Name("MenuBar-\(state)")) else {
+            return nil
+        }
+        image.isTemplate = true
+        image.size = logicalSize
+        return image
+    }
+}
+
 /// Menu bar app: dictation into the focused app, or a meeting transcript window.
 @MainActor
 final class AppController: NSObject, NSApplicationDelegate {
@@ -203,25 +219,19 @@ final class AppController: NSObject, NSApplicationDelegate {
         menu.addItem(quit)
     }
 
-    /// The status item's mark, drawn to read at 18pt. A shrunken app icon is
-    /// a solid illustration and turns to mush at that size, so the bundle ships
-    /// a separate line-art template per state.
+    /// The status item's original solid cup mark, drawn to read at 18pt. The
+    /// bundle ships one template per state with 1x, 2x and 3x representations.
     private static var menuBarImages: [String: NSImage] = [:]
 
     private static func menuBarImage(_ state: String) -> NSImage? {
         if let cached = menuBarImages[state] { return cached }
-        guard
-            let url = Bundle.main.url(forResource: "MenuBar-\(state)", withExtension: "png"),
-            let image = NSImage(contentsOf: url)
-        else {
+        guard let image = MenuBarImageLoader.image(state: state) else {
             // Running from a plain binary rather than the built bundle.
             return NSImage(
                 systemSymbolName: state == "error" ? "exclamationmark.triangle" : "cup.and.saucer",
                 accessibilityDescription: "TEA ASR"
             )
         }
-        image.isTemplate = true
-        image.size = NSSize(width: 18, height: 18)
         menuBarImages[state] = image
         return image
     }
