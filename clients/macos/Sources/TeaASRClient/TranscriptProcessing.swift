@@ -3,9 +3,13 @@ import Foundation
 /// A single, local and deterministic text transformation.
 ///
 /// Rules are deliberately supplied by the client rather than inferred from
-/// server output.  The production default has no rules, which makes the
-/// processing boundary a strict no-op until a user-visible rule is explicitly
-/// opted in.
+/// server output. The `cleaningRules`/`pasteRules` arrays passed to
+/// `TranscriptProcessor.init` default to empty, but two settings-gated rules
+/// (trailing punctuation strip, spoken-symbol replacement — see their own
+/// doc comments) are appended on top of them by default, and the first of
+/// those two now itself defaults to on (see `Settings.stripTrailingPunctuation`).
+/// So "no rules" is only true for a caller that also overrides both
+/// `isTrailingPunctuationStripEnabled` and `isSpokenSymbolsEnabled` to `false`.
 protocol TranscriptProcessingRule {
     var identifier: String { get }
     func apply(to text: String) -> String
@@ -144,6 +148,133 @@ struct TrailingPeriodStripRule: TranscriptProcessingRule {
     }
 }
 
+/// Replaces a spoken punctuation-mark *name* with the mark itself — e.g. the
+/// literal text "逗號" becomes "，" — so a user can dictate punctuation the
+/// ASR model would not otherwise infer, instead of switching to the keyboard
+/// mid-sentence.
+///
+/// ## Why this can misfire, and what is (and is not) done about it
+///
+/// The rule works on plain recognized text with no prosody or pause
+/// information, so it cannot tell a *command* ("加一個逗號" — insert a
+/// comma) from a *description* ("逗號的用法" — talking about the comma
+/// mark as a word). Both look identical as text. Two deliberately narrow,
+/// deterministic mitigations are applied, and both are honestly partial:
+///
+/// 1. **Longest match wins at every position.** Scanning is anchored to
+///    each character index and tries the longest known name first (e.g.
+///    "左括號" before "括號"), so a directional name is never split into a
+///    generic one plus a stray leading character.
+/// 2. **Matches inside quotation marks are skipped.** `「」`, `『』`, the
+///    curly `“”`, and the symmetric ASCII `"`/`'` all suppress replacement
+///    for their span, on the reasoning that quoting a punctuation mark's
+///    name is far more likely to be talking *about* it than asking for it
+///    ("他說「逗號」是最常用的標點").
+///
+/// What this does **not** solve: a bare, unquoted use of a name as an
+/// ordinary word — "逗號的意思是分隔子句" — is still replaced. There is no
+/// deterministic, local signal (no NLP, no cloud call — see the processing
+/// boundary's constraints) that distinguishes that case from a real command
+/// spoken the same way. This is a known, accepted limitation, which is why
+/// the rule ships **off by default** (see `Settings.spokenSymbols`).
+struct SpokenSymbolReplacementRule: TranscriptProcessingRule {
+    let identifier = "spokenSymbols"
+
+    /// The built-in name → mark table. Deliberately Chinese-only (mirrors
+    /// the rest of this file's CJK-first punctuation handling) and covers
+    /// the marks explicitly requested plus a few natural aliases. `括號`/
+    /// `引號` on their own (no left/right qualifier) insert a full open+close
+    /// pair with nothing between them — there is no cursor to place between
+    /// them in a plain-text replacement, which is a known limitation.
+    static let table: [String: String] = [
+        "逗號": "，",
+        "句號": "。",
+        "問號": "？",
+        "驚嘆號": "！",
+        "感嘆號": "！",
+        "冒號": "：",
+        "分號": "；",
+        "頓號": "、",
+        "左括號": "（",
+        "開括號": "（",
+        "右括號": "）",
+        "閉括號": "）",
+        "括號": "（）",
+        "左引號": "「",
+        "開引號": "「",
+        "右引號": "」",
+        "閉引號": "」",
+        "引號": "「」",
+        "破折號": "—",
+        "刪節號": "…",
+        "省略號": "…",
+        "換行": "\n",
+        "換行符": "\n",
+        "新段落": "\n\n",
+        "換段": "\n\n",
+    ]
+
+    /// Precomputed once: each key's characters plus its replacement, sorted
+    /// longest-key-first so the scan in `apply` always tries the longest
+    /// candidate at a given position before a shorter one that happens to be
+    /// a suffix of it (e.g. "括號" is a suffix of "左括號").
+    private static let candidates: [(key: [Character], value: String)] = table
+        .map { (key: Array($0.key), value: $0.value) }
+        .sorted { $0.key.count > $1.key.count }
+
+    private static let openingQuotes: Set<Character> = ["「", "『", "\u{201C}"]
+    private static let closingQuotes: Set<Character> = ["」", "』", "\u{201D}"]
+    private static let symmetricQuotes: Set<Character> = ["\"", "'"]
+
+    func apply(to text: String) -> String {
+        let chars = Array(text)
+        var result = ""
+        result.reserveCapacity(chars.count)
+        var insideQuote = false
+        var i = 0
+        while i < chars.count {
+            let character = chars[i]
+            if Self.openingQuotes.contains(character) {
+                insideQuote = true
+                result.append(character)
+                i += 1
+                continue
+            }
+            if Self.closingQuotes.contains(character) {
+                insideQuote = false
+                result.append(character)
+                i += 1
+                continue
+            }
+            if Self.symmetricQuotes.contains(character) {
+                insideQuote.toggle()
+                result.append(character)
+                i += 1
+                continue
+            }
+            if !insideQuote, let match = Self.firstMatch(in: chars, at: i) {
+                result.append(match.value)
+                i += match.length
+                continue
+            }
+            result.append(character)
+            i += 1
+        }
+        return result
+    }
+
+    private static func firstMatch(in chars: [Character], at index: Int) -> (value: String, length: Int)? {
+        for candidate in candidates {
+            let length = candidate.key.count
+            guard index + length <= chars.count else { continue }
+            if Array(chars[index..<(index + length)]) == candidate.key {
+                return (candidate.value, length)
+            }
+        }
+        return nil
+    }
+}
+
 /// Applies deterministic client-side rules in a declared order.
 ///
 /// Cleaning rules run first and produce `cleanedText`; paste rules then run on
@@ -163,24 +294,42 @@ struct TranscriptProcessor {
     /// next transcript instead.
     let isTrailingPunctuationStripEnabled: () -> Bool
 
-    /// The default pipeline is intentionally a strict no-op: `cleaningRules`
-    /// and `pasteRules` default to empty, and the trailing-punctuation rule
-    /// defaults to the user setting, which itself defaults to off.
+    /// Same reasoning as `isTrailingPunctuationStripEnabled` above, for
+    /// `SpokenSymbolReplacementRule`.
+    let isSpokenSymbolsEnabled: () -> Bool
+
+    /// The default pipeline is intentionally a strict no-op *by construction*:
+    /// `cleaningRules` and `pasteRules` default to empty, and each
+    /// settings-gated rule below defaults to that setting's own default (see
+    /// `Settings.stripTrailingPunctuation`/`Settings.spokenSymbols`).
     init(
         cleaningRules: [any TranscriptProcessingRule] = [],
         pasteRules: [any TranscriptProcessingRule] = [],
-        isTrailingPunctuationStripEnabled: @escaping () -> Bool = { Settings().stripTrailingPunctuation }
+        isTrailingPunctuationStripEnabled: @escaping () -> Bool = { Settings().stripTrailingPunctuation },
+        isSpokenSymbolsEnabled: @escaping () -> Bool = { Settings().spokenSymbols }
     ) {
         self.cleaningRules = cleaningRules
         self.pasteRules = pasteRules
         self.isTrailingPunctuationStripEnabled = isTrailingPunctuationStripEnabled
+        self.isSpokenSymbolsEnabled = isSpokenSymbolsEnabled
     }
 
     func process(rawTranscript: String) -> TranscriptProcessingResult {
         var appliedSteps: [String] = []
         var effectiveCleaningRules = cleaningRules
+        // Order matters: the trailing-punctuation strip must run *before*
+        // the spoken-symbol replacement. If it ran after, a sentence ending
+        // in a spoken name like "…句號" would first become "…。" and then
+        // have that very period stripped straight back off, silently
+        // discarding the symbol the user explicitly asked to type. Running
+        // strip first means it only ever sees marks the ASR model itself
+        // produced as literal punctuation characters — never one this rule
+        // just inserted on the user's behalf.
         if isTrailingPunctuationStripEnabled() {
             effectiveCleaningRules.append(TrailingPeriodStripRule())
+        }
+        if isSpokenSymbolsEnabled() {
+            effectiveCleaningRules.append(SpokenSymbolReplacementRule())
         }
         let cleanedText = apply(
             rawTranscript,

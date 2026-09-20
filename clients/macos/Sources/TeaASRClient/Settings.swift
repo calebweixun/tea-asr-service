@@ -17,6 +17,7 @@ struct Settings {
         static let interactionMode = "dictationInteractionMode"
         static let startStopFeedback = "dictationStartStopFeedback"
         static let stripTrailingPunctuation = "stripTrailingPunctuation"
+        static let spokenSymbols = "spokenSymbols"
         static let stopServiceOnQuit = "stopServiceOnQuit"
     }
 
@@ -137,13 +138,40 @@ struct Settings {
     }
 
     /// Removes a trailing sentence-final full stop from recognized text
-    /// (see `TrailingPeriodStripRule`). Off by default: the processing
-    /// pipeline's documented default is a strict no-op, and this changes
-    /// recognized text content rather than presentation, so it stays an
-    /// explicit opt-in rather than a silently-changed default.
+    /// (see `TrailingPeriodStripRule`).
+    ///
+    /// On by default. This used to be an opt-in (the processing pipeline's
+    /// general default is a strict no-op, and this changes recognized text
+    /// content rather than presentation), but the user reported the same
+    /// complaint twice — the model appends a full stop they never spoke —
+    /// so leaving it off by default no longer matched what almost everyone
+    /// asking about this actually wants. The scope stays deliberately
+    /// narrow even with the default flipped: only a period-class trailing
+    /// character ("。"/"．"/".") is ever touched. A trailing "？"/"！" is
+    /// still left alone, because unlike a bare full stop, a question or
+    /// exclamation mark carries intonation the user actually spoke — removing
+    /// it would silently change what the sentence means, not just tidy up an
+    /// artifact the model added on its own.
     var stripTrailingPunctuation: Bool {
-        get { defaults.object(forKey: Key.stripTrailingPunctuation) as? Bool ?? false }
+        get { defaults.object(forKey: Key.stripTrailingPunctuation) as? Bool ?? true }
         nonmutating set { defaults.set(newValue, forKey: Key.stripTrailingPunctuation) }
+    }
+
+    /// Replaces a spoken punctuation-mark name (e.g. "逗號") with the mark
+    /// itself (see `SpokenSymbolReplacementRule`'s doc comment for the full
+    /// table and the quoted-span mitigation it applies).
+    ///
+    /// Off by default, unlike `stripTrailingPunctuation` above. That rule
+    /// only ever removes one specific, narrow, already-established nuisance
+    /// (an auto-appended trailing full stop); this one rewrites arbitrary
+    /// occurrences of ordinary Chinese nouns ("逗號", "括號", …) anywhere in
+    /// the text, with no reliable way to tell a command ("加一個逗號") apart
+    /// from a description ("逗號的用法") from text alone. That is a real,
+    /// unresolved risk of corrupting genuine dictated content, not just an
+    /// occasional false positive — so it stays an explicit opt-in.
+    var spokenSymbols: Bool {
+        get { defaults.object(forKey: Key.spokenSymbols) as? Bool ?? false }
+        nonmutating set { defaults.set(newValue, forKey: Key.spokenSymbols) }
     }
 
     /// Stop the local service when the app quits.
