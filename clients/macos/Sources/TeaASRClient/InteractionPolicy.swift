@@ -134,6 +134,116 @@ enum ShortcutRegistrationPolicy {
         if status == OSStatus(eventHotKeyExistsErr) { return .conflict }
         return .unavailable
     }
+
+    static func result(for status: OSStatus) -> ShortcutRegistrationResult {
+        ShortcutRegistrationResult(status: status)
+    }
+}
+
+struct ShortcutRegistrationResult: Equatable {
+    let status: OSStatus
+
+    var outcome: ShortcutRegistrationOutcome {
+        ShortcutRegistrationPolicy.outcome(for: status)
+    }
+
+    var isRegistered: Bool {
+        outcome.isRegistered
+    }
+
+    var errorDescription: String {
+        switch outcome {
+        case .registered:
+            return "快捷鍵已註冊。"
+        case .conflict:
+            return "這個快捷鍵已被其他 app 占用。macOS 不提供公開 API 告知是哪個 app。"
+        case .unavailable:
+            return "無法註冊快捷鍵（OSStatus: \(status)）。"
+        }
+    }
+}
+
+enum ShortcutEditorCaptureResult: Equatable {
+    case ignoredWhileClosed
+    case captured(GlobalShortcut)
+    case invalid(GlobalShortcut.ValidationError)
+}
+
+enum ShortcutEditorSaveError: LocalizedError, Equatable {
+    case modalNotOpen
+    case registrationConflict
+    case registrationFailed(OSStatus)
+
+    var errorDescription: String? {
+        switch self {
+        case .modalNotOpen:
+            return "快捷鍵設定面板尚未開啟。"
+        case .registrationConflict:
+            return "這個快捷鍵已被其他 app 占用。macOS 不提供公開 API 告知是哪個 app。"
+        case .registrationFailed(let status):
+            return "無法註冊快捷鍵（OSStatus: \(status)）。"
+        }
+    }
+}
+
+enum ShortcutEditorSaveResult: Equatable {
+    case saved(GlobalShortcut)
+    case rejected(ShortcutEditorSaveError)
+}
+
+/// Pure state for the app-modal shortcut editor. The AppKit panel forwards
+/// key events here only while it is open; keeping this seam pure makes it
+/// possible to prove that a closed settings page cannot capture a key and
+/// that a failed registration never mutates the persisted setting.
+struct ShortcutEditorSession: Equatable {
+    let original: GlobalShortcut
+    private(set) var candidate: GlobalShortcut
+    private(set) var isModalOpen = false
+
+    init(original: GlobalShortcut) {
+        self.original = original
+        candidate = original
+    }
+
+    mutating func open() {
+        candidate = original
+        isModalOpen = true
+    }
+
+    mutating func capture(
+        keyCode: UInt32,
+        modifiers: ShortcutModifiers
+    ) -> ShortcutEditorCaptureResult {
+        guard isModalOpen else { return .ignoredWhileClosed }
+        switch GlobalShortcut.from(keyCode: keyCode, modifiers: modifiers) {
+        case .success(let shortcut):
+            candidate = shortcut
+            return .captured(shortcut)
+        case .failure(let error):
+            return .invalid(error)
+        }
+    }
+
+    mutating func save(
+        using probe: (GlobalShortcut) -> ShortcutRegistrationResult
+    ) -> ShortcutEditorSaveResult {
+        guard isModalOpen else { return .rejected(.modalNotOpen) }
+        let registration = probe(candidate)
+        switch registration.outcome {
+        case .registered:
+            isModalOpen = false
+            return .saved(candidate)
+        case .conflict:
+            return .rejected(.registrationConflict)
+        case .unavailable:
+            return .rejected(.registrationFailed(registration.status))
+        }
+    }
+
+    mutating func cancel() {
+        candidate = original
+        isModalOpen = false
+    }
 }
 
 /// Global and local monitors are independent AppKit resources. Keeping the

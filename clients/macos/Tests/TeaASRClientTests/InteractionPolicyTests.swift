@@ -102,4 +102,56 @@ final class InteractionPolicyTests: XCTestCase {
         )
         XCTAssertTrue(InputMonitorInstallPolicy.missing(globalInstalled: true, localInstalled: true).isEmpty)
     }
+
+    func testShortcutEditorDoesNotCaptureKeysWhileModalIsClosed() {
+        var editor = ShortcutEditorSession(original: .default)
+
+        XCTAssertEqual(
+            editor.capture(keyCode: 14, modifiers: [.command]),
+            .ignoredWhileClosed
+        )
+        XCTAssertFalse(editor.isModalOpen)
+        XCTAssertEqual(editor.candidate, .default)
+    }
+
+    func testShortcutEditorCancelLeavesPersistedSettingUnchanged() throws {
+        let suiteName = "TeaASRClientTests.ShortcutEditor.Cancel.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = Settings(defaults: defaults)
+        let original = settings.shortcut
+        var editor = ShortcutEditorSession(original: original)
+        editor.open()
+        XCTAssertEqual(
+            editor.capture(keyCode: 14, modifiers: [.command]),
+            .captured(try GlobalShortcut(keyCode: 14, modifiers: [.command]))
+        )
+        editor.cancel()
+
+        XCTAssertFalse(editor.isModalOpen)
+        XCTAssertEqual(editor.candidate, original)
+        XCTAssertEqual(settings.shortcut, original)
+    }
+
+    func testShortcutEditorRejectsExclusiveConflictBeforeSaving() throws {
+        var editor = ShortcutEditorSession(original: .default)
+        editor.open()
+        let candidate = try GlobalShortcut(keyCode: 14, modifiers: [.command])
+        XCTAssertEqual(
+            editor.capture(keyCode: candidate.keyCode, modifiers: candidate.modifiers),
+            .captured(candidate)
+        )
+
+        let result: ShortcutEditorSaveResult = editor.save { _ in
+            ShortcutRegistrationResult(status: OSStatus(eventHotKeyExistsErr))
+        }
+
+        XCTAssertEqual(result, .rejected(.registrationConflict))
+        XCTAssertTrue(editor.isModalOpen)
+        XCTAssertEqual(editor.candidate, candidate)
+        XCTAssertTrue(
+            ShortcutEditorSaveError.registrationConflict.localizedDescription.contains("其他 app")
+        )
+    }
 }

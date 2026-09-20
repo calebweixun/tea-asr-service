@@ -128,6 +128,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private var sectionRuntimes: [Section: SectionRuntime] = [:]
     private let audioLevelMonitor = AudioLevelMonitor(callbackQueue: .main)
     private let audioLevelBar = AudioLevelBarView()
+    private static let inputDeviceEnumerationErrorUID = "__tea_audio_input_enumeration_error__"
     private var isWindowOpen = true
     #if DEBUG
     private(set) var monitorStartCount = 0
@@ -171,6 +172,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     var onStopSession: (() -> Void)?
     var onRefreshService: (() -> Void)?
     var onSettingsChanged: (() -> Void)?
+    var onShortcutEditorWillBegin: (() -> Void)?
+    var onShortcutEditorDidEnd: (() -> Void)?
 
     init(settings: Settings, appState: AppState, permissions: PermissionCoordinator) {
         self.settings = settings
@@ -819,10 +822,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let port = NSTextField(string: String(settings.port))
         let token = NSSecureTextField(string: (try? settings.token()) ?? "")
         token.placeholderString = "輸入 bearer token（儲存到本機 token 檔）"
-        let hotKey = ShortcutRecorderField(shortcut: settings.shortcut)
+        let hotKey = ShortcutButton(shortcut: settings.shortcut)
         hotKey.identifier = NSUserInterfaceItemIdentifier("shortcut")
-        hotKey.onValidationError = { [weak self] message in
-            self?.setShortcutStatus("快捷鍵無效：\(message)")
+        hotKey.onRequestEdit = { [weak self] in
+            self?.editShortcut()
         }
         let interactionMode = NSPopUpButton()
         interactionMode.identifier = NSUserInterfaceItemIdentifier("interactionMode")
@@ -932,9 +935,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         ])
 
         func update() {
-            let text = "\(shortcutStatus) · 按一下快捷鍵欄位即可重新錄製。"
+            hotKey.shortcut = settings.shortcut
+            let text = "\(shortcutStatus) · 按一下快捷鍵按鈕即可修改。"
             if shortcutHint.stringValue != text { shortcutHint.stringValue = text }
-            shortcutHint.textColor = shortcutStatus.contains("無效") ? .systemRed : .secondaryLabelColor
+            shortcutHint.textColor = shortcutStatus.contains("無效")
+                || shortcutStatus.contains("無法")
+                || shortcutStatus.contains("占用")
+                ? .systemRed
+                : .secondaryLabelColor
         }
         update()
         return SectionRuntime(view: view, update: update)
@@ -965,27 +973,49 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     private func inputDevicePopup() -> NSPopUpButton {
         let popup = NSPopUpButton()
-        let available = AudioInputDeviceCatalog.enumerate()
-        let storedOption = AudioInputSettingsOptions.deviceOption(
+        let options = AudioInputSettingsOptions.deviceOptions(
             storedUID: settings.inputDeviceUID,
-            available: available
+            enumeration: AudioInputDeviceCatalog.enumerationResult()
         )
-        let options = [AudioInputDeviceOption.systemDefault]
-            + available.map(AudioInputDeviceOption.available)
-            + (storedOption.isEnabled ? [] : [storedOption])
         for option in options {
             popup.addItem(withTitle: option.title)
             let item = popup.item(at: popup.numberOfItems - 1)
-            item?.representedObject = option.uid ?? AudioInputDevice.systemDefaultUID
+            if case .enumerationError = option {
+                // Do not use the empty UID here: it is the real represented
+                // value of System Default, and would select the disabled
+                // diagnostic row instead of the usable default row.
+                item?.representedObject = Self.inputDeviceEnumerationErrorUID
+                item?.toolTip = option.title
+            } else {
+                item?.representedObject = option.uid ?? AudioInputDevice.systemDefaultUID
+            }
             item?.isEnabled = option.isEnabled
         }
-        let selectedUID = storedOption.uid ?? AudioInputDevice.systemDefaultUID
+        let selectedUID = settings.inputDeviceUID ?? AudioInputDevice.systemDefaultUID
         if let item = popup.itemArray.last(where: { ($0.representedObject as? String) == selectedUID }) {
             popup.select(item)
         } else {
             popup.selectItem(at: 0)
         }
         return popup
+    }
+
+    private func editShortcut() {
+        onShortcutEditorWillBegin?()
+        let editor = ShortcutRecorderPanelController(shortcut: settings.shortcut)
+        let result = editor.runModal(relativeTo: window)
+        defer {
+            onShortcutEditorDidEnd?()
+            updateSection(.settings)
+        }
+
+        if case .saved(let shortcut) = result {
+            // The panel only returns .saved after GlobalShortcut validation and
+            // the exclusive Carbon registration probe have both succeeded.
+            // Cancel, close, conflict, and other failures never reach this
+            // write.
+            settings.shortcut = shortcut
+        }
     }
 
     private func inputChannelPopup(deviceUID: String?) -> NSPopUpButton {
@@ -997,10 +1027,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private func populateInputChannelPopup(_ popup: NSPopUpButton, deviceUID: String?) {
         popup.removeAllItems()
         let device: AudioInputDevice?
-        if let deviceUID, !deviceUID.isEmpty {
-            device = AudioInputDeviceCatalog.enumerate().first(where: { $0.uid == deviceUID })
-        } else {
-            device = AudioInputDeviceCatalog.defaultRecord()?.descriptor
+        switch AudioInputDeviceCatalog.enumerationResult() {
+        case .success(let available):
+            if let deviceUID, !deviceUID.isEmpty {
+                device = available.first(where: { $0.uid == deviceUID })
+            } else if available.isEmpty {
+                // The device popup already contains the visible catalog
+                // diagnostic. Avoid a second default-device CoreAudio query
+                // when there is no catalog to resolve it against.
+                device = nil
+            } else {
+                device = AudioInputDeviceCatalog.defaultRecord()?.descriptor
+            }
+        case .failure:
+            device = nil
         }
         let options = AudioInputSettingsOptions.channelOptions(
             storedPolicy: settings.inputChannelPolicy,
@@ -1131,6 +1171,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             targetName = controls.inputDevice?.selectedItem?.title
         } else {
             // 系統預設要先用 AudioInputDeviceCatalog.defaultRecordOrThrow() 解析成實際 UID，不要傳空 UID。
+            let enumeration = AudioInputDeviceCatalog.enumerationResult()
+            switch enumeration {
+            case .success(let devices) where devices.isEmpty:
+                audioLevelBar.setState(.failed("CoreAudio 未回報任何輸入裝置（裝置清單為 0 bytes）。"))
+                return
+            case .failure(let error):
+                audioLevelBar.setState(.failed(error.localizedDescription))
+                return
+            case .success:
+                break
+            }
             do {
                 let defaultRecord = try AudioInputDeviceCatalog.defaultRecordOrThrow()
                 targetUID = defaultRecord.descriptor.uid
@@ -1310,7 +1361,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private func controlsInSettingsView() -> (
         host: NSTextField?, port: NSTextField?, token: NSSecureTextField?,
         autoInsert: NSButton?, preview: NSButton?, inputDevice: NSPopUpButton?,
-        inputChannel: NSPopUpButton?, shortcut: ShortcutRecorderField?,
+        inputChannel: NSPopUpButton?, shortcut: ShortcutButton?,
         interactionMode: NSPopUpButton?, feedback: NSButton?
     ) {
         var fields: [String: NSControl] = [:]
@@ -1329,7 +1380,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             fields["preview"] as? NSButton,
             fields["inputDevice"] as? NSPopUpButton,
             fields["inputChannel"] as? NSPopUpButton,
-            fields["shortcut"] as? ShortcutRecorderField,
+            fields["shortcut"] as? ShortcutButton,
             fields["interactionMode"] as? NSPopUpButton,
             fields["feedback"] as? NSButton
         )

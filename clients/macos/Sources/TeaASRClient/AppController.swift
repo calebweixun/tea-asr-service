@@ -102,6 +102,12 @@ final class AppController: NSObject, NSApplicationDelegate {
         window.onStartMeeting = { [weak self] in self?.toggleMeeting() }
         window.onStopSession = { [weak self] in self?.stopSession() }
         window.onRefreshService = { [weak self] in self?.refreshServiceState() }
+        window.onShortcutEditorWillBegin = { [weak self] in
+            self?.pauseHotKeyForShortcutEditor()
+        }
+        window.onShortcutEditorDidEnd = { [weak self] in
+            self?.applyInteractionSettings()
+        }
         window.onSettingsChanged = { [weak self] in
             guard let self else { return }
             self.permissionCoordinator?.updateAutoInsertRequirement(self.settings.autoInsert)
@@ -677,6 +683,16 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     // MARK: - Hot key
 
+    private func pauseHotKeyForShortcutEditor() {
+        if let hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+            self.hotKeyRef = nil
+        }
+        hotKeyRegistered = false
+        hotKeyRegistrationOutcome = .unavailable
+        removeKeyUpMonitors()
+    }
+
     private func registerHotKey() {
         if let hotKeyRef {
             UnregisterEventHotKey(hotKeyRef)
@@ -726,18 +742,16 @@ final class AppController: NSObject, NSApplicationDelegate {
 
         let shortcut = settings.shortcut
         let id = EventHotKeyID(signature: OSType(0x54454153), id: 1)  // 'TEAS'
-        let status = RegisterEventHotKey(
-            shortcut.keyCode,
-            shortcut.carbonModifierFlags,
-            id,
-            GetApplicationEventTarget(),
-            UInt32(kEventHotKeyExclusive),
-            &hotKeyRef
+        let registration = ExclusiveShortcutRegistrar.register(
+            shortcut,
+            id: id,
+            target: GetApplicationEventTarget(),
+            hotKeyRef: &hotKeyRef
         )
         // Ask Carbon for exclusive ownership. A non-exclusive registration
         // can succeed while another process already owns the same key, which
         // made the old UI falsely claim that the shortcut was available.
-        hotKeyRegistrationOutcome = ShortcutRegistrationPolicy.outcome(for: status)
+        hotKeyRegistrationOutcome = registration.outcome
         hotKeyRegistered = hotKeyRegistrationOutcome.isRegistered
         if hotKeyRegistered, settings.interactionMode == .pushToTalk {
             installKeyUpMonitors()

@@ -180,25 +180,63 @@ extension ShortcutModifiers {
     }
 }
 
-/// A small native recorder used inside the AppKit settings screen.  It never
-/// edits a text field or sends the captured event anywhere else.
-final class ShortcutRecorderField: NSTextField {
-    var shortcut: GlobalShortcut {
-        didSet { stringValue = shortcut.displayString }
+/// The Carbon registration path shared by the real app hot key and the
+/// settings editor's temporary conflict probe. Both use exclusive ownership;
+/// a probe releases its temporary registration immediately after a successful
+/// check.
+enum ExclusiveShortcutRegistrar {
+    private static let signature = OSType(0x54454153) // 'TEAS'
+
+    static func register(
+        _ shortcut: GlobalShortcut,
+        id: EventHotKeyID,
+        target: EventTargetRef,
+        hotKeyRef: UnsafeMutablePointer<EventHotKeyRef?>
+    ) -> ShortcutRegistrationResult {
+        let status = RegisterEventHotKey(
+            shortcut.keyCode,
+            shortcut.carbonModifierFlags,
+            id,
+            target,
+            UInt32(kEventHotKeyExclusive),
+            hotKeyRef
+        )
+        return ShortcutRegistrationPolicy.result(for: status)
     }
-    var onShortcutChanged: ((GlobalShortcut) -> Void)?
-    var onValidationError: ((String) -> Void)?
+
+    static func probe(_ shortcut: GlobalShortcut) -> ShortcutRegistrationResult {
+        var hotKeyRef: EventHotKeyRef?
+        let id = EventHotKeyID(signature: signature, id: 2)
+        let result = register(
+            shortcut,
+            id: id,
+            target: GetApplicationEventTarget(),
+            hotKeyRef: &hotKeyRef
+        )
+        if let hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+        }
+        return result
+    }
+}
+
+/// A settings button that displays the current shortcut but never becomes a
+/// key-capture first responder. The modal editor below owns all listening.
+final class ShortcutButton: NSButton {
+    var shortcut: GlobalShortcut {
+        didSet { title = shortcut.displayString }
+    }
+    var onRequestEdit: (() -> Void)?
 
     init(shortcut: GlobalShortcut) {
         self.shortcut = shortcut
         super.init(frame: .zero)
-        stringValue = shortcut.displayString
-        alignment = .center
-        isEditable = false
-        isSelectable = false
-        drawsBackground = true
-        focusRingType = .exterior
-        placeholderString = "按下新的快捷鍵…"
+        title = shortcut.displayString
+        bezelStyle = .rounded
+        setButtonType(.momentaryPushIn)
+        target = self
+        action = #selector(requestEdit(_:))
+        toolTip = "按一下以設定快捷鍵"
         setContentHuggingPriority(.required, for: .horizontal)
     }
 
@@ -207,39 +245,203 @@ final class ShortcutRecorderField: NSTextField {
         fatalError("not supported")
     }
 
-    override var acceptsFirstResponder: Bool { true }
+    @objc private func requestEdit(_ sender: Any?) {
+        onRequestEdit?()
+    }
+}
 
-    override func becomeFirstResponder() -> Bool {
-        let became = super.becomeFirstResponder()
-        if became { stringValue = "按下新的快捷鍵…" }
-        return became
+enum ShortcutEditorModalResult: Equatable {
+    case saved(GlobalShortcut)
+    case cancelled
+}
+
+/// Native app-modal shortcut editor. Its local event monitor exists only for
+/// the lifetime of `runModal()`, so opening the Settings section alone cannot
+/// consume typing or alter the stored shortcut.
+final class ShortcutRecorderPanelController: NSWindowController, NSWindowDelegate {
+    private var session: ShortcutEditorSession
+    private let registrationProbe: (GlobalShortcut) -> ShortcutRegistrationResult
+    private var keyMonitor: Any?
+    private var modalResult: ShortcutEditorModalResult?
+    private var modalIsRunning = false
+
+    private let capturedLabel = NSTextField(labelWithString: "")
+    private let errorLabel = NSTextField(wrappingLabelWithString: "")
+
+    init(
+        shortcut: GlobalShortcut,
+        registrationProbe: @escaping (GlobalShortcut) -> ShortcutRegistrationResult = ExclusiveShortcutRegistrar.probe
+    ) {
+        session = ShortcutEditorSession(original: shortcut)
+        self.registrationProbe = registrationProbe
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 220),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "設定快捷鍵"
+        panel.isFloatingPanel = true
+        panel.level = .modalPanel
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.isReleasedWhenClosed = false
+        super.init(window: panel)
+        panel.delegate = self
+        buildView()
     }
 
-    override func resignFirstResponder() -> Bool {
-        let resigned = super.resignFirstResponder()
-        if resigned { stringValue = shortcut.displayString }
-        return resigned
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("not supported")
     }
 
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        capture(event) ? true : super.performKeyEquivalent(with: event)
+    deinit {
+        stopKeyMonitoring()
     }
 
-    override func keyDown(with event: NSEvent) {
-        if !capture(event) { NSSound.beep() }
+    func runModal(relativeTo parent: NSWindow?) -> ShortcutEditorModalResult {
+        modalResult = nil
+        session.open()
+        updateCapturedLabel()
+
+        if let parent {
+            window?.setFrameOrigin(NSPoint(
+                x: parent.frame.midX - (window?.frame.width ?? 0) / 2,
+                y: parent.frame.midY - (window?.frame.height ?? 0) / 2
+            ))
+        } else {
+            window?.center()
+        }
+        modalIsRunning = true
+        window?.makeKeyAndOrderFront(nil)
+        startKeyMonitoring()
+        NSApp.runModal(for: window!)
+        modalIsRunning = false
+        stopKeyMonitoring()
+        window?.orderOut(nil)
+        if modalResult == nil {
+            session.cancel()
+            modalResult = .cancelled
+        }
+        return modalResult ?? .cancelled
     }
 
-    private func capture(_ event: NSEvent) -> Bool {
-        guard event.type == .keyDown else { return false }
-        switch GlobalShortcut.from(event: event) {
-        case .success(let value):
-            shortcut = value
-            onShortcutChanged?(value)
-            return true
-        case .failure(let error):
-            onValidationError?(error.localizedDescription)
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        cancel(sender)
+        return false
+    }
+
+    private func buildView() {
+        guard let contentView = window?.contentView else { return }
+
+        let prompt = NSTextField(
+            wrappingLabelWithString: "按下新的快捷鍵組合。至少需要 Command、Option、Control 或 Shift。"
+        )
+        prompt.textColor = .secondaryLabelColor
+
+        capturedLabel.alignment = .center
+        capturedLabel.font = .systemFont(ofSize: 22, weight: .medium)
+        capturedLabel.setContentHuggingPriority(.required, for: .vertical)
+        capturedLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 32).isActive = true
+
+        errorLabel.textColor = .systemRed
+        errorLabel.maximumNumberOfLines = 0
+        errorLabel.isHidden = true
+
+        let cancelButton = NSButton(
+            title: "取消",
+            target: self,
+            action: #selector(cancel(_:))
+        )
+        cancelButton.keyEquivalent = ""
+        let saveButton = NSButton(
+            title: "儲存",
+            target: self,
+            action: #selector(save(_:))
+        )
+        saveButton.keyEquivalent = ""
+        let buttons = NSStackView(views: [cancelButton, saveButton])
+        buttons.orientation = .horizontal
+        buttons.alignment = .centerY
+        buttons.spacing = 12
+        buttons.setContentHuggingPriority(.required, for: .horizontal)
+
+        let stack = NSStackView(views: [prompt, capturedLabel, errorLabel, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .width
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 22),
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -22),
+            buttons.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+        ])
+    }
+
+    private func startKeyMonitoring() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            guard let self, self.modalIsRunning else { return event }
+            self.capture(event)
+            return nil
+        }
+    }
+
+    private func stopKeyMonitoring() {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+            self.keyMonitor = nil
+        }
+    }
+
+    private func capture(_ event: NSEvent) {
+        switch session.capture(
+            keyCode: UInt32(event.keyCode),
+            modifiers: ShortcutModifiers(event.modifierFlags)
+        ) {
+        case .captured:
+            updateCapturedLabel()
+            errorLabel.isHidden = true
+        case .invalid(let error):
+            errorLabel.stringValue = error.localizedDescription
+            errorLabel.isHidden = false
             NSSound.beep()
-            return true
+        case .ignoredWhileClosed:
+            break
+        }
+    }
+
+    private func updateCapturedLabel() {
+        capturedLabel.stringValue = session.candidate.displayString
+    }
+
+    @objc private func save(_ sender: Any?) {
+        switch session.save(using: registrationProbe) {
+        case .saved(let shortcut):
+            finish(.saved(shortcut))
+        case .rejected(let error):
+            errorLabel.stringValue = error.localizedDescription
+            errorLabel.isHidden = false
+            NSSound.beep()
+        }
+    }
+
+    @objc private func cancel(_ sender: Any?) {
+        session.cancel()
+        finish(.cancelled)
+    }
+
+    private func finish(_ result: ShortcutEditorModalResult) {
+        modalResult = result
+        stopKeyMonitoring()
+        window?.orderOut(nil)
+        if modalIsRunning {
+            NSApp.stopModal(withCode: result == .cancelled ? .cancel : .OK)
         }
     }
 }
