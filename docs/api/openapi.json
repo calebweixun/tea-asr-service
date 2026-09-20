@@ -188,6 +188,72 @@
         "title": "ErrorEnvelope",
         "type": "object"
       },
+      "LogEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "fields": {
+            "additionalProperties": true,
+            "title": "Fields",
+            "type": "object"
+          },
+          "level": {
+            "title": "Level",
+            "type": "string"
+          },
+          "logger": {
+            "title": "Logger",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ts",
+          "level",
+          "logger",
+          "message"
+        ],
+        "title": "LogEntry",
+        "type": "object"
+      },
+      "LogsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/LogEntry"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "count",
+          "limit",
+          "has_more"
+        ],
+        "title": "LogsResponse",
+        "type": "object"
+      },
       "QueueStatus": {
         "additionalProperties": false,
         "properties": {
@@ -497,6 +563,87 @@
           }
         },
         "summary": "Capabilities"
+      }
+    },
+    "/v1/logs": {
+      "get": {
+        "description": "Recent structured events for a log page, newest first.\n\n`level` (when given) is a *minimum* severity: `level=warning` returns\nwarning and error, not warning alone. `limit` is hard-capped at\n`MAX_LOG_EVENTS` by the query validation above — a request for more\nis rejected outright (422) rather than silently truncated, so a\nclient can never mistake \"we capped this\" for \"there were only this\nmany\". There is no `before`/`since` pagination in v0.1: this is a\nrecent-activity view, not a historical log browser (docs/06 #6 —\ndo not claim a capability that is not implemented).\n\nFile I/O runs in a worker thread via `asyncio.to_thread`, so it never\nblocks the event loop the WS session and other HTTP routes share.",
+        "operationId": "logs_v1_logs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "level",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "debug",
+                    "info",
+                    "warning",
+                    "error"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Level"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Logs"
       }
     },
     "/v1/status": {

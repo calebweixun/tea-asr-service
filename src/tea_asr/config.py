@@ -36,6 +36,17 @@ class AppPaths:
     def log_file(self) -> Path:
         return self.logs / "service.log"
 
+    @property
+    def error_log_file(self) -> Path:
+        """Longer-retention, warning/error-only sibling of `log_file`.
+
+        See `ServiceConfig.log_error_backup_count` for why this exists as a
+        separate rotation family instead of just widening `log_file`'s
+        backup count.
+        """
+
+        return self.logs / "service.error.log"
+
 
 def load_or_create_token(paths: AppPaths | None = None) -> str:
     paths = paths or AppPaths.macos_default()
@@ -211,6 +222,27 @@ class ServiceConfig:
     #: e.g. a Tailscale MagicDNS name, which is a hostname rather than an IP
     #: and so cannot be judged by address range alone. Matched case-insensitively.
     extra_allowed_hosts: tuple[str, ...] = ()
+    #: Minimum severity `tea_asr.logs.event()` actually writes to disk.
+    #: `debug` is deliberately not the default: it is noisy enough to rotate
+    #: `warning`/`error` entries out of the short-retention main log before
+    #: anyone reads them, which defeats the point of the log page.
+    log_level: str = "info"
+    #: Per-file cap for both rotating log families below, in bytes. Same
+    #: default as the size this module shipped with before per-level
+    #: retention existed.
+    log_max_bytes: int = 5 * 1024 * 1024
+    #: Backups kept for `service.log` (every level at/above `log_level`).
+    #: Small on purpose: this is the high-volume "what's happening right
+    #: now" stream, not the archive.
+    log_backup_count: int = 3
+    #: Backups kept for `service.error.log` (warning/error only, written by
+    #: `tea_asr.logs.setup_logging`'s second handler). Bigger than
+    #: `log_backup_count` on purpose: failures are rare, so the same byte
+    #: budget buys far more retention *in time* for exactly the entries a
+    #: post-mortem needs, without the main log's routine traffic evicting
+    #: them first. Still bounded — see `validate_log_retention_or_raise` —
+    #: there is no "keep forever" setting.
+    log_error_backup_count: int = 10
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> ServiceConfig:
@@ -278,7 +310,60 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
                 host.strip() for host in extra_hosts.split(",") if host.strip()
             ),
         )
+    log_level = get("TEA_ASR_LOG_LEVEL")
+    if log_level is not None:
+        config = replace(config, log_level=log_level.strip().lower())
+    log_max_bytes = get("TEA_ASR_LOG_MAX_BYTES")
+    if log_max_bytes is not None:
+        config = replace(config, log_max_bytes=int(log_max_bytes))
+    log_backup_count = get("TEA_ASR_LOG_BACKUP_COUNT")
+    if log_backup_count is not None:
+        config = replace(config, log_backup_count=int(log_backup_count))
+    log_error_backup_count = get("TEA_ASR_LOG_ERROR_BACKUP_COUNT")
+    if log_error_backup_count is not None:
+        config = replace(config, log_error_backup_count=int(log_error_backup_count))
     return config
+
+
+#: Log levels `tea_asr.logs.event()` and `ServiceConfig.log_level` accept.
+LOG_LEVELS: tuple[str, ...] = ("debug", "info", "warning", "error")
+#: Hard ceilings on log retention config, independent of anything a
+#: config.toml or env var says — docs/06-handoff.md #4: every bounded
+#: resource needs an upper bound that isn't just "whatever the operator
+#: typed", so a typo (or a deliberately hostile config file) can't turn
+#: "keep some logs" into "keep logs forever" / "fill the disk".
+_MAX_LOG_MAX_BYTES = 50 * 1024 * 1024
+_MAX_LOG_BACKUP_COUNT = 20
+_MAX_LOG_ERROR_BACKUP_COUNT = 50
+
+
+def validate_log_retention_or_raise(config: ServiceConfig) -> None:
+    """Refuse a log retention config that is invalid or effectively unbounded.
+
+    Called from `tea_asr.logs.setup_logging` before any handler is created,
+    so a bad `[service]` block in config.toml fails loudly at startup instead
+    of silently filling the disk or dropping levels nobody asked to drop.
+    """
+
+    if config.log_level not in LOG_LEVELS:
+        raise RuntimeError(
+            f"log_level={config.log_level!r} 不是合法等級，必須是 {', '.join(LOG_LEVELS)} 之一。"
+        )
+    if not (0 < config.log_max_bytes <= _MAX_LOG_MAX_BYTES):
+        raise RuntimeError(
+            f"log_max_bytes={config.log_max_bytes} 超出範圍"
+            f"（必須介於 1 與 {_MAX_LOG_MAX_BYTES} bytes 之間）。"
+        )
+    if not (0 <= config.log_backup_count <= _MAX_LOG_BACKUP_COUNT):
+        raise RuntimeError(
+            f"log_backup_count={config.log_backup_count} 超出範圍"
+            f"（必須介於 0 與 {_MAX_LOG_BACKUP_COUNT} 之間）。"
+        )
+    if not (0 <= config.log_error_backup_count <= _MAX_LOG_ERROR_BACKUP_COUNT):
+        raise RuntimeError(
+            f"log_error_backup_count={config.log_error_backup_count} 超出範圍"
+            f"（必須介於 0 與 {_MAX_LOG_ERROR_BACKUP_COUNT} 之間）。"
+        )
 
 
 def validate_bind_or_raise(host: str, *, allow_lan: bool) -> None:

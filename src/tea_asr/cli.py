@@ -293,7 +293,7 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 3
-        log_file = setup_logging(paths)
+        log_file = setup_logging(paths, config=settings)
         print(f"log：{log_file}")
         if settings.allow_lan:
             # docs/06-handoff.md's LAN row: opting in is the user's explicit
