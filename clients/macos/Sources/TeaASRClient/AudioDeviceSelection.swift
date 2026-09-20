@@ -233,6 +233,13 @@ enum AudioInputDeviceOption: Equatable {
     case available(AudioInputDevice)
     case unavailable(uid: String)
     case enumerationError(message: String)
+    /// One or more devices exist but could not be read (a genuine per-device
+    /// CoreAudio failure, not a legitimate zero-channel output device).
+    /// Enumeration still succeeded for every other device, so this is a
+    /// disabled diagnostic row alongside the usable list rather than a
+    /// substitute for it — the failure stays visible without hiding the
+    /// microphones that did resolve.
+    case skippedDevices(count: Int, message: String)
 
     var uid: String? {
         switch self {
@@ -243,6 +250,8 @@ enum AudioInputDeviceOption: Equatable {
         case .unavailable(let uid):
             return uid
         case .enumerationError:
+            return nil
+        case .skippedDevices:
             return nil
         }
     }
@@ -257,12 +266,15 @@ enum AudioInputDeviceOption: Equatable {
             return "不可用：\(uid)"
         case .enumerationError(let message):
             return "無法列出輸入裝置：\(message)"
+        case .skippedDevices(let count, let message):
+            return "有 \(count) 台裝置無法讀取：\(message)"
         }
     }
 
     var isEnabled: Bool {
         if case .unavailable = self { return false }
         if case .enumerationError = self { return false }
+        if case .skippedDevices = self { return false }
         return true
     }
 }
@@ -303,7 +315,8 @@ enum AudioInputChannelOption: Equatable {
 enum AudioInputSettingsOptions {
     static func deviceOptions(
         storedUID: String?,
-        enumeration: Result<[AudioInputDevice], AudioInputDeviceCatalog.Error>
+        enumeration: Result<[AudioInputDevice], AudioInputDeviceCatalog.Error>,
+        skipped: [AudioInputDeviceCatalog.SkippedDevice] = []
     ) -> [AudioInputDeviceOption] {
         let available: [AudioInputDevice]
         let failureMessage: String?
@@ -320,8 +333,22 @@ enum AudioInputSettingsOptions {
 
         let storedOption = deviceOption(storedUID: storedUID, available: available)
         let failureOption = failureMessage.map(AudioInputDeviceOption.enumerationError)
+        // Per-device skips are reported even when overall enumeration
+        // succeeded: losing one microphone to a bad read is a real, visible
+        // failure and must not be conflated with (or hidden behind) the
+        // "no devices at all" diagnostic above.
+        let skippedOption: AudioInputDeviceOption? = skipped.isEmpty
+            ? nil
+            : .skippedDevices(
+                count: skipped.count,
+                message: skipped.map { device in
+                    let name = device.name.map { "\($0) (id \(device.deviceID))" } ?? "id \(device.deviceID)"
+                    return "\(name)：\(device.reason)"
+                }.joined(separator: "；")
+            )
         return [AudioInputDeviceOption.systemDefault]
             + (failureOption.map { [$0] } ?? [])
+            + (skippedOption.map { [$0] } ?? [])
             + available.map(AudioInputDeviceOption.available)
             + (storedOption.isEnabled ? [] : [storedOption])
     }
@@ -603,6 +630,17 @@ enum AudioInputDeviceCatalog {
         let deviceID: AudioDeviceID
     }
 
+    /// One device that could not be read while building the catalog. Kept
+    /// separate from `Error` (which is for systemic failures that abort the
+    /// whole enumeration) so a single bad device stays a visible, itemized
+    /// diagnostic instead of either silently vanishing or taking every other
+    /// microphone down with it.
+    struct SkippedDevice: Equatable {
+        let deviceID: AudioDeviceID
+        let name: String?
+        let reason: String
+    }
+
     private enum InputChannelQuery {
         case count(Int)
         case noInputStream
@@ -622,9 +660,24 @@ enum AudioInputDeviceCatalog {
         inputDescriptors(from: try records())
     }
 
+    /// Same as `enumerate()`, but also reports devices that were skipped
+    /// because reading their properties failed (not because they are
+    /// legitimately output-only). `skipped` is replaced, not appended to.
+    static func enumerate(skipped: inout [SkippedDevice]) throws -> [AudioInputDevice] {
+        inputDescriptors(from: try recordsOrThrow(skipped: &skipped))
+    }
+
     static func enumerationResult() -> Result<[AudioInputDevice], Error> {
+        var skipped: [SkippedDevice] = []
+        return enumerationResult(skipped: &skipped)
+    }
+
+    /// Same as `enumerationResult()`, but also reports devices skipped due to
+    /// a genuine per-device read failure so the caller can surface them
+    /// instead of the failure disappearing into a shorter device list.
+    static func enumerationResult(skipped: inout [SkippedDevice]) -> Result<[AudioInputDevice], Error> {
         do {
-            return .success(try enumerate())
+            return .success(try enumerate(skipped: &skipped))
         } catch let error as Error {
             return .failure(error)
         } catch {
@@ -646,6 +699,17 @@ enum AudioInputDeviceCatalog {
     }
 
     static func recordsOrThrow() throws -> [Record] {
+        var skipped: [SkippedDevice] = []
+        return try recordsOrThrow(skipped: &skipped)
+    }
+
+    /// Builds the device catalog. A failure reading the global device list
+    /// (size or contents) is systemic and still aborts with `throw` — there
+    /// is nothing to enumerate without it. A failure reading one device's own
+    /// properties (UID, name, or stream configuration) is local to that
+    /// device: it is recorded into `skipped` and enumeration continues, so
+    /// one uncooperative AudioObject can never blank out every microphone.
+    static func recordsOrThrow(skipped: inout [SkippedDevice]) throws -> [Record] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -684,25 +748,41 @@ enum AudioInputDeviceCatalog {
             throw Error.deviceListRead(readStatus)
         }
 
-        return try ids.map { deviceID in
-            let uid = try stringProperty(deviceID, selector: kAudioDevicePropertyDeviceUID)
-            let name = try stringProperty(deviceID, selector: kAudioObjectPropertyName)
-            let channelCount: Int
-            switch try inputChannelCount(deviceID) {
-            case .count(let count):
-                channelCount = count
-            case .noInputStream:
-                channelCount = 0
+        var records: [Record] = []
+        records.reserveCapacity(ids.count)
+        for deviceID in ids {
+            do {
+                let uid = try stringProperty(deviceID, selector: kAudioDevicePropertyDeviceUID)
+                let name = try stringProperty(deviceID, selector: kAudioObjectPropertyName)
+                let channelCount: Int
+                switch try inputChannelCount(deviceID) {
+                case .count(let count):
+                    channelCount = count
+                case .noInputStream:
+                    channelCount = 0
+                }
+                records.append(
+                    Record(
+                        descriptor: AudioInputDevice(
+                            uid: uid,
+                            name: name,
+                            inputChannels: channelCount
+                        ),
+                        deviceID: deviceID
+                    )
+                )
+            } catch let error as Error {
+                let name = try? stringProperty(deviceID, selector: kAudioObjectPropertyName)
+                skipped.append(
+                    SkippedDevice(
+                        deviceID: deviceID,
+                        name: name,
+                        reason: error.errorDescription ?? "未知錯誤"
+                    )
+                )
             }
-            return Record(
-                descriptor: AudioInputDevice(
-                    uid: uid,
-                    name: name,
-                    inputChannels: channelCount
-                ),
-                deviceID: deviceID
-            )
         }
+        return records
     }
 
     static func defaultRecord() -> Record? {
@@ -780,10 +860,19 @@ enum AudioInputDeviceCatalog {
                 status: sizeStatus
             )
         }
-        guard size >= UInt32(MemoryLayout<AudioBufferList>.size) else {
-            if size == 0 {
-                return .noInputStream
-            }
+        guard size > 0 else {
+            return .noInputStream
+        }
+        // Every valid AudioBufferList starts with a 4-byte `mNumberBuffers`
+        // count, even when there is nothing to describe. A pure-output
+        // device's input-scope stream configuration legitimately reports
+        // `mNumberBuffers == 0` — CoreAudio has been observed padding that to
+        // 8 bytes for struct alignment rather than reporting 0 bytes, which
+        // an earlier version of this function mistook for a malformed
+        // configuration and threw on, aborting the entire device catalog for
+        // one output-only AudioObject. Anything smaller than a `UInt32`
+        // cannot even hold that count and is a genuine error.
+        guard size >= UInt32(MemoryLayout<UInt32>.size) else {
             throw Error.invalidStreamConfiguration(deviceID: deviceID, size: size)
         }
 
@@ -792,14 +881,13 @@ enum AudioInputDeviceCatalog {
             alignment: MemoryLayout<AudioBufferList>.alignment
         )
         defer { raw.deallocate() }
-        let list = raw.assumingMemoryBound(to: AudioBufferList.self)
         let readStatus = AudioObjectGetPropertyData(
             deviceID,
             &address,
             0,
             nil,
             &size,
-            list
+            raw
         )
         guard readStatus == noErr else {
             if isOutputOnlyStatus(readStatus) {
@@ -811,6 +899,19 @@ enum AudioInputDeviceCatalog {
                 status: readStatus
             )
         }
+
+        let numberOfBuffers = raw.load(as: UInt32.self)
+        guard numberOfBuffers > 0 else {
+            return .noInputStream
+        }
+        // A non-zero buffer count needs enough bytes for the full
+        // AudioBufferList layout (at minimum one AudioBuffer entry); if
+        // CoreAudio claims buffers but didn't return room for them, that is
+        // a real malformed configuration, not a zero-input device.
+        guard size >= UInt32(MemoryLayout<AudioBufferList>.size) else {
+            throw Error.invalidStreamConfiguration(deviceID: deviceID, size: size)
+        }
+        let list = raw.assumingMemoryBound(to: AudioBufferList.self)
         let buffers = UnsafeMutableAudioBufferListPointer(list)
         return .count(buffers.reduce(0) { $0 + Int($1.mNumberChannels) })
     }

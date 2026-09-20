@@ -324,6 +324,24 @@ final class AudioDeviceSelectionTests: XCTestCase {
         }
     }
 
+    func testCatalogRecordsOrThrowSurfacesSkippedDevicesWithoutAbortingTheRest() throws {
+        // Exercises the resilient, skip-collecting overload against the real
+        // CoreAudio HAL. This environment's sandbox may not expose any
+        // AudioObjects at all (an empty, error-free result is valid here),
+        // but if the global device list can be read, one device's own
+        // property failure must never surface as a thrown error — only as an
+        // itemized, reasoned entry in `skipped`.
+        var skipped: [AudioInputDeviceCatalog.SkippedDevice] = []
+        do {
+            _ = try AudioInputDeviceCatalog.recordsOrThrow(skipped: &skipped)
+            for device in skipped {
+                XCTAssertFalse(device.reason.isEmpty)
+            }
+        } catch {
+            XCTAssertFalse(error.localizedDescription.isEmpty)
+        }
+    }
+
     func testDeviceOptionsExposeEnumerationFailureAsVisibleDisabledError() {
         let options = AudioInputSettingsOptions.deviceOptions(
             storedUID: nil,
@@ -348,6 +366,82 @@ final class AudioDeviceSelectionTests: XCTestCase {
         XCTAssertEqual(options.first, .systemDefault)
         XCTAssertTrue(options.contains {
             if case .enumerationError = $0 { return true }
+            return false
+        })
+    }
+
+    func testInputDescriptorsTreatZeroChannelRecordsAsNonInputNotAsAnError() {
+        // A pure-output AudioObject (speaker, display audio, an output-only
+        // side of an aggregate device) legitimately reports zero input
+        // channels — CoreAudio has been observed encoding that as an
+        // AudioBufferList with `mNumberBuffers == 0`, padded to 8 bytes.
+        // That must be filtered out silently as "not a microphone", never
+        // surfaced as a per-device failure and never allowed to abort
+        // enumeration of the other, real, input devices.
+        let records = [
+            AudioInputDeviceCatalog.Record(
+                descriptor: AudioInputDevice(uid: "speaker", name: "MacBook Pro的揚聲器", inputChannels: 0),
+                deviceID: 132
+            ),
+            AudioInputDeviceCatalog.Record(
+                descriptor: AudioInputDevice(uid: "builtin-mic", name: "MacBook Pro的麥克風", inputChannels: 1),
+                deviceID: 5
+            ),
+        ]
+
+        let devices = AudioInputDeviceCatalog.inputDescriptors(from: records)
+
+        XCTAssertEqual(devices.map(\.uid), ["builtin-mic"])
+    }
+
+    func testDeviceOptionsSurfaceSkippedDevicesAsAVisibleDisabledDiagnostic() {
+        // A single device that genuinely failed to read (not a zero-channel
+        // output device) must not blank out the rest of the catalog, but the
+        // failure must not be silently swallowed either: it needs to show up
+        // as its own itemized, disabled row alongside the still-usable
+        // devices that did enumerate successfully.
+        let skipped = [
+            AudioInputDeviceCatalog.SkippedDevice(
+                deviceID: 132,
+                name: "NDI Audio",
+                reason: "CoreAudio 裝置 132 回報無效的輸入 stream configuration（3 bytes）。"
+            )
+        ]
+        let options = AudioInputSettingsOptions.deviceOptions(
+            storedUID: nil,
+            enumeration: .success([
+                AudioInputDevice(uid: "usb-mic", name: "MSI MD342CQP", inputChannels: 2)
+            ]),
+            skipped: skipped
+        )
+
+        XCTAssertEqual(options.first, .systemDefault)
+        guard case .skippedDevices(let count, let message) = options[1] else {
+            return XCTFail("expected a visible skipped-device diagnostic row")
+        }
+        XCTAssertEqual(count, 1)
+        XCTAssertTrue(message.contains("NDI Audio"))
+        XCTAssertTrue(message.contains("132"))
+        XCTAssertFalse(options[1].isEnabled)
+        XCTAssertNil(options[1].uid)
+
+        // The device that did enumerate successfully must still be present
+        // and selectable: one bad device does not take the rest down.
+        XCTAssertTrue(options.contains(.available(
+            AudioInputDevice(uid: "usb-mic", name: "MSI MD342CQP", inputChannels: 2)
+        )))
+    }
+
+    func testDeviceOptionsOmitSkippedDiagnosticWhenNothingWasSkipped() {
+        let options = AudioInputSettingsOptions.deviceOptions(
+            storedUID: nil,
+            enumeration: .success([
+                AudioInputDevice(uid: "usb-mic", name: "MSI MD342CQP", inputChannels: 2)
+            ])
+        )
+
+        XCTAssertFalse(options.contains {
+            if case .skippedDevices = $0 { return true }
             return false
         })
     }
