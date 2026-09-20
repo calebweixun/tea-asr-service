@@ -60,6 +60,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         static let tight: CGFloat = 8
         /// Title to its own subordinate line.
         static let hair: CGFloat = 4
+        /// Fixed width of the sidebar icon column.
+        static let sidebarIconColumn: CGFloat = 20
         /// Shared width of the leading label column, so every value and every
         /// settings control starts on the same vertical line.
         static let labelColumn: CGFloat = 100
@@ -99,7 +101,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             case .overview: return "總覽"
             case .operations: return "操作"
             case .settings: return "設定"
-            case .diagnostics: return "診斷"
+            case .diagnostics: return "診斷與權限"
             }
         }
 
@@ -306,9 +308,32 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                 action: #selector(selectSection(_:))
             )
             button.tag = section.rawValue
-            button.image = NSImage(systemSymbolName: section.symbolName, accessibilityDescription: section.title)
+            let symbol = NSImage(systemSymbolName: section.symbolName, accessibilityDescription: section.title)
+            let imageSize = NSSize(
+                width: Metrics.sidebarIconColumn + Metrics.tight,
+                height: Metrics.sidebarIconColumn
+            )
+            button.image = NSImage(size: imageSize, flipped: false) { _ in
+                guard let symbol else { return false }
+                let symbolSize = symbol.size
+                let symbolRect = NSRect(
+                    x: 0,
+                    y: max(0, (Metrics.sidebarIconColumn - symbolSize.height) / 2),
+                    width: symbolSize.width,
+                    height: symbolSize.height
+                )
+                symbol.draw(
+                    in: symbolRect,
+                    from: .zero,
+                    operation: .sourceOver,
+                    fraction: 1
+                )
+                return true
+            }
             button.image?.isTemplate = true
             button.imagePosition = .imageLeading
+            button.imageHugsTitle = false
+            button.imageScaling = .scaleNone
             button.alignment = .left
             button.bezelStyle = .regularSquare
             button.isBordered = false
@@ -1464,7 +1489,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             // Floor at one line so an empty/short value still occupies the
             // same box as its single-line neighbours (one vertical rhythm per
             // group) while a long error is free to grow past it. This used to
-            // floor at two lines, which is what made every row in 總覽/診斷
+            // floor at two lines, which is what made every row in 總覽/診斷與權限
             // 40pt tall even when every value was a short single line.
             label.heightAnchor.constraint(greaterThanOrEqualToConstant: lineHeight).isActive = true
             return label

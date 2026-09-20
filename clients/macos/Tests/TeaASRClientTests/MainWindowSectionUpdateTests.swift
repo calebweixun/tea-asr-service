@@ -59,6 +59,7 @@ final class MainWindowSectionUpdateTests: XCTestCase {
     @MainActor
     func testDiagnosticsSectionCarriesThePermissionRows() {
         XCTAssertEqual(MainWindowController.Section.allCases.count, 4)
+        XCTAssertEqual(MainWindowController.Section.diagnostics.title, "診斷與權限")
         XCTAssertFalse(MainWindowController.Section.allCases.map(\.title).contains("權限"))
 
         let controller = makeController()
