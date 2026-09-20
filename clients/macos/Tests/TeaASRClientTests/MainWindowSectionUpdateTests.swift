@@ -58,7 +58,8 @@ final class MainWindowSectionUpdateTests: XCTestCase {
     /// rows render on the Diagnostics page.
     @MainActor
     func testDiagnosticsSectionCarriesThePermissionRows() {
-        XCTAssertEqual(MainWindowController.Section.allCases.count, 4)
+        // 五項：總覽／操作／設定／診斷與權限／日誌（見 LogsSectionTests）。
+        XCTAssertEqual(MainWindowController.Section.allCases.count, 5)
         XCTAssertEqual(MainWindowController.Section.diagnostics.title, "診斷與權限")
         XCTAssertFalse(MainWindowController.Section.allCases.map(\.title).contains("權限"))
 
