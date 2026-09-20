@@ -129,6 +129,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let audioLevelMonitor = AudioLevelMonitor(callbackQueue: .main)
     private let audioLevelBar = AudioLevelBarView()
     private static let inputDeviceEnumerationErrorUID = "__tea_audio_input_enumeration_error__"
+    private static let inputDeviceSkippedDevicesUID = "__tea_audio_input_skipped_devices__"
     private var isWindowOpen = true
     #if DEBUG
     private(set) var monitorStartCount = 0
@@ -992,9 +993,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     private func inputDevicePopup() -> NSPopUpButton {
         let popup = NSPopUpButton()
+        var skippedDevices: [AudioInputDeviceCatalog.SkippedDevice] = []
         let options = AudioInputSettingsOptions.deviceOptions(
             storedUID: settings.inputDeviceUID,
-            enumeration: AudioInputDeviceCatalog.enumerationResult()
+            enumeration: AudioInputDeviceCatalog.enumerationResult(skipped: &skippedDevices),
+            skipped: skippedDevices
         )
         for option in options {
             popup.addItem(withTitle: option.title)
@@ -1004,6 +1007,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                 // value of System Default, and would select the disabled
                 // diagnostic row instead of the usable default row.
                 item?.representedObject = Self.inputDeviceEnumerationErrorUID
+                item?.toolTip = option.title
+            } else if case .skippedDevices = option {
+                // Same reasoning as the enumeration-error row above: this
+                // diagnostic sits alongside a real System Default row and
+                // must not steal its UID.
+                item?.representedObject = Self.inputDeviceSkippedDevicesUID
                 item?.toolTip = option.title
             } else {
                 item?.representedObject = option.uid ?? AudioInputDevice.systemDefaultUID
