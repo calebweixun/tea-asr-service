@@ -9,6 +9,12 @@ import Foundation
 /// without opening a session (for example, to fix a missing permission).
 @MainActor
 final class MainWindowController: NSWindowController, NSWindowDelegate {
+    /// Fixed sidebar thickness (see `sidebarItem.minimumThickness` in
+    /// `build()`, and `windowWillResize` for why the window itself also
+    /// needs defending).
+    private let sidebarWidth: CGFloat = 210
+    private let minimumWindowSize = NSSize(width: 780, height: 520)
+
     private struct StatusPresentation {
         let title: String
         let detail: String
@@ -118,7 +124,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             defer: false
         )
         window.title = "TEA ASR"
-        window.minSize = NSSize(width: 780, height: 520)
+        window.minSize = minimumWindowSize
+        // `minSize` only floors interactive (mouse-drag) resizing. Once the
+        // detail pane's content is fully width-determinate bottom-up (see
+        // `stretchArrangedSubviewsToFullWidth`), assigning `contentViewController`
+        // below makes AppKit auto-size the window to that content's computed
+        // fitting size on every layout pass — including the very first one,
+        // where the fitting size can come out smaller than the window we
+        // actually want. `contentMinSize` is the floor that mechanism itself
+        // respects; without it the window could shrink itself well under
+        // 780x520 the moment a section's view tree finishes laying out.
+        window.contentMinSize = minimumWindowSize
         window.toolbarStyle = .unifiedCompact
         window.titlebarAppearsTransparent = false
         window.backgroundColor = .windowBackgroundColor
@@ -161,14 +177,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             detailView.trailingAnchor.constraint(equalTo: detailScroll.contentView.trailingAnchor),
             detailView.topAnchor.constraint(equalTo: detailScroll.contentView.topAnchor),
             detailView.widthAnchor.constraint(equalTo: detailScroll.contentView.widthAnchor),
+            // Once the detail pane's content is fully width-determinate
+            // bottom-up (see `stretchArrangedSubviewsToFullWidth`), AppKit's
+            // split-view divider negotiation starts consulting the detail
+            // pane's own "compressed fitting size" to decide how much room
+            // it actually needs — and that computation treats every
+            // wrapping label in it as shrinkable to near zero (low
+            // compression resistance is exactly what lets long text wrap
+            // instead of overflowing). Left alone, that tiny reported need
+            // starves the negotiation and the sidebar absorbs the
+            // difference, growing far past its intended width. Giving the
+            // scroll view itself a real floor — exactly the width the
+            // detail pane gets at the window's minimum size — means it
+            // never reports needing less room than that, regardless of what
+            // its content is currently able to compress to.
+            detailScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: minimumWindowSize.width - sidebarWidth),
         ])
-        splitViewController.addSplitViewItem(
-            NSSplitViewItem(sidebarWithViewController: sidebarController)
-        )
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarController)
+        sidebarItem.minimumThickness = sidebarWidth
+        sidebarItem.maximumThickness = sidebarWidth
+        splitViewController.addSplitViewItem(sidebarItem)
         splitViewController.addSplitViewItem(
             NSSplitViewItem(viewController: detailController)
         )
-        splitViewController.splitView.setPosition(210, ofDividerAt: 0)
+        splitViewController.splitView.setPosition(sidebarWidth, ofDividerAt: 0)
         window?.contentViewController = splitViewController
 
         mountSelectedSection()
@@ -271,6 +303,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         permissions.refresh()
+    }
+
+    /// Defends the window's minimum size against AppKit's own auto-layout
+    /// window sizing (see the long comment in `build()`): once the detail
+    /// pane's content became fully width-determinate, that mechanism could
+    /// shrink the window below `contentMinSize` on the very first layout
+    /// pass, before this delegate method — or `contentMinSize` itself —
+    /// otherwise gets a chance to push back. Clamping here catches every
+    /// resize attempt, internal or user-driven.
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        // `frameSize` is the whole window (title bar included); `minSize`
+        // is already expressed in that same frame coordinate space, unlike
+        // `contentMinSize`, so compare against it directly.
+        NSSize(
+            width: max(frameSize.width, sender.minSize.width),
+            height: max(frameSize.height, sender.minSize.height)
+        )
     }
 
     // MARK: - Session presentation API
@@ -523,6 +572,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         permissionRows.orientation = .vertical
         permissionRows.alignment = .width
         permissionRows.spacing = 12
+        stretchArrangedSubviewsToFullWidth(permissionRows)
         let refresh = actionButton(title: "重新檢查權限", action: #selector(refreshPermissions(_:)))
         let view = sectionStack(
             title: "權限",
@@ -1117,7 +1167,41 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             view.setContentHuggingPriority(.defaultLow, for: .horizontal)
             view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
+        stretchArrangedSubviewsToFullWidth(stack)
         return stack
+    }
+
+    /// `NSStackView`'s built-in `.width` cross-axis alignment (used above,
+    /// and by `cardStack`'s content stack and the permissions list) pins
+    /// each arranged subview's leading/trailing edges to the stack's own
+    /// edges, but at a priority below `.required`. Every arranged subview
+    /// here — headings, cards, buttons — has its own narrower intrinsic
+    /// width, so those two edge constraints tie against that intrinsic
+    /// width and against each other; AppKit's solver resolved that tie by
+    /// keeping only the trailing edge pinned and leaving the leading edge
+    /// free, which is the "整片靠右" bug: every section's content packs
+    /// against the right side of the detail pane with a blank gap on the
+    /// left, and — because each subview's intrinsic width differs — the
+    /// left edges of neighbouring cards land at different x positions
+    /// instead of lining up. Confirmed by dumping the live view hierarchy
+    /// from a headless test (`swift test` can build real AppKit views
+    /// without a window server): every arranged subview's frame had
+    /// `x + width == stack.frame.width` while `x` varied per view. Pinning
+    /// both edges ourselves at `.required` priority removes the tie, so
+    /// this — not `.alignment = .width` — is what actually stretches an
+    /// arranged subview to the stack's width.
+    private func stretchArrangedSubviewsToFullWidth(_ stack: NSStackView) {
+        for view in stack.arrangedSubviews {
+            view.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
+            // A view that explicitly opted out of growing horizontally (e.g.
+            // `actionButton`'s `.required` hugging, used for a lone button
+            // like "重新檢查權限") should stay at its natural compact width
+            // instead of being stretched edge-to-edge — pinning only its
+            // leading edge still fixes the "everything starts flush right"
+            // bug for it without turning it into a giant full-width button.
+            guard view.contentHuggingPriority(for: .horizontal) != .required else { continue }
+            view.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
+        }
     }
 
     /// Builds the hero status card once. Its icon, title, detail text, mode
@@ -1317,6 +1401,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         content.alignment = .width
         content.spacing = 10
         content.translatesAutoresizingMaskIntoConstraints = false
+        stretchArrangedSubviewsToFullWidth(content)
 
         let card = NSVisualEffectView()
         card.material = material
@@ -1377,6 +1462,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         row.orientation = .horizontal
         row.alignment = .firstBaseline
         row.spacing = 12
+        // `value` has no floor on how narrow it can go (a wrapping label with
+        // `maxLines: nil` can always wrap into more lines), so once this row
+        // itself is pinned to a `.required` width from above (see
+        // `stretchArrangedSubviewsToFullWidth`), the horizontal `.fill`
+        // distribution has nothing to anchor `value`'s trailing edge to and
+        // the width negotiation degenerates. Pinning it explicitly gives
+        // `value` a definite width instead of an unbounded one.
+        value.trailingAnchor.constraint(equalTo: row.trailingAnchor).isActive = true
         return (row, { text in
             guard value.stringValue != text else { return }
             value.stringValue = text
