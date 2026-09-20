@@ -7,6 +7,17 @@ import Foundation
 /// transcript state, while AppController remains the owner of audio/session
 /// side effects.  That makes the same window useful when the app is launched
 /// without opening a session (for example, to fix a missing permission).
+/// A document view for the detail scroll view that grows downwards.
+///
+/// AppKit's default (non-flipped) coordinate system parks a document view that
+/// is shorter than its clip view against the *bottom* of the scroll view, which
+/// left every section floating in the lower half of the window once the pages
+/// stopped being tall padded cards. Flipping it makes short content start at
+/// the top, the way every scrolling pane in a Mac app behaves.
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 @MainActor
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// Fixed sidebar thickness (see `sidebarItem.minimumThickness` in
@@ -14,6 +25,31 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// needs defending).
     private let sidebarWidth: CGFloat = 210
     private let minimumWindowSize = NSSize(width: 780, height: 520)
+
+    /// The one spacing/sizing scale for the detail pane. Everything here is a
+    /// multiple of 4 so neighbouring groups, rows and controls share a visible
+    /// rhythm instead of each picking its own number (the layout used to mix
+    /// 5/7/10/12/13/14/16/18/22).
+    private enum Metrics {
+        /// Margin between the detail pane's edge and its content.
+        static let edge: CGFloat = 20
+        /// Between two top-level groups in a section.
+        static let group: CGFloat = 24
+        /// Between rows inside a group, and between adjacent buttons.
+        static let row: CGFloat = 12
+        /// Group title to its separator, and settings-grid row spacing.
+        static let tight: CGFloat = 8
+        /// Title to its own subordinate line.
+        static let hair: CGFloat = 4
+        /// Shared width of the leading label column, so every value and every
+        /// settings control starts on the same vertical line.
+        static let labelColumn: CGFloat = 100
+        /// Floor for a row-trailing action button, so buttons in the same
+        /// column line up on both edges instead of being ragged.
+        static let actionWidth: CGFloat = 116
+        /// Minimum width of a settings control.
+        static let fieldWidth: CGFloat = 250
+    }
 
     private struct StatusPresentation {
         let title: String
@@ -68,7 +104,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let splitViewController = NSSplitViewController()
     private let sidebarController = NSViewController()
     private let detailController = NSViewController()
-    private let detailView = NSView()
+    private let detailView = FlippedView()
     private var sectionButtons: [NSButton] = []
     private var selectedSection: Section = .overview
     private var sectionRuntimes: [Section: SectionRuntime] = [:]
@@ -202,6 +238,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         )
         splitViewController.splitView.setPosition(sidebarWidth, ofDividerAt: 0)
         window?.contentViewController = splitViewController
+        // Assigning `contentViewController` makes AppKit size the window to the
+        // content's fitting size (see the `contentMinSize` note above). Now
+        // that the sections are plain rows rather than tall padded cards, that
+        // fitting size is small enough that the window would open at its bare
+        // minimum. Restore the intended roomy default afterwards; the minimum
+        // still applies to everything the user does from here.
+        window?.setContentSize(NSSize(width: 980, height: 650))
+        window?.center()
 
         mountSelectedSection()
     }
@@ -222,7 +266,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 5
+        stack.spacing = Metrics.hair
         stack.translatesAutoresizingMaskIntoConstraints = false
         sectionButtons = Section.allCases.map { section in
             let button = NSButton(
@@ -261,13 +305,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             button.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
         NSLayoutConstraint.activate([
-            heading.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
+            heading.topAnchor.constraint(equalTo: root.topAnchor, constant: Metrics.edge),
             heading.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
-            hint.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 2),
+            hint.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 0),
             hint.leadingAnchor.constraint(equalTo: heading.leadingAnchor),
-            stack.topAnchor.constraint(equalTo: hint.bottomAnchor, constant: 22),
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            stack.topAnchor.constraint(equalTo: hint.bottomAnchor, constant: Metrics.edge),
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Metrics.row),
+            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -Metrics.row),
             footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
             footer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
             footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
@@ -439,10 +483,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             runtime.view.translatesAutoresizingMaskIntoConstraints = false
             detailView.addSubview(runtime.view)
             NSLayoutConstraint.activate([
-                runtime.view.leadingAnchor.constraint(equalTo: detailView.leadingAnchor, constant: 28),
-                runtime.view.trailingAnchor.constraint(equalTo: detailView.trailingAnchor, constant: -28),
-                runtime.view.topAnchor.constraint(equalTo: detailView.topAnchor, constant: 24),
-                runtime.view.bottomAnchor.constraint(equalTo: detailView.bottomAnchor, constant: -24),
+                runtime.view.leadingAnchor.constraint(equalTo: detailView.leadingAnchor, constant: Metrics.edge),
+                runtime.view.trailingAnchor.constraint(equalTo: detailView.trailingAnchor, constant: -Metrics.edge),
+                runtime.view.topAnchor.constraint(equalTo: detailView.topAnchor, constant: Metrics.edge),
+                runtime.view.bottomAnchor.constraint(equalTo: detailView.bottomAnchor, constant: -Metrics.edge),
             ])
         }
         // Refresh unconditionally: state-change methods below update every
@@ -476,35 +520,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private func buildOverviewSection() -> SectionRuntime {
         let hero = buildStatusHero()
         // "服務" can render a full service error (via serverSummary()), so it
-        // opts out of the fixed-height metric card and is allowed to grow —
-        // see buildMetricCard's doc comment. "模型" stays fixed since its
-        // value is always a short status/model-name summary.
-        let service = buildMetricCard(title: "服務", symbolName: "server.rack", tint: .systemBlue, maxLines: nil)
-        let model = buildMetricCard(title: "模型", symbolName: "cpu", tint: .systemPurple)
+        // opts out of the fixed-height row and is allowed to grow — see
+        // `stableLabel`. "模型" stays fixed since its value is always a short
+        // status/model-name summary.
+        let service = buildValueRow(title: "服務", maxLines: nil)
+        let model = buildValueRow(title: "模型")
         let sessionRow = buildValueRow(title: "Session")
         let audioRow = buildValueRow(title: "輸入")
-        let runtimeCard = cardStack([sessionRow.view, audioRow.view], title: "執行狀態", symbolName: "waveform")
+        let runtimeGroup = group(
+            title: "執行狀態",
+            views: [service.view, model.view, sessionRow.view, audioRow.view]
+        )
         let recent = buildRecentTextCard()
 
         let startDictation = actionButton(title: "開始聽寫", action: #selector(startDictation(_:)))
         let startMeeting = actionButton(title: "開始會議記錄", action: #selector(startMeeting(_:)))
         let permissionsButton = actionButton(title: "檢查權限", action: #selector(openPermissions(_:)))
-        let actions = NSStackView(views: [startDictation, startMeeting, permissionsButton])
-        actions.orientation = .horizontal
-        actions.spacing = 10
+        let actions = buttonRow([startDictation, startMeeting, permissionsButton])
 
-        let view = sectionStack(
-            title: "總覽",
-            subtitle: "服務、模型與目前音訊狀態",
-            symbolName: "rectangle.3.group",
-            views: [
-                hero.view,
-                metricPair([service.view, model.view]),
-                runtimeCard,
-                recent.view,
-                cardStack([actions], symbolName: "bolt.fill"),
-            ]
-        )
+        let view = sectionStack(views: [
+            hero.view,
+            runtimeGroup,
+            recent.view,
+            actions,
+        ])
 
         func update() {
             hero.update()
@@ -526,29 +565,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let startDictation = actionButton(title: "開始聽寫", action: #selector(startDictation(_:)))
         let startMeeting = actionButton(title: "開始會議記錄", action: #selector(startMeeting(_:)))
         let stop = actionButton(title: "停止目前 session", action: #selector(stopSession(_:)))
-        let controls = NSStackView(views: [startDictation, startMeeting, stop])
-        controls.orientation = .horizontal
-        controls.spacing = 10
+        let controls = buttonRow([startDictation, startMeeting, stop])
 
         let statusRow = buildValueRow(title: "狀態")
         let audioRow = buildValueRow(title: "音訊")
         let transcriptInfoRow = buildValueRow(title: "自動存檔")
         let transcript = buildTranscriptView()
         let transcriptTitle = NSTextField(labelWithString: "最近文字／會議 transcript")
-        transcriptTitle.font = .systemFont(ofSize: 14, weight: .semibold)
+        transcriptTitle.font = .systemFont(ofSize: 12)
+        transcriptTitle.textColor = .secondaryLabelColor
         let export = actionButton(title: "匯出 Markdown…", action: #selector(exportMarkdown(_:)))
 
-        let view = sectionStack(
-            title: "操作",
-            subtitle: "開始、停止並即時查看辨識結果",
-            symbolName: "mic.fill",
-            views: [
-                cardStack([controls], title: "開始錄音", symbolName: "record.circle"),
-                cardStack([statusRow.view, audioRow.view, transcriptInfoRow.view], title: "目前 session", symbolName: "waveform.path.ecg"),
-                cardStack([transcriptTitle, transcript.view], title: "即時逐字稿", symbolName: "text.quote"),
-                cardStack([export], symbolName: "square.and.arrow.up"),
-            ]
-        )
+        let view = sectionStack(views: [
+            group(title: "開始錄音", views: [controls]),
+            group(title: "目前 session", views: [statusRow.view, audioRow.view, transcriptInfoRow.view]),
+            group(title: "即時逐字稿", views: [transcriptTitle, transcript.view]),
+            export,
+        ])
 
         func update() {
             let dictationTitle = appState.mode == .dictation ? "停止聽寫" : "開始聽寫"
@@ -571,19 +604,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let permissionRows = NSStackView(views: rows.map(\.view))
         permissionRows.orientation = .vertical
         permissionRows.alignment = .width
-        permissionRows.spacing = 12
+        permissionRows.spacing = Metrics.row
         stretchArrangedSubviewsToFullWidth(permissionRows)
+        summary.textColor = .secondaryLabelColor
         let refresh = actionButton(title: "重新檢查權限", action: #selector(refreshPermissions(_:)))
-        let view = sectionStack(
-            title: "權限",
-            subtitle: "完成錄音與自動貼上需要的系統授權",
-            symbolName: "lock.shield.fill",
-            views: [
-                cardStack([summary], symbolName: "checkmark.shield"),
-                cardStack([permissionRows], title: "權限清單", symbolName: "list.bullet"),
-                cardStack([refresh], symbolName: "arrow.clockwise"),
-            ]
-        )
+        let view = sectionStack(views: [
+            summary,
+            group(title: "權限清單", views: [permissionRows]),
+            refresh,
+        ])
 
         func update() {
             let state = permissions.state
@@ -591,7 +620,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                 ? "必要權限已具備。若要自動貼上，仍需允許輔助使用。"
                 : "請完成下列必要權限；完成後回到此視窗，狀態會自動更新。"
             if summary.stringValue != summaryText { summary.stringValue = summaryText }
-            summary.textColor = state.requiredPermissionsGranted ? .systemGreen : .systemOrange
             for row in rows {
                 row.update(state.item(for: row.kind))
             }
@@ -610,13 +638,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         for kind: PermissionKind
     ) -> (view: NSView, kind: PermissionKind, update: (PermissionItemState) -> Void) {
         let statusIcon = NSImageView(image: NSImage())
-        statusIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+        statusIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+        statusIcon.setContentHuggingPriority(.required, for: .horizontal)
         let title = NSTextField(labelWithString: "")
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.font = .systemFont(ofSize: 13)
+        title.textColor = .labelColor
         let titleRow = NSStackView(views: [statusIcon, title])
         titleRow.orientation = .horizontal
         titleRow.alignment = .centerY
-        titleRow.spacing = 6
+        titleRow.spacing = Metrics.hair + 2
         let explanation = NSTextField(wrappingLabelWithString: "")
         explanation.textColor = .secondaryLabelColor
         explanation.font = .systemFont(ofSize: 12)
@@ -624,16 +654,27 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let text = NSStackView(views: [titleRow, explanation])
         text.orientation = .vertical
         text.alignment = .leading
-        text.spacing = 3
+        text.spacing = Metrics.hair
 
         let action = NSButton(title: "", target: self, action: nil)
+        action.bezelStyle = .rounded
         action.setContentHuggingPriority(.required, for: .horizontal)
+        // Every row's button shares one floor width, so "允許麥克風" and
+        // "開啟設定" line up on both edges instead of being ragged.
+        action.widthAnchor.constraint(greaterThanOrEqualToConstant: Metrics.actionWidth).isActive = true
         action.isHidden = true
 
         let row = NSStackView(views: [text, action])
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 12
+        row.spacing = Metrics.row
+        // NSStackView's default gravity layout packs every subview against the
+        // leading edge, which is what left each row's button parked right
+        // after its own explanation text — so the buttons formed a ragged
+        // diagonal instead of a column. `.fill` hands the slack to the text
+        // (low hugging) and keeps the button (required hugging) at its floor
+        // width, pinned to the row's trailing edge.
+        row.distribution = .fill
 
         func update(_ item: PermissionItemState) {
             let statusText: String
@@ -655,10 +696,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
             let titleText = "\(item.title) · \(statusText)"
             if title.stringValue != titleText { title.stringValue = titleText }
-            title.textColor = color
-            let statusIconName = item.isSatisfied ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+            // The row's text stays in the system label colour; only the small
+            // leading symbol carries the state, and only red/orange mean
+            // something (see severityColor).
+            let statusIconName = item.isSatisfied ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
             statusIcon.image = NSImage(systemSymbolName: statusIconName, accessibilityDescription: statusText) ?? NSImage()
-            statusIcon.contentTintColor = color
+            statusIcon.contentTintColor = severityColor(color)
             if explanation.stringValue != item.explanation { explanation.stringValue = item.explanation }
 
             if let actionTitle = item.actionTitle {
@@ -705,20 +748,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         feedback.state = settings.startStopFeedback ? .on : .off
         let inputDevice = inputDevicePopup()
         let inputChannel = inputChannelPopup(deviceUID: settings.inputDeviceUID)
-        host.controlSize = .large
-        port.controlSize = .large
-        token.controlSize = .large
-        hotKey.controlSize = .large
-        interactionMode.controlSize = .large
-        inputDevice.controlSize = .large
-        inputChannel.controlSize = .large
-        host.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
-        port.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
-        token.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
-        hotKey.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
-        interactionMode.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
-        inputDevice.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
-        inputChannel.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
+        for field in [host, port, token, hotKey] as [NSControl] {
+            // An exact width, not a floor: a bordered NSTextField has no
+            // intrinsic width to hug, so a floor alone lets it absorb all the
+            // slack in the grid's control column and run to the pane's edge —
+            // which left the text fields full-width next to 250pt popups.
+            field.widthAnchor.constraint(equalToConstant: Metrics.fieldWidth).isActive = true
+            field.setContentHuggingPriority(.required, for: .horizontal)
+        }
+        for popup in [interactionMode, inputDevice, inputChannel] {
+            popup.widthAnchor.constraint(greaterThanOrEqualToConstant: Metrics.fieldWidth).isActive = true
+            popup.setContentHuggingPriority(.required, for: .horizontal)
+        }
         host.identifier = NSUserInterfaceItemIdentifier("host")
         port.identifier = NSUserInterfaceItemIdentifier("port")
         token.identifier = NSUserInterfaceItemIdentifier("token")
@@ -735,23 +776,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         interactionMode.target = self
         interactionMode.action = #selector(saveSettings(_:))
 
-        let grid = NSGridView(views: [
-            [NSTextField(labelWithString: "服務位址"), host],
-            [NSTextField(labelWithString: "Port"), port],
-            [NSTextField(labelWithString: "Token"), token],
-            [NSTextField(labelWithString: "快捷鍵"), hotKey],
-            [NSTextField(labelWithString: "互動模式"), interactionMode],
+        let grid = settingsGrid([
+            [settingsLabel("服務位址"), host],
+            [settingsLabel("Port"), port],
+            [settingsLabel("Token"), token],
+            [settingsLabel("快捷鍵"), hotKey],
+            [settingsLabel("互動模式"), interactionMode],
         ])
-        let audioGrid = NSGridView(views: [
-            [NSTextField(labelWithString: "輸入裝置"), inputDevice],
-            [NSTextField(labelWithString: "聲道"), inputChannel],
+        let audioGrid = settingsGrid([
+            [settingsLabel("輸入裝置"), inputDevice],
+            [settingsLabel("聲道"), inputChannel],
         ])
-        grid.column(at: 0).xPlacement = .trailing
-        grid.columnSpacing = 12
-        grid.rowSpacing = 12
-        audioGrid.column(at: 0).xPlacement = .trailing
-        audioGrid.columnSpacing = 12
-        audioGrid.rowSpacing = 12
 
         let autoInsert = NSButton(
             checkboxWithTitle: "定稿後自動貼進前景 app",
@@ -777,21 +812,24 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         shortcutHint.font = .systemFont(ofSize: 12)
         let save = actionButton(title: "儲存設定", action: #selector(saveSettings(_:)))
         let test = actionButton(title: "測試服務連線", action: #selector(testService(_:)))
-        let buttons = NSStackView(views: [save, test])
-        buttons.orientation = .horizontal
-        buttons.spacing = 10
+        let buttons = buttonRow([save, test])
+        // The checkboxes and the buttons sit in the same grid geometry as the
+        // labelled fields, so every control on the page — field, popup,
+        // checkbox, button — shares one left edge, the way System Settings
+        // lays a pane out.
+        let behaviourGrid = settingsGrid([
+            [NSGridCell.emptyContentView, feedback],
+            [NSGridCell.emptyContentView, autoInsert],
+            [NSGridCell.emptyContentView, preview],
+        ])
+        let buttonGrid = settingsGrid([[NSGridCell.emptyContentView, buttons]])
 
-        let view = sectionStack(
-            title: "設定",
-            subtitle: "服務連線、音訊輸入與輸入行為",
-            symbolName: "gearshape.fill",
-            views: [
-                cardStack([grid, tokenHint], title: "服務連線", symbolName: "network"),
-                cardStack([audioGrid], title: "音訊輸入", symbolName: "waveform"),
-                cardStack([shortcutHint, feedback, autoInsert, preview], title: "輸入行為", symbolName: "keyboard"),
-                cardStack([buttons], symbolName: "checkmark.circle"),
-            ]
-        )
+        let view = sectionStack(views: [
+            group(title: "服務連線", views: [grid, tokenHint]),
+            group(title: "音訊輸入", views: [audioGrid]),
+            group(title: "輸入行為", views: [shortcutHint, behaviourGrid]),
+            buttonGrid,
+        ])
 
         func update() {
             let text = "\(shortcutStatus) · 按一下快捷鍵欄位即可重新錄製。"
@@ -800,6 +838,29 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
         update()
         return SectionRuntime(view: view, update: update)
+    }
+
+    /// One shared grid geometry for every settings row: a right-aligned label
+    /// column of a fixed width, then the control column. Because the label
+    /// column's width is pinned (rather than sized to whichever labels happen
+    /// to be in that particular grid), controls in different groups still
+    /// start on the same vertical line.
+    private func settingsGrid(_ rows: [[NSView]]) -> NSGridView {
+        let grid = NSGridView(views: rows)
+        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 0).width = Metrics.labelColumn
+        grid.column(at: 1).xPlacement = .leading
+        grid.columnSpacing = Metrics.row
+        grid.rowSpacing = Metrics.tight
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        return grid
+    }
+
+    private func settingsLabel(_ title: String) -> NSTextField {
+        let label = NSTextField(labelWithString: title)
+        label.alignment = .right
+        label.lineBreakMode = .byTruncatingTail
+        return label
     }
 
     private func inputDevicePopup() -> NSPopUpButton {
@@ -872,16 +933,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let serviceRow = buildValueRow(title: "Service probe", maxLines: nil)
         let errorRow = buildValueRow(title: "最近錯誤", maxLines: nil)
         let refresh = actionButton(title: "重新檢查服務", action: #selector(testService(_:)))
-        let view = sectionStack(
-            title: "診斷",
-            subtitle: "確認麥克風 frame、RMS、服務與 WebSocket 狀態",
-            symbolName: "stethoscope",
-            views: [
-                cardStack([stateRow.view, clientRow.view], title: "應用程式", symbolName: "app.badge"),
-                cardStack([audioRow.view, serviceRow.view, errorRow.view], title: "連線與音訊", symbolName: "waveform.and.magnifyingglass"),
-                cardStack([refresh], symbolName: "arrow.clockwise"),
-            ]
-        )
+        let view = sectionStack(views: [
+            group(title: "應用程式", views: [stateRow.view, clientRow.view]),
+            group(title: "連線與音訊", views: [audioRow.view, serviceRow.view, errorRow.view]),
+            refresh,
+        ])
 
         func update() {
             stateRow.update(appState.displayStatus.title)
@@ -1133,42 +1189,68 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - View helpers
 
-    private func sectionStack(
-        title: String,
-        subtitle: String,
-        symbolName: String? = nil,
-        views: [NSView]
-    ) -> NSView {
-        let heading = NSTextField(labelWithString: title)
-        heading.font = .systemFont(ofSize: 26, weight: .bold)
-        let subheading = NSTextField(wrappingLabelWithString: subtitle)
-        subheading.textColor = .secondaryLabelColor
-
-        let headingRow = NSStackView()
-        headingRow.orientation = .horizontal
-        headingRow.alignment = .centerY
-        headingRow.spacing = 10
-        if let symbolName,
-           let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title) {
-            let icon = NSImageView(image: image)
-            icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
-            icon.contentTintColor = .controlAccentColor
-            icon.setContentHuggingPriority(.required, for: .horizontal)
-            headingRow.addArrangedSubview(icon)
-        }
-        headingRow.addArrangedSubview(heading)
-
-        let stack = NSStackView(views: [headingRow, subheading] + views)
+    /// The root stack of a section: just its groups, stacked on one rhythm.
+    ///
+    /// There is deliberately no per-page hero title/subtitle any more. The
+    /// sidebar already says which page the user is on, and no Apple app
+    /// (System Settings, Mail, Shortcuts) repeats that as a 26pt landing-page
+    /// headline inside the content pane.
+    private func sectionStack(views: [NSView]) -> NSView {
+        let stack = NSStackView(views: views)
         stack.orientation = .vertical
         stack.alignment = .width
-        stack.spacing = 14
+        stack.spacing = Metrics.group
         stack.translatesAutoresizingMaskIntoConstraints = false
         for view in views {
+            // A view that opted out of growing (a lone button, a button row)
+            // keeps its natural width; see stretchArrangedSubviewsToFullWidth.
+            guard view.contentHuggingPriority(for: .horizontal) != .required else { continue }
             view.setContentHuggingPriority(.defaultLow, for: .horizontal)
             view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
         stretchArrangedSubviewsToFullWidth(stack)
         return stack
+    }
+
+    /// A group of related rows, in the plain AppKit vocabulary: an optional
+    /// quiet title over a hairline separator, then the rows. This replaces the
+    /// rounded, tinted, bordered "card" (and its decorative per-card icon),
+    /// neither of which appears in Apple's own apps. A lone control is not
+    /// wrapped in a group at all — it is simply placed in the section.
+    private func group(title: String? = nil, views: [NSView]) -> NSView {
+        let content = NSStackView(views: views)
+        content.orientation = .vertical
+        content.alignment = .width
+        content.spacing = Metrics.tight
+        content.translatesAutoresizingMaskIntoConstraints = false
+        stretchArrangedSubviewsToFullWidth(content)
+        guard let title else { return content }
+
+        let heading = NSTextField(labelWithString: title)
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+        heading.textColor = .labelColor
+        let separator = NSBox()
+        separator.boxType = .separator
+
+        let stack = NSStackView(views: [heading, separator, content])
+        stack.orientation = .vertical
+        stack.alignment = .width
+        stack.spacing = Metrics.tight
+        stack.setCustomSpacing(Metrics.row, after: separator)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stretchArrangedSubviewsToFullWidth(stack)
+        return stack
+    }
+
+    /// A horizontal run of buttons that stays at its natural size and hugs the
+    /// leading edge, so buttons in different groups start on the same line.
+    private func buttonRow(_ buttons: [NSView]) -> NSStackView {
+        let row = NSStackView(views: buttons)
+        row.orientation = .horizontal
+        row.alignment = .firstBaseline
+        row.spacing = Metrics.row
+        row.setContentHuggingPriority(.required, for: .horizontal)
+        return row
     }
 
     /// `NSStackView`'s built-in `.width` cross-axis alignment (used above,
@@ -1204,72 +1286,67 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    /// Builds the hero status card once. Its icon, title, detail text, mode
-    /// badge and border tint all change with `statusPresentation()`, so
-    /// `update()` recomputes and reassigns them directly instead of the
-    /// caller rebuilding the card.
+    /// Builds the status header once. It used to be a tinted "hero card" —
+    /// a 54pt icon in a coloured rounded tile, an 18pt title, and a bordered
+    /// pill badge — which is web-dashboard vocabulary. It is now a plain
+    /// status line: one small SF Symbol, the state, the mode on the trailing
+    /// side, and one line of explanation. Only the symbol carries colour, and
+    /// only when the colour means something (see `severityColor`).
     private func buildStatusHero() -> (view: NSView, update: () -> Void) {
         let icon = NSImageView(image: NSImage())
-        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 25, weight: .semibold)
-        icon.wantsLayer = true
-        icon.layer?.cornerRadius = 15
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
         icon.imageScaling = .scaleProportionallyUpOrDown
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.widthAnchor.constraint(equalToConstant: 54).isActive = true
-        icon.heightAnchor.constraint(equalToConstant: 54).isActive = true
+        icon.setContentHuggingPriority(.required, for: .horizontal)
 
         let title = NSTextField(labelWithString: "")
-        title.font = .systemFont(ofSize: 18, weight: .semibold)
-        let detail = stableLabel(font: .systemFont(ofSize: 12), maxLines: 2, color: .secondaryLabelColor)
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.lineBreakMode = .byTruncatingTail
 
-        let text = NSStackView(views: [title, detail])
-        text.orientation = .vertical
-        text.alignment = .leading
-        text.spacing = 4
+        let modeLabel = NSTextField(labelWithString: "")
+        modeLabel.font = .systemFont(ofSize: 13)
+        modeLabel.textColor = .secondaryLabelColor
+        modeLabel.alignment = .right
+        modeLabel.lineBreakMode = .byTruncatingTail
+        modeLabel.setContentHuggingPriority(.required, for: .horizontal)
+        modeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        let badgeLabel = NSTextField(labelWithString: "")
-        badgeLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-        badgeLabel.alignment = .center
-        badgeLabel.lineBreakMode = .byTruncatingTail
-        let badge = NSVisualEffectView()
-        badge.material = .selection
-        badge.state = .active
-        badge.wantsLayer = true
-        badge.layer?.cornerRadius = 8
-        badge.layer?.borderWidth = 1
-        badge.addSubview(badgeLabel)
-        badgeLabel.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            badgeLabel.leadingAnchor.constraint(equalTo: badge.leadingAnchor, constant: 9),
-            badgeLabel.trailingAnchor.constraint(equalTo: badge.trailingAnchor, constant: -9),
-            badgeLabel.topAnchor.constraint(equalTo: badge.topAnchor, constant: 4),
-            badgeLabel.bottomAnchor.constraint(equalTo: badge.bottomAnchor, constant: -4),
-        ])
-        badge.setContentHuggingPriority(.required, for: .horizontal)
+        let titleRow = NSStackView(views: [icon, title, modeLabel])
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .centerY
+        titleRow.spacing = Metrics.tight
+        // See the note in buildPermissionRow: `.fill` is what actually puts
+        // the mode on the trailing edge instead of right after the title.
+        titleRow.distribution = .fill
 
-        let row = NSStackView(views: [icon, text, badge])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 12
-        row.setCustomSpacing(8, after: text)
+        let detail = stableLabel(font: .systemFont(ofSize: 13), maxLines: 2, color: .secondaryLabelColor)
 
-        let card = cardStack([row], material: .underWindowBackground)
+        let stack = NSStackView(views: [titleRow, detail])
+        stack.orientation = .vertical
+        stack.alignment = .width
+        stack.spacing = Metrics.hair
+        stretchArrangedSubviewsToFullWidth(stack)
 
         func update() {
             let presentation = statusPresentation()
             icon.image = NSImage(systemSymbolName: presentation.symbolName, accessibilityDescription: presentation.title) ?? NSImage()
-            icon.contentTintColor = presentation.tint
-            icon.layer?.backgroundColor = presentation.tint.withAlphaComponent(0.14).cgColor
+            icon.contentTintColor = severityColor(presentation.tint)
             if title.stringValue != presentation.title { title.stringValue = presentation.title }
             if detail.stringValue != presentation.detail { detail.stringValue = presentation.detail }
             let mode = modeTitle()
-            if badgeLabel.stringValue != mode { badgeLabel.stringValue = mode }
-            badgeLabel.textColor = presentation.tint
-            badge.layer?.borderColor = presentation.tint.withAlphaComponent(0.25).cgColor
-            card.layer?.borderColor = presentation.tint.withAlphaComponent(0.26).cgColor
+            if modeLabel.stringValue != mode { modeLabel.stringValue = mode }
         }
         update()
-        return (card, update)
+        return (stack, update)
+    }
+
+    /// Keeps colour for the two cases where it carries meaning — a problem
+    /// (red) and something that needs attention (orange) — and lets every
+    /// other state fall back to the system's neutral label colours, so the
+    /// window stops using blue/purple/green as decoration.
+    private func severityColor(_ tint: NSColor) -> NSColor {
+        if tint == .systemRed { return .systemRed }
+        if tint == .systemOrange { return .systemOrange }
+        return .secondaryLabelColor
     }
 
     private func statusPresentation() -> StatusPresentation {
@@ -1311,53 +1388,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    private func metricPair(_ cards: [NSView]) -> NSView {
-        let pair = NSStackView(views: cards)
-        pair.orientation = .horizontal
-        pair.alignment = .top
-        pair.distribution = .fillEqually
-        pair.spacing = 12
-        return pair
-    }
-
-    /// A metric card's value label uses `stableLabel`, which by default
-    /// reserves a fixed two-line height up front. That is what keeps the two
-    /// overview metric cards equal height across updates without an explicit
-    /// height constraint between them: neither card's content can grow past
-    /// the space it already reserved. Pass `maxLines: nil` (used for the
-    /// "服務" card, whose value can be a full service error) to opt that
-    /// card out and let it grow instead of truncating the error away; see
-    /// `stableLabel`'s doc comment for the full trade-off.
-    private func buildMetricCard(
-        title: String,
-        symbolName: String,
-        tint: NSColor,
-        maxLines: Int? = 2
-    ) -> (view: NSView, update: (String) -> Void) {
-        let icon = NSImageView(
-            image: NSImage(systemSymbolName: symbolName, accessibilityDescription: title) ?? NSImage()
-        )
-        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
-        icon.contentTintColor = tint
-        icon.setContentHuggingPriority(.required, for: .horizontal)
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = .secondaryLabelColor
-        let valueLabel = stableLabel(font: .systemFont(ofSize: 13, weight: .medium), maxLines: maxLines)
-        let heading = NSStackView(views: [icon, label])
-        heading.orientation = .horizontal
-        heading.alignment = .centerY
-        heading.spacing = 7
-        let view = cardStack([heading, valueLabel], material: .contentBackground, accent: tint)
-        return (view, { text in
-            guard valueLabel.stringValue != text else { return }
-            valueLabel.stringValue = text
-        })
-    }
-
     private func buildRecentTextCard() -> (view: NSView, update: () -> Void) {
-        let label = stableLabel(font: .systemFont(ofSize: 14), maxLines: 3)
-        let view = cardStack([label], title: "最近文字", symbolName: "text.quote")
+        let label = stableLabel(font: .systemFont(ofSize: 13), maxLines: 3)
+        let view = group(title: "最近文字", views: [label])
         func update() {
             let text = appState.lastText ?? "尚無定稿文字"
             if label.stringValue != text { label.stringValue = text }
@@ -1365,60 +1398,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
         update()
         return (view, update)
-    }
-
-    private func cardStack(
-        _ views: [NSView],
-        title: String? = nil,
-        symbolName: String? = nil,
-        material: NSVisualEffectView.Material = .contentBackground,
-        accent: NSColor? = nil
-    ) -> NSView {
-        let contentViews: [NSView]
-        if let title {
-            let heading = NSTextField(labelWithString: title)
-            heading.font = .systemFont(ofSize: 12, weight: .semibold)
-            heading.textColor = .secondaryLabelColor
-            if let symbolName,
-               let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title) {
-                let icon = NSImageView(image: image)
-                icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
-                icon.contentTintColor = accent ?? .secondaryLabelColor
-                let row = NSStackView(views: [icon, heading])
-                row.orientation = .horizontal
-                row.alignment = .centerY
-                row.spacing = 7
-                contentViews = [row] + views
-            } else {
-                contentViews = [heading] + views
-            }
-        } else {
-            contentViews = views
-        }
-
-        let content = NSStackView(views: contentViews)
-        content.orientation = .vertical
-        content.alignment = .width
-        content.spacing = 10
-        content.translatesAutoresizingMaskIntoConstraints = false
-        stretchArrangedSubviewsToFullWidth(content)
-
-        let card = NSVisualEffectView()
-        card.material = material
-        card.blendingMode = .withinWindow
-        card.state = .active
-        card.wantsLayer = true
-        card.layer?.cornerRadius = 13
-        card.layer?.borderWidth = 1
-        card.layer?.borderColor = (accent ?? NSColor.separatorColor).withAlphaComponent(accent == nil ? 0.42 : 0.26).cgColor
-        card.addSubview(content)
-        NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
-            content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
-            content.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
-            content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14),
-        ])
-        return card
     }
 
     /// A label whose height is pinned to `maxLines` up front (rather than a
@@ -1440,28 +1419,37 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if let color {
             label.textColor = color
         }
+        let lineHeight = (font.ascender - font.descender + font.leading).rounded(.up)
         guard let maxLines else {
             label.maximumNumberOfLines = 0
             label.lineBreakMode = .byWordWrapping
+            // Still reserve the standard two-line box as a *floor*: a short
+            // value then occupies exactly as much room as a fixed-height one,
+            // so rows in the same group keep a single vertical rhythm, while a
+            // long error is still free to grow past it.
+            label.heightAnchor.constraint(greaterThanOrEqualToConstant: lineHeight * 2).isActive = true
             return label
         }
         label.maximumNumberOfLines = maxLines
         label.lineBreakMode = .byTruncatingTail
-        let lineHeight = (font.ascender - font.descender + font.leading).rounded(.up)
         label.heightAnchor.constraint(equalToConstant: lineHeight * CGFloat(maxLines)).isActive = true
         return label
     }
 
     private func buildValueRow(title: String, maxLines: Int? = 2) -> (view: NSView, update: (String) -> Void) {
         let key = NSTextField(labelWithString: title)
-        key.font = .systemFont(ofSize: 12, weight: .semibold)
+        key.font = .systemFont(ofSize: 13)
         key.textColor = .secondaryLabelColor
-        key.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        key.alignment = .right
+        key.lineBreakMode = .byTruncatingTail
+        // Same column width as the settings grid, so a value on one page and a
+        // control on another start on the same vertical line.
+        key.widthAnchor.constraint(equalToConstant: Metrics.labelColumn).isActive = true
         let value = stableLabel(font: .systemFont(ofSize: 13), maxLines: maxLines)
         let row = NSStackView(views: [key, value])
         row.orientation = .horizontal
         row.alignment = .firstBaseline
-        row.spacing = 12
+        row.spacing = Metrics.row
         // `value` has no floor on how narrow it can go (a wrapping label with
         // `maxLines: nil` can always wrap into more lines), so once this row
         // itself is pinned to a `.required` width from above (see
@@ -1479,8 +1467,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private func actionButton(title: String, action: Selector) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
         button.bezelStyle = .rounded
-        button.controlSize = .large
-        button.contentTintColor = .controlAccentColor
+        // A standard push button draws its own label in the system's control
+        // text colour; tinting it with the accent colour is a web-ish accent
+        // that no stock macOS button has.
         button.setContentHuggingPriority(.required, for: .horizontal)
         return button
     }
@@ -1496,12 +1485,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         textView.isRichText = false
         textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         textView.textColor = .labelColor
-        textView.backgroundColor = .clear
-        textView.textContainerInset = NSSize(width: 10, height: 10)
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: Metrics.tight, height: Metrics.tight)
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-        scroll.borderType = .noBorder
+        // A read-only text area in an AppKit window reads as a text area
+        // because of its bezel, not because of a rounded custom card.
+        scroll.drawsBackground = true
+        scroll.backgroundColor = .textBackgroundColor
+        scroll.borderType = .bezelBorder
         scroll.documentView = textView
         scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
 
