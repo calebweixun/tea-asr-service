@@ -632,31 +632,54 @@ final class AppController: NSObject, NSApplicationDelegate {
                     return
                 }
                 self.mainWindow?.appendFinal(processed)
-                self.dictationOverlay.showFinal(processed.cleanedText)
                 let insertionText = TranscriptOutputPolicy.insertionText(from: processed)
                 self.showLastText(TranscriptOutputPolicy.presentationText(from: processed))
-                guard !insertionText.isEmpty else { return }
-                if self.settings.autoInsert, TextInjector.isTrusted {
-                    guard let target = self.dictationInsertionTarget else {
-                        TextInjector.copyToClipboard(insertionText)
-                        self.mainWindow?.setStatus(
-                            "沒有可安全貼上的原始焦點；文字已複製到剪貼簿，請確認後按 ⌘V"
-                        )
-                        return
-                    }
+                guard !insertionText.isEmpty else {
+                    self.dictationOverlay.showFinal(processed.cleanedText)
+                    return
+                }
+                // The overlay must reflect what actually happened to this
+                // final, not just that one arrived: showing "已辨識" and then
+                // silently falling back to the clipboard is indistinguishable
+                // from "nothing happened" to the user watching the floating
+                // preview (the main window is hidden for the whole session).
+                if !self.settings.autoInsert {
+                    TextInjector.copyToClipboard(insertionText)
+                    self.mainWindow?.setStatus(
+                        "自動貼上已關閉；文字已複製到剪貼簿，請確認後按 ⌘V"
+                    )
+                    self.dictationOverlay.showCopiedToClipboard(
+                        processed.cleanedText, reason: "自動貼上已關閉"
+                    )
+                } else if !TextInjector.isTrusted {
+                    TextInjector.copyToClipboard(insertionText)
+                    self.mainWindow?.setStatus(
+                        "缺少輔助使用權限；文字已複製到剪貼簿，請確認後按 ⌘V"
+                    )
+                    self.dictationOverlay.showCopiedToClipboard(
+                        processed.cleanedText, reason: "缺少輔助使用權限"
+                    )
+                    self.warnAboutAccessibilityOnce()
+                } else if let target = self.dictationInsertionTarget {
                     switch TextInjector.insert(insertionText, ifCurrent: target) {
                     case .inserted:
-                        break
+                        self.dictationOverlay.showFinal(processed.cleanedText)
                     case .copiedBecauseFocusChanged:
                         self.mainWindow?.setStatus(
                             "原始輸入焦點已變更；文字已複製到剪貼簿，請確認後按 ⌘V"
                         )
+                        self.dictationOverlay.showCopiedToClipboard(
+                            processed.cleanedText, reason: "原始輸入焦點已變更"
+                        )
                     }
                 } else {
                     TextInjector.copyToClipboard(insertionText)
-                    if self.settings.autoInsert {
-                        self.warnAboutAccessibilityOnce()
-                    }
+                    self.mainWindow?.setStatus(
+                        "沒有可安全貼上的原始焦點；文字已複製到剪貼簿，請確認後按 ⌘V"
+                    )
+                    self.dictationOverlay.showCopiedToClipboard(
+                        processed.cleanedText, reason: "沒有可安全貼上的原始焦點"
+                    )
                 }
             case .idle:
                 break

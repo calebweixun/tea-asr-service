@@ -5,6 +5,12 @@ enum DictationOverlayState: Equatable {
     case listening
     case partial(String)
     case final(String)
+    /// The final text could not be inserted (the captured focus target no
+    /// longer matches, there is no captured target, Accessibility is not
+    /// granted, or auto-insert is off) and was left on the clipboard
+    /// instead. Distinct from `.final` so the overlay can tell the user
+    /// explicitly rather than looking identical to a successful insertion.
+    case copiedToClipboard(text: String, reason: String)
     case stopping
     case error(String)
 }
@@ -13,6 +19,7 @@ enum DictationOverlayEvent: Equatable {
     case begin
     case partial(String)
     case final(String)
+    case copiedToClipboard(text: String, reason: String)
     case stopRequested
     case stopped
     case failed(String)
@@ -31,6 +38,8 @@ enum DictationOverlayPolicy {
             return text.isEmpty ? .listening : .partial(text)
         case .final(let text):
             return text.isEmpty ? .listening : .final(text)
+        case .copiedToClipboard(let text, let reason):
+            return .copiedToClipboard(text: text, reason: reason)
         case .stopRequested:
             return .stopping
         case .stopped, .clear:
@@ -137,6 +146,20 @@ final class DictationOverlayController {
         }
     }
 
+    /// The final text was recognised but landed in the clipboard instead of
+    /// the target field. This must stay visible noticeably longer than a
+    /// successful `.final` toast: a silent auto-dismiss here is exactly the
+    /// "nothing happened" symptom the user has to be protected from.
+    func showCopiedToClipboard(_ text: String, reason: String) {
+        transition(.copiedToClipboard(text: text, reason: reason))
+        let generation = renderGeneration
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_500_000_000)
+            guard let self, self.renderGeneration == generation else { return }
+            self.hide()
+        }
+    }
+
     func stopRequested() {
         transition(.stopRequested)
     }
@@ -181,6 +204,10 @@ final class DictationOverlayController {
             present()
         case .final(let text):
             titleLabel.stringValue = "已辨識"
+            detailLabel.stringValue = text
+            present()
+        case .copiedToClipboard(let text, let reason):
+            titleLabel.stringValue = "已複製到剪貼簿（\(reason)）"
             detailLabel.stringValue = text
             present()
         case .stopping:
