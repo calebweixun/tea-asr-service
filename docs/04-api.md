@@ -63,6 +63,7 @@
 | `GET /readyz` | 可接受辨識 | 200 ready，否則503；只回 state |
 | `GET /v1/capabilities` | 協定／能力／容量 | 實際配置與已驗證能力 |
 | `GET /v1/status` | 經授權診斷 | model state、queue、worker generation、版本；無音訊原文 |
+| `GET /v1/logs` | 經授權讀取近期結構化事件 | 見下方「W10｜日誌讀取」 |
 | `POST /v1/transcriptions` | 短 PCM 辨識 | 200結果、202不使用；同步最多30秒音訊 |
 
 `/readyz` 在模型 ready 且未 shutdown 時為200；queue 滿則 request 本身429，不把 queue 狀態誤報模型故障。`idle_unloaded` 回503，第一個辨識請求觸發 load 並回 `model_loading`。
@@ -106,6 +107,39 @@ feature 只有完成該功能驗收才變 true；即使 mock mode 也不能假�
 [docs/benchmarks/concurrency-report.md](benchmarks/concurrency-report.md)；可用 `config.toml` 的 `service.max_continuous_sessions` 調整，已量測安全上限為 4。
 
 `limits.max_total_connections` 同樣是伺服器**實際 enforce** 的上限，涵蓋 `/v1/stream` 的**所有** profile（utterance＋continuous 總和），不是 continuous 之外「另外」的名額。超過時新連線在 WS upgrade 完成、`accept()` 之前即被拒絕並以 close code 1013（`session_limit`）關閉，因此被拒絕的連線收不到 `hello`；名額在連線關閉時立即釋出，可供下一個連線使用。預設 4，可用 `config.toml` 的 `service.max_total_connections` 調整。
+
+## W10｜日誌讀取（`GET /v1/logs`）
+
+`tea_asr.logs.event()` 支援 `level=`（`debug`／`info`／`warning`／`error`，預設 `info`，未指定時與 W10 之前完全相同）。寫入走同一個 `JsonFormatter`，`FORBIDDEN_KEYS`（`token`／`authorization`／`pcm`／`text`／`raw_text`／`transcript`）一律過濾，不因等級而放寬。
+
+**分級保存**：兩條各自 bounded 的 rotating log 家族，設定在 `ServiceConfig`（`config.toml` 的 `[service]` 區塊或對應環境變數，風格與 `allow_lan` 相同）：
+
+| 設定 | 預設 | 環境變數 | 說明 |
+|---|---|---|---|
+| `log_level` | `info` | `TEA_ASR_LOG_LEVEL` | 寫入 `service.log` 的最低等級（`debug`／`info`／`warning`／`error`） |
+| `log_max_bytes` | 5MB | `TEA_ASR_LOG_MAX_BYTES` | 兩個家族各自的單檔上限（上限 50MB，硬性拒絕更大值） |
+| `log_backup_count` | 3 | `TEA_ASR_LOG_BACKUP_COUNT` | `service.log`（所有等級）保留的輪替備份數（上限 20） |
+| `log_error_backup_count` | 10 | `TEA_ASR_LOG_ERROR_BACKUP_COUNT` | `service.error.log`（只收 warning／error）保留的輪替備份數（上限 50） |
+
+`service.error.log` 是 `service.log` 之外**另一個**由同一次 `event()` 呼叫同時寫入的 rotating 家族，只收 warning 以上；同樣的位元組上限下，因為事件量遠少於一般 info 流量，能換到遠長的保存時間，不會被日常流量沖掉——這是唯一的「分級保存」機制，沒有任何等級可以設成無限保存；`ServiceConfig` 載入時會驗證這四個欄位都在合法範圍內，超出直接拒絕啟動（`validate_log_retention_or_raise`，`src/tea_asr/config.py`）。
+
+**讀取契約**：`GET /v1/logs`（需 bearer token，比照其他 `/v1/*` 端點）。
+
+- Query：`level`（可選，`debug`／`info`／`warning`／`error`，語意是**最低嚴重度**——例如 `level=warning` 會回傳 warning 與 error，不是只回 warning）、`limit`（預設 100，最小 1，**硬上限 500**；超過 500 直接 422，不會靜默截斷或改變語意）。
+- 回應（newest first）：
+  ```json
+  {
+    "items": [
+      {"ts":"2026-09-20T10:00:00","level":"ERROR","logger":"tea_asr.api","message":"worker.restart_failed","fields":{"code":"inference_failed"}}
+    ],
+    "count": 1,
+    "limit": 100,
+    "has_more": false
+  }
+  ```
+  `fields` 是呼叫端傳給 `event()` 的其餘欄位，`FORBIDDEN_KEYS` 已在寫入與讀取兩端各過濾一次。`has_more=true` 代表還有更舊、符合條件但超出 `limit` 的事件，可用更大（仍受 500 限制）的 `limit` 重新查詢。
+- v0.1 **不提供** `before`／`since` 或跨越 rotation 家族之外的歷史分頁——這只是「近期發生了什麼」的即時視圖，不是完整歷史日誌瀏覽器；掃描範圍固定在 `service.log` 目前檔案＋其 `log_backup_count` 份備份，本身就是有界的。
+- 檔案讀取在背景執行緒進行（`asyncio.to_thread`），不會阻塞事件迴圈或其他並行的 HTTP／WS 請求。
 
 ## WebSocket：v0.1
 

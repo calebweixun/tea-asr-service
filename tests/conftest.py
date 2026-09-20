@@ -77,6 +77,8 @@ def build_client(
     allow_lan: bool = False,
     extra_allowed_hosts: tuple[str, ...] = (),
     rate_limiter: Any = None,
+    paths: Any = None,
+    log_backup_count: int = 3,
 ) -> TestClient:
     app = create_app(
         Path("unused"),
@@ -89,9 +91,11 @@ def build_client(
             max_total_connections=max_total_connections,
             allow_lan=allow_lan,
             extra_allowed_hosts=extra_allowed_hosts,
+            log_backup_count=log_backup_count,
         ),
         vad_model=vad,
         rate_limiter=rate_limiter,
+        paths=paths,
     )
     # The service only ever binds 127.0.0.1 (docs/03-architecture.md), and
     # HostValidationMiddleware enforces that Host allowlist on every HTTP

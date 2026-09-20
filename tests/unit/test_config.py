@@ -145,6 +145,40 @@ def test_extra_allowed_hosts_from_env_are_split_and_trimmed() -> None:
     assert config.extra_allowed_hosts == ("mymac.tailnet.ts.net", "other-host")
 
 
+def test_log_retention_defaults_are_bounded() -> None:
+    config = ServiceConfig()
+    assert config.log_level == "info"
+    assert config.log_max_bytes == 5 * 1024 * 1024
+    assert config.log_backup_count == 3
+    # Errors get more retained history than routine info traffic, on purpose
+    # (see the field's docstring): rarer events, same byte budget, more time.
+    assert config.log_error_backup_count > config.log_backup_count
+
+
+def test_log_retention_is_configurable_by_env() -> None:
+    config = ServiceConfig.load(
+        env={
+            "TEA_ASR_LOG_LEVEL": "DEBUG",
+            "TEA_ASR_LOG_MAX_BYTES": "1048576",
+            "TEA_ASR_LOG_BACKUP_COUNT": "5",
+            "TEA_ASR_LOG_ERROR_BACKUP_COUNT": "20",
+        }
+    )
+    assert config.log_level == "debug"
+    assert config.log_max_bytes == 1048576
+    assert config.log_backup_count == 5
+    assert config.log_error_backup_count == 20
+
+
+def test_log_retention_is_configurable_by_file(tmp_path: Path) -> None:
+    paths = app_paths(tmp_path)
+    paths.support.mkdir(parents=True)
+    paths.config_file.write_text('[service]\nlog_level = "warning"\nlog_backup_count = 1\n')
+    config = ServiceConfig.load(paths, env={})
+    assert config.log_level == "warning"
+    assert config.log_backup_count == 1
+
+
 def test_extra_allowed_hosts_from_file_become_a_tuple(tmp_path: Path) -> None:
     paths = app_paths(tmp_path)
     paths.support.mkdir(parents=True)

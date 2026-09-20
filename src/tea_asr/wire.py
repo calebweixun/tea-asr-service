@@ -224,6 +224,28 @@ class QueueStatus(ServerModel):
     max_waiting_samples: int
 
 
+class LogEntry(ServerModel):
+    ts: str
+    level: str
+    logger: str
+    message: str
+    #: Structured fields the call site passed to `tea_asr.logs.event()`,
+    #: minus `tea_asr.logs.FORBIDDEN_KEYS` (already stripped at write time by
+    #: `JsonFormatter`, stripped again here on read as defense in depth).
+    fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class LogsResponse(ServerModel):
+    items: list[LogEntry]
+    count: int
+    #: The `limit` this response actually honored (echoes the request; the
+    #: query parameter itself is capped at `tea_asr.logs.MAX_LOG_EVENTS`).
+    limit: int
+    #: True when more matching events exist beyond `limit` — ask again with
+    #: a larger (still capped) `limit` rather than assuming this is all there is.
+    has_more: bool
+
+
 # --- WebSocket: client control events ---------------------------------------
 
 

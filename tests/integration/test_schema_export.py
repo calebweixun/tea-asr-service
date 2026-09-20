@@ -29,6 +29,7 @@ def test_openapi_documents_the_error_envelope() -> None:
         "/readyz",
         "/v1/capabilities",
         "/v1/status",
+        "/v1/logs",
         "/v1/transcriptions",
     }
 

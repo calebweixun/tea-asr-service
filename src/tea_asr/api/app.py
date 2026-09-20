@@ -8,7 +8,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from fastapi import Depends, FastAPI, Header, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
@@ -23,9 +23,9 @@ from tea_asr.api.stream import (
     private_use_warnings,
     run_stream,
 )
-from tea_asr.config import ServiceConfig, TokenAuthenticator
+from tea_asr.config import AppPaths, ServiceConfig, TokenAuthenticator
 from tea_asr.errors import ApiError
-from tea_asr.logs import event
+from tea_asr.logs import MAX_LOG_EVENTS, event, read_recent_events, split_log_payload
 from tea_asr.model_spec import TEA_ASR_1_1_MLX_4BIT
 from tea_asr.rate_limit import AuthRateLimiter
 from tea_asr.scheduler import Scheduler
@@ -36,6 +36,8 @@ from tea_asr.wire import (
     CapabilityFeatures,
     CapabilityLimits,
     ErrorEnvelope,
+    LogEntry,
+    LogsResponse,
     QueueStatus,
     Segment,
     StatusResponse,
@@ -209,6 +211,7 @@ def create_app(
     vad_model: Any = _AUTO_VAD,
     token_authenticator: TokenAuthenticator | None = None,
     rate_limiter: AuthRateLimiter | None = None,
+    paths: AppPaths | None = None,
 ) -> FastAPI:
     # A fixed `token` string (tests, `export-schemas`) is checked with a
     # constant-time comparison and never touches the filesystem. Otherwise a
@@ -225,6 +228,7 @@ def create_app(
         token_matches = authenticator.matches
     limiter = rate_limiter or AuthRateLimiter()
     settings = config or ServiceConfig.from_env()
+    log_paths = paths or AppPaths.macos_default()
     host_allowed = make_host_allowlist(
         allow_lan=settings.allow_lan, extra_hosts=frozenset(settings.extra_allowed_hosts)
     )
@@ -432,6 +436,46 @@ def create_app(
                 max_waiting_samples=scheduler.max_waiting_samples,
             ),
         )
+
+    @app.get("/v1/logs", dependencies=[Depends(authorize)])
+    async def logs(
+        level: Literal["debug", "info", "warning", "error"] | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=MAX_LOG_EVENTS),
+    ) -> LogsResponse:
+        """Recent structured events for a log page, newest first.
+
+        `level` (when given) is a *minimum* severity: `level=warning` returns
+        warning and error, not warning alone. `limit` is hard-capped at
+        `MAX_LOG_EVENTS` by the query validation above — a request for more
+        is rejected outright (422) rather than silently truncated, so a
+        client can never mistake "we capped this" for "there were only this
+        many". There is no `before`/`since` pagination in v0.1: this is a
+        recent-activity view, not a historical log browser (docs/06 #6 —
+        do not claim a capability that is not implemented).
+
+        File I/O runs in a worker thread via `asyncio.to_thread`, so it never
+        blocks the event loop the WS session and other HTTP routes share.
+        """
+
+        raw = await asyncio.to_thread(
+            read_recent_events,
+            log_paths.log_file,
+            level=level,
+            limit=limit + 1,
+            backup_count=settings.log_backup_count,
+        )
+        has_more = len(raw) > limit
+        items = [
+            LogEntry(
+                ts=str(payload.get("ts", "")),
+                level=str(payload.get("level", "")),
+                logger=str(payload.get("logger", "")),
+                message=str(payload.get("message", "")),
+                fields=split_log_payload(payload),
+            )
+            for payload in raw[:limit]
+        ]
+        return LogsResponse(items=items, count=len(items), limit=limit, has_more=has_more)
 
     @app.websocket("/v1/stream")
     async def stream(websocket: WebSocket) -> None:
