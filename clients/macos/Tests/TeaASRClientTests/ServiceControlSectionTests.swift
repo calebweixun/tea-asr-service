@@ -15,10 +15,16 @@ final class ServiceControlSectionTests: XCTestCase {
         tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ServiceControlSectionTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        // Defensive: `ServiceControl.lastManagedServeProcess` is shared,
+        // static state (see its doc comment), so a leftover handle from an
+        // earlier test — in this suite or another — must never leak into a
+        // test that expects nothing to be managed yet.
+        ServiceControl.lastManagedServeProcess = nil
     }
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: tempDirectory)
+        ServiceControl.lastManagedServeProcess = nil
     }
 
     // MARK: - Settings page: button state reflects the real process state
@@ -222,6 +228,36 @@ final class ServiceControlSectionTests: XCTestCase {
         selectLogsTab(.serviceOutput, in: controller)
 
         XCTAssertTrue(controller.debugLabelTexts().contains(where: { $0.contains("尚未啟動服務") }))
+    }
+
+    /// The actual bug report end-to-end: a service started from the menu
+    /// bar goes through `ServiceControl.start(executable:)`, never through
+    /// this controller's own `toggleManagedService`, so `debugManagedService`
+    /// (this window's local `managedService`) is `nil` here — exactly as it
+    /// would be for a real menu-bar-started service. The Logs page must
+    /// still render live output by falling back to
+    /// `ServiceControl.lastManagedServeProcess`, the shared handle `start`
+    /// now populates.
+    @MainActor
+    func testServiceOutputTabRendersOutputForAServiceStartedViaTheMenuBarsFireAndForgetPath() throws {
+        let script = try makeExecutableScript(body: "#!/bin/sh\necho 'from the menu bar'\nsleep 5\n")
+        try ServiceControl.start(executable: script)
+        defer { ServiceControl.lastManagedServeProcess?.terminate() }
+
+        let controller = makeController(serviceExecutable: script.path)
+        XCTAssertNil(controller.debugManagedService, "this window never touched ServiceControl.start itself")
+
+        let deadline = Date().addingTimeInterval(3)
+        while ServiceControl.lastManagedServeProcess?.output.snapshot().lines.isEmpty != false
+            && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+
+        controller.show(section: .logs)
+        selectLogsTab(.serviceOutput, in: controller)
+
+        XCTAssertEqual(controller.debugServiceOutputText?.contains("from the menu bar"), true)
+        XCTAssertFalse(controller.debugLabelTexts().contains(where: { $0.contains("尚未啟動服務") }))
     }
 
     // MARK: - Helpers

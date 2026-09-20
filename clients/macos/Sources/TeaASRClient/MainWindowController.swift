@@ -1085,6 +1085,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         )
         stripTrailingPunctuation.identifier = NSUserInterfaceItemIdentifier("stripTrailingPunctuation")
         stripTrailingPunctuation.state = settings.stripTrailingPunctuation ? .on : .off
+        let spokenSymbols = NSButton(
+            checkboxWithTitle: "念出符號名稱時打出符號（例如「逗號」→「，」）",
+            target: self,
+            action: #selector(saveSettings(_:))
+        )
+        spokenSymbols.identifier = NSUserInterfaceItemIdentifier("spokenSymbols")
+        spokenSymbols.state = settings.spokenSymbols ? .on : .off
 
         // Dynamic status only now — see `shortcutInfo` above for the static
         // "按一下快捷鍵按鈕即可修改" usage tip that used to be appended here.
@@ -1105,6 +1112,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             [NSGridCell.emptyContentView, autoInsert],
             [NSGridCell.emptyContentView, preview],
             [NSGridCell.emptyContentView, stripTrailingPunctuation],
+            [NSGridCell.emptyContentView, spokenSymbols],
         ])
         let buttonGrid = settingsGrid([[NSGridCell.emptyContentView, buttons]])
 
@@ -1553,7 +1561,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                 }
             }
 
-            let managed = managedService
+            // This controller's own `managedService` (set only by the
+            // Settings page's start button) is checked first; if the
+            // service was instead started from the menu bar's fire-and-
+            // forget `ServiceControl.start(executable:)`, that path stashes
+            // its handle in `ServiceControl.lastManagedServeProcess` for
+            // exactly this fallback — see that property's doc comment for
+            // why this is still safe to only ever read, never terminate.
+            let managed = managedService ?? ServiceControl.lastManagedServeProcess
             let statusText = ServiceOutputPresentation.statusText(
                 isManaged: managed != nil,
                 isRunning: managed?.isRunning == true,
@@ -1892,6 +1907,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if let stripTrailingPunctuation = controls.stripTrailingPunctuation {
             settings.stripTrailingPunctuation = stripTrailingPunctuation.state == .on
         }
+        if let spokenSymbols = controls.spokenSymbols {
+            settings.spokenSymbols = spokenSymbols.state == .on
+        }
         if let stopServiceOnQuit = controls.stopServiceOnQuit {
             settings.stopServiceOnQuit = stopServiceOnQuit.state == .on
         }
@@ -1962,6 +1980,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         inputChannel: NSPopUpButton?, shortcut: ShortcutButton?,
         interactionMode: NSPopUpButton?, feedback: NSButton?,
         serviceExecutable: NSTextField?, stripTrailingPunctuation: NSButton?,
+        spokenSymbols: NSButton?,
         stopServiceOnQuit: NSButton?
     ) {
         var fields: [String: NSControl] = [:]
@@ -1990,6 +2009,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             // distinct identifier is what actually keeps them apart.
             fields["serviceExecutable"] as? NSTextField,
             fields["stripTrailingPunctuation"] as? NSButton,
+            fields["spokenSymbols"] as? NSButton,
             fields["stopServiceOnQuit"] as? NSButton
         )
     }

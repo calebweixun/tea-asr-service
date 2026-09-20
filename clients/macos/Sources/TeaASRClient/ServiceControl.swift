@@ -84,48 +84,43 @@ enum ServiceControl {
         }
     }
 
+    /// The most recently launched `serve` process started via
+    /// `start(executable:)` — the menu bar's fire-and-forget path, whose own
+    /// caller (`AppController`) never keeps the handle, because it never
+    /// wanted control over it (see `ServiceQuitPolicy`).
+    ///
+    /// This exists solely so the Logs page's "服務輸出" tab has something to
+    /// render when the service was started that way instead of from the
+    /// Settings page's own start/stop button (which stores the
+    /// `launchService(executable:)` handle it gets back directly, and is
+    /// checked first — see `MainWindowController`'s use of this property).
+    /// Before this, `start(executable:)` discarded its `Process` the moment
+    /// the crash-on-start check passed — stdout went to `/dev/null` and only
+    /// a crash's stderr was ever read — so a service started from the menu
+    /// bar produced no output for that tab to show, not because output
+    /// wasn't there, but because nothing captured it.
+    ///
+    /// Deliberately **read-only** for display: nothing here ever calls
+    /// `terminate()` on it, and `ServiceQuitPolicy`/the app's quit path never
+    /// consult it, so a menu-bar-started service still cannot be stopped by
+    /// this app on quit or from the Settings button — the safety property
+    /// that matters (never touch a process by anything other than a handle a
+    /// caller explicitly asked to control) is unaffected.
+    static var lastManagedServeProcess: ManagedProcess?
+
     /// Launch the service detached, so quitting the app does not kill it.
     ///
-    /// Unlike the old version, this does not silently trust `Process.run()`
-    /// succeeding: a missing file, a non-executable file, and a process that
-    /// crashes immediately after starting (bad arguments, a corrupt model
-    /// path, …) all used to look identical to "started fine" from here. The
-    /// brief post-launch check trades a small, one-time, user-initiated delay
-    /// for turning that silent failure into a message that says what broke.
+    /// This is now a thin wrapper around `launchService`: same discovery/
+    /// crash-on-start checks, same combined stdout/stderr capture. The
+    /// returned handle is not kept by this method's own caller (the menu bar
+    /// action never wanted control over it — see `ServiceQuitPolicy`), but it
+    /// is stashed in `lastManagedServeProcess` so the Logs page can still show
+    /// its output. Before this, this method kept no handle at all — stdout
+    /// went to `/dev/null` and only a crash's stderr was ever read — which is
+    /// the direct reason the Logs page's "服務輸出" tab was empty whenever the
+    /// service was started this way.
     static func start(executable: URL) throws {
-        guard FileManager.default.fileExists(atPath: executable.path) else {
-            throw ControlError.executableMissing(path: executable.path)
-        }
-        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
-            throw ControlError.notExecutable(path: executable.path)
-        }
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = ["serve"]
-        process.standardOutput = FileHandle.nullDevice
-        let errorPipe = Pipe()
-        process.standardError = errorPipe
-        try process.run()
-        // Give an immediate crash-on-start a moment to actually happen before
-        // reporting success. A healthy `serve` process stays alive for the
-        // service's whole lifetime, so anything that exits within this window
-        // is a launch failure, not a normal lifecycle transition. Polled
-        // rather than one fixed sleep so a crash is caught almost
-        // immediately while a busy machine still gets the rest of the
-        // window before this concludes the process stayed up on purpose
-        // (see `launchService`'s identical reasoning below).
-        let deadline = Date().addingTimeInterval(1.2)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.02)
-        }
-        guard !process.isRunning else { return }
-        let data = errorPipe.fileHandleForReading.availableData
-        let message = String(decoding: data, as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        throw ControlError.exitedImmediately(
-            status: process.terminationStatus,
-            message: message.isEmpty ? nil : message
-        )
+        lastManagedServeProcess = try launchService(executable: executable)
     }
 
     @discardableResult
@@ -224,6 +219,16 @@ enum ServiceControl {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
+        // `tea-asr` is a Python entry point, and CPython buffers stdout in
+        // large blocks whenever it isn't attached to a terminal — which a
+        // `Pipe` never is. Without this, the readability handler below could
+        // sit silent for a long time (or until the process exits and flushes
+        // on its way out) even though the process is actively logging, which
+        // looked identical to "nothing captured" from the Logs page. This
+        // does not change what gets logged, only how promptly it arrives.
+        var environment = ProcessInfo.processInfo.environment
+        environment["PYTHONUNBUFFERED"] = "1"
+        process.environment = environment
         let managed = ManagedProcess(process: process, outputCapacity: outputCapacity)
         let pipe = Pipe()
         process.standardOutput = pipe

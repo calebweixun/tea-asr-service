@@ -264,16 +264,21 @@ final class TranscriptProcessingTests: XCTestCase {
         XCTAssertTrue(result.appliedSteps.isEmpty)
     }
 
-    func testStripTrailingPunctuationSettingDefaultsToOffAndPersists() throws {
+    /// Flipped from off-by-default to on-by-default: the model appending a
+    /// trailing full stop the user never spoke was reported twice, so this
+    /// is no longer a silent opt-in (see `Settings.stripTrailingPunctuation`'s
+    /// doc comment). The setting must still persist an explicit override in
+    /// either direction.
+    func testStripTrailingPunctuationSettingDefaultsToOnAndPersistsAnExplicitOverride() throws {
         let suiteName = "TeaASRClientTests.StripTrailingPunctuation.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let settings = Settings(defaults: defaults)
-        XCTAssertFalse(settings.stripTrailingPunctuation)
+        XCTAssertTrue(settings.stripTrailingPunctuation)
 
-        settings.stripTrailingPunctuation = true
-        XCTAssertTrue(Settings(defaults: defaults).stripTrailingPunctuation)
+        settings.stripTrailingPunctuation = false
+        XCTAssertFalse(Settings(defaults: defaults).stripTrailingPunctuation)
     }
 
     func testTranscriptProcessorDefaultInitReadsLiveSettingValue() throws {
@@ -281,6 +286,7 @@ final class TranscriptProcessingTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let settings = Settings(defaults: defaults)
+        settings.stripTrailingPunctuation = false
 
         let processor = TranscriptProcessor(
             isTrailingPunctuationStripEnabled: { settings.stripTrailingPunctuation }
@@ -293,6 +299,162 @@ final class TranscriptProcessingTests: XCTestCase {
 
         let afterToggle = processor.process(rawTranscript: "今天天氣很好。")
         XCTAssertEqual(afterToggle.cleanedText, "今天天氣很好")
+    }
+
+    // MARK: - Trailing punctuation strip: now on by default
+
+    func testStripTrailingPunctuationIsOnByDefaultAndDoesNotAffectRawTranscript() {
+        let raw = "今天天氣很好。"
+
+        let result = TranscriptProcessor().process(rawTranscript: raw)
+
+        XCTAssertEqual(result.rawTranscript, raw, "rawTranscript must stay byte-for-byte identical to the server text")
+        XCTAssertEqual(result.cleanedText, "今天天氣很好")
+        XCTAssertEqual(result.pasteText, "今天天氣很好")
+        XCTAssertEqual(result.appliedSteps, ["stripTrailingPunctuation"])
+    }
+
+    // MARK: - Spoken symbol names
+
+    func testSpokenSymbolsReplacesEveryEntryInTheBuiltInTable() {
+        let rule = SpokenSymbolReplacementRule()
+        let expectations: [String: String] = [
+            "逗號": "，",
+            "句號": "。",
+            "問號": "？",
+            "驚嘆號": "！",
+            "感嘆號": "！",
+            "冒號": "：",
+            "分號": "；",
+            "頓號": "、",
+            "左括號": "（",
+            "開括號": "（",
+            "右括號": "）",
+            "閉括號": "）",
+            "括號": "（）",
+            "左引號": "「",
+            "開引號": "「",
+            "右引號": "」",
+            "閉引號": "」",
+            "引號": "「」",
+            "破折號": "—",
+            "刪節號": "…",
+            "省略號": "…",
+            "換行": "\n",
+            "換行符": "\n",
+            "新段落": "\n\n",
+            "換段": "\n\n",
+        ]
+        XCTAssertEqual(SpokenSymbolReplacementRule.table.count, expectations.count, "table drifted from this test's coverage")
+        for (name, mark) in expectations {
+            XCTAssertEqual(rule.apply(to: "前面\(name)後面"), "前面\(mark)後面", "「\(name)」should become「\(mark)」")
+        }
+    }
+
+    func testSpokenSymbolsReplacesAStandaloneNameMidSentence() {
+        let rule = SpokenSymbolReplacementRule()
+
+        XCTAssertEqual(rule.apply(to: "你好逗號很高興認識你"), "你好，很高興認識你")
+    }
+
+    /// A directional name ("左括號") must win over the shorter generic name
+    /// ("括號") it contains as a suffix — otherwise scanning would emit a
+    /// stray "左" followed by the generic pair.
+    func testSpokenSymbolsLongestMatchWinsOverAShorterNameItContains() {
+        let rule = SpokenSymbolReplacementRule()
+
+        XCTAssertEqual(rule.apply(to: "請幫我打左括號"), "請幫我打（")
+        XCTAssertEqual(rule.apply(to: "請幫我打括號"), "請幫我打（）")
+    }
+
+    /// The one deterministic mitigation this rule applies: a name quoted in
+    /// `「」`/`『』`/curly or ASCII quotes is almost certainly being talked
+    /// *about*, not spoken as a command, so it is left alone.
+    func testSpokenSymbolsSkipsMatchesInsideQuotationMarks() {
+        let rule = SpokenSymbolReplacementRule()
+
+        XCTAssertEqual(rule.apply(to: "他說「逗號」是最常用的標點"), "他說「逗號」是最常用的標點")
+        XCTAssertEqual(rule.apply(to: "老師說 \"句號\" 用來結束句子"), "老師說 \"句號\" 用來結束句子")
+    }
+
+    /// Documents the known, accepted limitation (see
+    /// `SpokenSymbolReplacementRule`'s doc comment and
+    /// `Settings.spokenSymbols`'s doc comment): outside of quotation marks,
+    /// there is no local, deterministic way to tell a genuine, literal use of
+    /// the word "逗號" apart from a command asking for a comma — both look
+    /// identical as plain text. This is why the rule ships off by default.
+    func testSpokenSymbolsMisfiresOnAGenuineUnquotedUseOfTheWordItself() {
+        let rule = SpokenSymbolReplacementRule()
+
+        XCTAssertEqual(rule.apply(to: "逗號的意思是用來分隔子句"), "，的意思是用來分隔子句")
+    }
+
+    func testSpokenSymbolsDisabledByDefaultLeavesProcessorAStrictNoOp() {
+        let raw = "你好逗號世界"
+
+        let result = TranscriptProcessor().process(rawTranscript: raw)
+
+        XCTAssertEqual(result.cleanedText, raw)
+        XCTAssertTrue(result.appliedSteps.isEmpty)
+    }
+
+    func testSpokenSymbolsEnabledAffectsCleanedAndPasteTextButNotRawTranscript() {
+        let raw = "你好逗號世界"
+
+        let result = TranscriptProcessor(isSpokenSymbolsEnabled: { true }).process(rawTranscript: raw)
+
+        XCTAssertEqual(result.rawTranscript, raw)
+        XCTAssertEqual(result.cleanedText, "你好，世界")
+        XCTAssertEqual(result.pasteText, "你好，世界")
+        XCTAssertEqual(result.appliedSteps, ["spokenSymbols"])
+    }
+
+    func testSpokenSymbolsSettingDefaultsToOffAndPersists() throws {
+        let suiteName = "TeaASRClientTests.SpokenSymbols.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = Settings(defaults: defaults)
+        XCTAssertFalse(settings.spokenSymbols)
+
+        settings.spokenSymbols = true
+        XCTAssertTrue(Settings(defaults: defaults).spokenSymbols)
+    }
+
+    // MARK: - Execution order between the two rules
+
+    /// Pins the order decision itself: trailing-punctuation strip must run
+    /// *before* spoken-symbol replacement. If the order were reversed, a
+    /// spoken "句號" at the very end of an utterance would first become "。"
+    /// and then have that just-inserted period immediately stripped back off
+    /// by the (now default-on) trailing strip rule — silently discarding the
+    /// exact symbol the user asked to type. Running strip first means it
+    /// only ever sees punctuation the ASR model produced on its own; the
+    /// symbol this rule inserts on the user's explicit request is never
+    /// touched, because strip has already run by the time it appears.
+    func testTrailingPunctuationStripRunsBeforeSpokenSymbolReplacement() {
+        let raw = "你好句號"
+
+        let result = TranscriptProcessor(
+            isTrailingPunctuationStripEnabled: { true },
+            isSpokenSymbolsEnabled: { true }
+        ).process(rawTranscript: raw)
+
+        // Wrong order (replace, then strip) would produce "你好" — the
+        // period the user explicitly asked for would vanish. Correct order
+        // keeps it.
+        XCTAssertEqual(result.cleanedText, "你好。")
+        XCTAssertEqual(result.appliedSteps, ["spokenSymbols"], "strip ran but found nothing to remove, so only the replacement is recorded")
+    }
+
+    /// Same pin, but with both defaults now on (`stripTrailingPunctuation`
+    /// defaults to true, `spokenSymbols` still defaults to false) — exercises
+    /// the production default wiring end to end, not just the overridden
+    /// closures above.
+    func testTrailingPunctuationStripRunsBeforeSpokenSymbolReplacementWithBothEnabledViaDefaultInit() {
+        let result = TranscriptProcessor(isSpokenSymbolsEnabled: { true }).process(rawTranscript: "你好句號")
+
+        XCTAssertEqual(result.cleanedText, "你好。")
     }
 
     private struct ReplacementRule: TranscriptProcessingRule {
