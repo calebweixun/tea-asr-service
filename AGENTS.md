@@ -19,6 +19,25 @@ codex exec -m gpt-5.6-luna -c model_reasoning_effort=max -s workspace-write "<�
 - 跑很久，用背景執行並把輸出導到檔案。
 - codex 是獨立 context，正好可以當「不自驗」的產出方；驗收仍由上游自己重跑 build／test 與截圖確認，不直接採信它的回報。
 - 多個 agent 併行時，在派工單裡明確列出**允許修改**與**嚴禁修改**的檔案清單，否則會互相覆蓋。
+
+### 怎麼呼叫 gemini-3.8-flash
+
+這台機器也裝了 agy CLI（`~/.local/bin/agy`，v1.2.7）。模型名稱把 effort 內建在名字裡，用 `agy models` 看完整清單，常用的是 `gemini-3.8-flash-high` / `-medium` / `-low`。
+
+```bash
+agy --model gemini-3.8-flash-high --mode accept-edits -p="<派工內容>"
+```
+
+- **flag 順序有講究**：`-p` 要用 `-p="..."` 附值，`--model` 放在 `-p` 前面，否則 `-p` 會把 `--model` 當成 prompt。
+- `--mode accept-edits` 讓它可以改檔案，`--mode plan` 只規劃不動手。
+- headless（`-p`）模式下無法互動核准工具權限，**需要事先在 agy 的 `settings.json` 的 `permissions.allow` 加白名單**；否則工具呼叫會被自動拒絕，結果是「no output produced」。不要用 `--dangerously-skip-permissions` 繞過。
+
+### 誰做什麼
+
+- **高階模型（主對話／orchestrator）負責規劃、派工、驗收、整合、回報，不下場實作。**
+- **實作交給 `gpt-5.6-luna`（codex，max reasoning）或 `gemini-3.8-flash`（agy）。**
+- 選誰：需要推理的（診斷 bug、架構取捨、需求有歧義）給 luna max；模式已知的機械修改（改名、套用既有慣例、批次調整）給 gemini flash。
+- 驗收一律由派工方自己重跑 build／test／截圖確認，不直接採信實作方的回報。
 - Keep delegated work scoped, independently verifiable, and reported back to the root agent before integration. Do not claim completion without running appropriate validation.
 
 ## Codebase discovery
