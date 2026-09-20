@@ -878,8 +878,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         interactionMode.target = self
         interactionMode.action = #selector(saveSettings(_:))
 
+        // Read-only: reflects the address/port already saved in `settings` and
+        // whatever the last service probe found, both already available on
+        // `appState`. It never invents a field the server doesn't expose.
+        let connectionSummary = stableLabel(font: .systemFont(ofSize: 13), maxLines: 2, color: .secondaryLabelColor)
         let grid = settingsGrid([
-            [settingsLabel("服務位址"), host],
+            [settingsLabel("連線狀態"), connectionSummary],
+            [settingsLabel("服務位址（本機）"), host],
             [settingsLabel("Port"), port],
             [settingsLabel("Token"), token],
             [settingsLabel("快捷鍵"), hotKey],
@@ -906,6 +911,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         preview.identifier = NSUserInterfaceItemIdentifier("preview")
         preview.state = settings.revisablePreview ? .on : .off
 
+        let addressHint = NSTextField(
+            wrappingLabelWithString: "這個 app 本身就是服務所在的電腦，服務位址預設是本機（127.0.0.1）。"
+                + "只有在要連到另一台主機上執行的服務時才需要修改。"
+        )
+        addressHint.textColor = .secondaryLabelColor
+        addressHint.font = .systemFont(ofSize: 12)
+        let lanHint = NSTextField(
+            wrappingLabelWithString: "尚未開放外部（區網）連入：TLS 加密、身分授權與流量限制都還沒有實作，"
+                + "貿然開放會讓區網內任何裝置未經驗證就能存取語音與逐字稿，因此這個版本只能連本機。"
+        )
+        lanHint.textColor = .secondaryLabelColor
+        lanHint.font = .systemFont(ofSize: 12)
         let tokenHint = NSTextField(
             wrappingLabelWithString: "Token 只寫入 ~/Library/Application Support/TEA ASR/token，不會放進偏好設定。"
         )
@@ -928,7 +945,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let buttonGrid = settingsGrid([[NSGridCell.emptyContentView, buttons]])
 
         let view = sectionStack(views: [
-            group(title: "服務連線", views: [grid, tokenHint]),
+            group(title: "服務連線", views: [grid, addressHint, tokenHint, lanHint]),
             group(title: "音訊輸入", views: [audioGrid]),
             group(title: "輸入行為", views: [shortcutHint, behaviourGrid]),
             buttonGrid,
@@ -943,6 +960,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                 || shortcutStatus.contains("占用")
                 ? .systemRed
                 : .secondaryLabelColor
+            let summary = connectionSummaryText()
+            if connectionSummary.stringValue != summary { connectionSummary.stringValue = summary }
         }
         update()
         return SectionRuntime(view: view, update: update)
@@ -1795,6 +1814,28 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             return "待命（\(settings.host):\(settings.port)）"
         default:
             return snapshot.readyzOK ? "可用（\(settings.host):\(settings.port)）" : "未就緒"
+        }
+    }
+
+    /// Settings-page connection summary. Unlike `serverSummary()` (used on
+    /// Overview, where the address is redundant with the settings page) this
+    /// always leads with the address/port actually in effect, since the whole
+    /// point of this row is "is this the machine I think it is, and is it
+    /// answering". It draws only on state `appState`/`settings` already have
+    /// — the server exposes no additional connection metadata to show here.
+    private func connectionSummaryText() -> String {
+        let address = "\(settings.host):\(settings.port)"
+        if let error = appState.serviceError {
+            return "\(address) · \(error.localizedDescription)"
+        }
+        guard let snapshot = appState.serviceSnapshot else {
+            return appState.serviceReachable == false ? "\(address) · 無法連線" : "\(address) · 檢查中…"
+        }
+        switch snapshot.status.modelState.lowercased() {
+        case "idle_unloaded", "standby":
+            return "\(address) · 已連線，待命中"
+        default:
+            return snapshot.readyzOK ? "\(address) · 已連線，服務就緒" : "\(address) · 已連線，尚未就緒"
         }
     }
 
