@@ -243,6 +243,36 @@ enum ServiceControl {
     }
 }
 
+/// Whether quitting the app should also stop the service.
+///
+/// The only process this can ever act on is one this app launched and still
+/// holds a live `ManagedProcess` handle for. A service started by a
+/// LaunchAgent, from a developer's terminal, or by the menu bar's own
+/// fire-and-forget `start(executable:)` (which keeps no handle) has no handle
+/// here, so it is left alone no matter what the setting says — this app never
+/// looks for something that merely *resembles* `tea-asr serve`.
+enum ServiceQuitPolicy {
+    enum Action: Equatable {
+        case stopManagedProcess
+        case leaveRunning
+    }
+
+    /// - Parameters:
+    ///   - stopOnQuit: the user's `stopServiceOnQuit` setting.
+    ///   - hasManagedProcess: this app holds a handle to a service process.
+    ///   - managedProcessIsRunning: that process has not already exited.
+    static func action(
+        stopOnQuit: Bool,
+        hasManagedProcess: Bool,
+        managedProcessIsRunning: Bool
+    ) -> Action {
+        guard stopOnQuit, hasManagedProcess, managedProcessIsRunning else {
+            return .leaveRunning
+        }
+        return .stopManagedProcess
+    }
+}
+
 /// A child process this app started and holds a live handle to, as opposed
 /// to a `tea-asr serve` instance that might be reachable for any other
 /// reason (the menu bar's own launch, a LaunchAgent, a developer's own

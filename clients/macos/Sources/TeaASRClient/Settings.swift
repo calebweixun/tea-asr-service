@@ -16,6 +16,7 @@ struct Settings {
         static let shortcutModifiers = "dictationShortcutModifiers"
         static let interactionMode = "dictationInteractionMode"
         static let startStopFeedback = "dictationStartStopFeedback"
+        static let stopServiceOnQuit = "stopServiceOnQuit"
     }
 
     private let defaults: UserDefaults
@@ -132,6 +133,21 @@ struct Settings {
     var startStopFeedback: Bool {
         get { defaults.object(forKey: Key.startStopFeedback) as? Bool ?? false }
         nonmutating set { defaults.set(newValue, forKey: Key.startStopFeedback) }
+    }
+
+    /// Stop the local service when the app quits.
+    ///
+    /// Defaults to on, and that is safe precisely because the stop is scoped
+    /// to a process this app launched and still holds a handle to (see
+    /// `ServiceQuitPolicy`). The "keep it resident for OBS" case is a
+    /// LaunchAgent or a terminal-launched service, neither of which this app
+    /// has a handle for, so neither is ever touched. What the default does
+    /// avoid is the opposite surprise: a service started from this app's
+    /// Settings page, holding a 1.2 GB model and the port, outliving the only
+    /// UI that could stop it.
+    var stopServiceOnQuit: Bool {
+        get { defaults.object(forKey: Key.stopServiceOnQuit) as? Bool ?? true }
+        nonmutating set { defaults.set(newValue, forKey: Key.stopServiceOnQuit) }
     }
 
     var streamURL: URL {

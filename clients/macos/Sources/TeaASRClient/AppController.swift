@@ -69,6 +69,10 @@ final class AppController: NSObject, NSApplicationDelegate {
     private let serviceEntry = NSMenuItem()
     private let autoStartEntry = NSMenuItem()
     private var serviceRunning = false
+    /// Last known answer from `ServiceControl.agentInstalled`, refreshed off
+    /// the main thread. `nil` means "not probed yet".
+    private var autoStartInstalled: Bool?
+    private var autoStartProbeInFlight = false
     private var healthTimer: Timer?
     private var accessibilityHintTask: Task<Void, Never>?
 
@@ -169,6 +173,35 @@ final class AppController: NSObject, NSApplicationDelegate {
         capture.stop()
         client.cancel()
         dictationOverlay.hide()
+        stopManagedServiceIfRequested()
+    }
+
+    /// Honours `stopServiceOnQuit`, and only ever for the exact `Process`
+    /// this app launched from the Settings page and still holds a handle to.
+    /// A LaunchAgent, a terminal-launched service, and even this app's own
+    /// menu-bar `啟動服務` (which keeps no handle) are all invisible here and
+    /// are therefore left running — nothing is ever matched by process name.
+    ///
+    /// Only reachable from `applicationWillTerminate`: a `SIGKILL`
+    /// (Force Quit, `kill -9`) or a crash skips it entirely and leaves the
+    /// service up. That is stated in the setting's own help text rather than
+    /// papered over.
+    private func stopManagedServiceIfRequested() {
+        let managed = mainWindow?.managedServiceProcess
+        let action = ServiceQuitPolicy.action(
+            stopOnQuit: settings.stopServiceOnQuit,
+            hasManagedProcess: managed != nil,
+            managedProcessIsRunning: managed?.isRunning == true
+        )
+        guard action == .stopManagedProcess, let managed else { return }
+        managed.terminate()
+        // Bounded wait so the port and the model's memory are actually
+        // released before this process goes away; never an unbounded block on
+        // a child that refuses to exit.
+        let deadline = Date().addingTimeInterval(2.0)
+        while managed.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
     }
 
     /// System Settings changes TCC while this process is suspended in the
@@ -316,8 +349,14 @@ final class AppController: NSObject, NSApplicationDelegate {
         meetingEntry.title = mode == .meeting ? "停止會議記錄" : "開始會議記錄"
         serviceEntry.title = serviceRunning ? "服務執行中" : "啟動服務"
         serviceEntry.isEnabled = !serviceRunning
-        if let binary = executable() {
-            autoStartEntry.state = ServiceControl.agentInstalled(executable: binary) ? .on : .off
+        // Read a cached answer only. `ServiceControl.agentInstalled` spawns
+        // `tea-asr service status` and blocks on `waitUntilExit()`; doing that
+        // here ran a Python CLI synchronously on the main thread inside every
+        // render — including the one `appState.setMode(.dictation)` triggers
+        // on the dictation start path, right before the overlay would have
+        // been shown.
+        if executable() != nil {
+            autoStartEntry.state = (autoStartInstalled ?? false) ? .on : .off
             autoStartEntry.isEnabled = true
         } else {
             autoStartEntry.isEnabled = false
@@ -361,6 +400,25 @@ final class AppController: NSObject, NSApplicationDelegate {
             self.appState.updateService(result)
             self.serviceRunning = self.appState.serviceReachable == true
             self.render()
+        }
+        refreshAutoStartState()
+    }
+
+    /// Re-probes the LaunchAgent state without blocking the main thread, and
+    /// re-renders only when the answer actually changed (so this can be
+    /// driven from the health timer without causing a render loop).
+    private func refreshAutoStartState() {
+        guard !autoStartProbeInFlight, let binary = executable() else { return }
+        autoStartProbeInFlight = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let installed = ServiceControl.agentInstalled(executable: binary)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.autoStartProbeInFlight = false
+                guard self.autoStartInstalled != installed else { return }
+                self.autoStartInstalled = installed
+                self.render()
+            }
         }
     }
 
@@ -412,10 +470,12 @@ final class AppController: NSObject, NSApplicationDelegate {
                 executable: binary, arguments: ["service", installed ? "uninstall" : "install"]
             )
             alert(installed ? "已取消登入時自動啟動" : "已設定登入時自動啟動", output)
+            autoStartInstalled = !installed
         } catch {
             alert("設定失敗", error.localizedDescription)
         }
         render()
+        refreshAutoStartState()
     }
 
     @objc private func showPreferences() {
@@ -451,6 +511,17 @@ final class AppController: NSObject, NSApplicationDelegate {
     private func start(mode newMode: Mode) {
         guard mode == .idle else { stopSession(); return }
         if newMode == .dictation {
+            // Feedback first, before anything that can block or go async: the
+            // Accessibility focus query below, microphone consent, the
+            // process-wide input-device lease
+            // (`AudioInputLeaseCoordinator.handoffTimeout` waits up to a full
+            // second for the level meter to let go) and the audio unit all
+            // sit between here and a working session. `.starting` says
+            // exactly that much and no more — it does not claim recording has
+            // begun. Showing it first is safe: the panel is a nonactivating
+            // one that can never become key, so it does not disturb the
+            // focused target captured on the next line.
+            dictationOverlay.startRequested()
             // Capture before the asynchronous microphone-consent flow can
             // activate our app or its prompt. The target is the app/field that
             // owned focus when this dictation request actually began.
@@ -481,6 +552,9 @@ final class AppController: NSObject, NSApplicationDelegate {
                self.settings.interactionMode == .pushToTalk,
                !self.interactionMachine.active {
                 self.dictationInsertionTarget = nil
+                // The `.starting` overlay was put up on key-down; nothing
+                // will follow it now, so it must not be left on screen.
+                self.dictationOverlay.hide()
                 return
             }
             self.reallyStart(mode: newMode)
@@ -509,6 +583,18 @@ final class AppController: NSObject, NSApplicationDelegate {
                 self.render()
             }
         }
+        var managementWindowWasVisible = false
+        if newMode == .dictation {
+            // Ordered *before* `capture.start` on purpose. This hides the
+            // management window (so TEA ASR cannot become the paste target)
+            // and, in doing so, stops the input level meter — which holds the
+            // process-wide input lease. Doing it afterwards made every
+            // dictation start from an open Settings page wait out
+            // `AudioInputLeaseCoordinator.handoffTimeout` for a device this
+            // app was about to release anyway.
+            managementWindowWasVisible = mainWindow?.window?.isVisible ?? false
+            mainWindow?.hideForDictation()
+        }
         do {
             try capture.start(configuration: settings.audioInputConfiguration)
         } catch {
@@ -518,17 +604,17 @@ final class AppController: NSObject, NSApplicationDelegate {
             appState.setMode(.idle)
             if newMode == .dictation {
                 dictationOverlay.showError(error.localizedDescription)
+                // The window was hidden a moment ago for a session that never
+                // started; put it back exactly where the user left it.
+                if managementWindowWasVisible {
+                    mainWindow?.show(section: .overview)
+                }
             }
             mainWindow?.setStatus("無法開始錄音：\(error.localizedDescription)")
             alert("無法開始錄音", error.localizedDescription)
             return
         }
         if newMode == .dictation {
-            // The final text is inserted into the app that was active before
-            // the user opened TEA ASR. Hiding the management window from every
-            // dictation entry point before the socket can produce a final
-            // prevents TEA ASR from becoming the paste target.
-            mainWindow?.hideForDictation()
             dictationOverlay.begin()
             insertedDictationSegments.removeAll()
             playFeedback(.started)
@@ -722,6 +808,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         if let hotKeyRef {
             UnregisterEventHotKey(hotKeyRef)
             self.hotKeyRef = nil
+            interactionMachine.releaseShortcutLatch()
         }
         hotKeyRegistered = false
         hotKeyRegistrationOutcome = .unavailable
@@ -732,6 +819,13 @@ final class AppController: NSObject, NSApplicationDelegate {
         if let hotKeyRef {
             UnregisterEventHotKey(hotKeyRef)
             self.hotKeyRef = nil
+            // The pending `kEventHotKeyReleased` for a key that is physically
+            // down right now dies with this registration, so the press latch
+            // can never be cleared by a release that will never arrive. This
+            // path runs unprompted — `applicationDidBecomeActive` and its
+            // 1.2 s follow-up both call `applyInteractionSettings()` — so a
+            // stale latch here silently deafens every later shortcut press.
+            interactionMachine.releaseShortcutLatch()
         }
 
         if hotKeyEventHandler == nil {
