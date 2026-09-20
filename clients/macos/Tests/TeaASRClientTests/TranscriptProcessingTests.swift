@@ -153,6 +153,148 @@ final class TranscriptProcessingTests: XCTestCase {
         XCTAssertEqual(TranscriptOutputPolicy.insertionText(from: processed), "C")
     }
 
+    // MARK: - Trailing punctuation strip
+
+    func testStripTrailingPunctuationRemovesIdeographicFullStop() {
+        let rule = TrailingPeriodStripRule()
+
+        XCTAssertEqual(rule.apply(to: "今天天氣很好。"), "今天天氣很好")
+    }
+
+    func testStripTrailingPunctuationRemovesAsciiPeriod() {
+        let rule = TrailingPeriodStripRule()
+
+        XCTAssertEqual(rule.apply(to: "The weather is nice."), "The weather is nice")
+    }
+
+    func testStripTrailingPunctuationRemovesFullWidthLatinPeriod() {
+        let rule = TrailingPeriodStripRule()
+
+        // U+FF0E FULLWIDTH FULL STOP, distinct from U+3002 IDEOGRAPHIC FULL STOP.
+        XCTAssertEqual(rule.apply(to: "今天天氣很好\u{FF0E}"), "今天天氣很好")
+    }
+
+    func testStripTrailingPunctuationLeavesQuestionAndExclamationMarksAlone() {
+        let rule = TrailingPeriodStripRule()
+
+        // The user's report was specifically about the trailing full stop;
+        // "？"/"！" carry intonation this rule deliberately does not touch.
+        XCTAssertEqual(rule.apply(to: "今天天氣好嗎？"), "今天天氣好嗎？")
+        XCTAssertEqual(rule.apply(to: "太棒了！"), "太棒了！")
+    }
+
+    func testStripTrailingPunctuationLeavesInteriorPunctuationAlone() {
+        let rule = TrailingPeriodStripRule()
+
+        XCTAssertEqual(
+            rule.apply(to: "先說結論。再說原因。最後補充。"),
+            "先說結論。再說原因。最後補充"
+        )
+    }
+
+    func testStripTrailingPunctuationDoesNotMisfireOnDecimalNumbers() {
+        let rule = TrailingPeriodStripRule()
+
+        XCTAssertEqual(rule.apply(to: "圓周率大約是 3.14"), "圓周率大約是 3.14")
+        // A bare trailing digit-period, not only one followed by more digits.
+        XCTAssertEqual(rule.apply(to: "版本 5."), "版本 5.")
+    }
+
+    func testStripTrailingPunctuationDoesNotMisfireOnAbbreviations() {
+        let rule = TrailingPeriodStripRule()
+
+        XCTAssertEqual(rule.apply(to: "他任職於 Acme Inc."), "他任職於 Acme Inc.")
+        XCTAssertEqual(rule.apply(to: "請找 Dr."), "請找 Dr.")
+    }
+
+    func testStripTrailingPunctuationHandlesEmptyAndWhitespaceOnlyStrings() {
+        let rule = TrailingPeriodStripRule()
+
+        XCTAssertEqual(rule.apply(to: ""), "")
+        XCTAssertEqual(rule.apply(to: "   "), "   ")
+        XCTAssertEqual(rule.apply(to: "\n\t"), "\n\t")
+    }
+
+    func testStripTrailingPunctuationHandlesPunctuationOnlyStrings() {
+        let rule = TrailingPeriodStripRule()
+
+        XCTAssertEqual(rule.apply(to: "。"), "")
+        XCTAssertEqual(rule.apply(to: "."), "")
+        XCTAssertEqual(rule.apply(to: "？"), "？")
+    }
+
+    func testStripTrailingPunctuationIgnoresTrailingWhitespaceAfterTheMark() {
+        let rule = TrailingPeriodStripRule()
+
+        XCTAssertEqual(rule.apply(to: "今天天氣很好。  "), "今天天氣很好  ")
+    }
+
+    func testStripTrailingPunctuationDisabledByDefaultLeavesProcessorAStrictNoOp() {
+        let raw = "今天天氣很好。"
+
+        let result = TranscriptProcessor(
+            isTrailingPunctuationStripEnabled: { false }
+        ).process(rawTranscript: raw)
+
+        XCTAssertEqual(result.rawTranscript, raw)
+        XCTAssertEqual(result.cleanedText, raw)
+        XCTAssertEqual(result.pasteText, raw)
+        XCTAssertTrue(result.appliedSteps.isEmpty)
+    }
+
+    func testStripTrailingPunctuationEnabledAffectsCleanedAndPasteTextButNotRawTranscript() {
+        let raw = "今天天氣很好。"
+
+        let result = TranscriptProcessor(
+            isTrailingPunctuationStripEnabled: { true }
+        ).process(rawTranscript: raw)
+
+        XCTAssertEqual(result.rawTranscript, raw, "rawTranscript must stay byte-for-byte identical to the server text")
+        XCTAssertEqual(result.cleanedText, "今天天氣很好")
+        XCTAssertEqual(result.pasteText, "今天天氣很好")
+        XCTAssertEqual(result.appliedSteps, ["stripTrailingPunctuation"])
+    }
+
+    func testStripTrailingPunctuationEnabledButNoTrailingMarkRecordsNoStep() {
+        let result = TranscriptProcessor(
+            isTrailingPunctuationStripEnabled: { true }
+        ).process(rawTranscript: "今天天氣很好嗎？")
+
+        XCTAssertEqual(result.cleanedText, "今天天氣很好嗎？")
+        XCTAssertTrue(result.appliedSteps.isEmpty)
+    }
+
+    func testStripTrailingPunctuationSettingDefaultsToOffAndPersists() throws {
+        let suiteName = "TeaASRClientTests.StripTrailingPunctuation.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = Settings(defaults: defaults)
+        XCTAssertFalse(settings.stripTrailingPunctuation)
+
+        settings.stripTrailingPunctuation = true
+        XCTAssertTrue(Settings(defaults: defaults).stripTrailingPunctuation)
+    }
+
+    func testTranscriptProcessorDefaultInitReadsLiveSettingValue() throws {
+        let suiteName = "TeaASRClientTests.StripTrailingPunctuation.Live.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = Settings(defaults: defaults)
+
+        let processor = TranscriptProcessor(
+            isTrailingPunctuationStripEnabled: { settings.stripTrailingPunctuation }
+        )
+
+        let beforeToggle = processor.process(rawTranscript: "今天天氣很好。")
+        XCTAssertEqual(beforeToggle.cleanedText, "今天天氣很好。")
+
+        settings.stripTrailingPunctuation = true
+
+        let afterToggle = processor.process(rawTranscript: "今天天氣很好。")
+        XCTAssertEqual(afterToggle.cleanedText, "今天天氣很好")
+    }
+
     private struct ReplacementRule: TranscriptProcessingRule {
         let identifier: String
         let from: String

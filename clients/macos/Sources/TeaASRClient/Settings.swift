@@ -16,6 +16,7 @@ struct Settings {
         static let shortcutModifiers = "dictationShortcutModifiers"
         static let interactionMode = "dictationInteractionMode"
         static let startStopFeedback = "dictationStartStopFeedback"
+        static let stripTrailingPunctuation = "stripTrailingPunctuation"
     }
 
     private let defaults: UserDefaults
@@ -132,6 +133,16 @@ struct Settings {
     var startStopFeedback: Bool {
         get { defaults.object(forKey: Key.startStopFeedback) as? Bool ?? false }
         nonmutating set { defaults.set(newValue, forKey: Key.startStopFeedback) }
+    }
+
+    /// Removes a trailing sentence-final full stop from recognized text
+    /// (see `TrailingPeriodStripRule`). Off by default: the processing
+    /// pipeline's documented default is a strict no-op, and this changes
+    /// recognized text content rather than presentation, so it stays an
+    /// explicit opt-in rather than a silently-changed default.
+    var stripTrailingPunctuation: Bool {
+        get { defaults.object(forKey: Key.stripTrailingPunctuation) as? Bool ?? false }
+        nonmutating set { defaults.set(newValue, forKey: Key.stripTrailingPunctuation) }
     }
 
     var streamURL: URL {

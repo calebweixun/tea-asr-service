@@ -1056,6 +1056,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         )
         preview.identifier = NSUserInterfaceItemIdentifier("preview")
         preview.state = settings.revisablePreview ? .on : .off
+        let stripTrailingPunctuation = NSButton(
+            checkboxWithTitle: "移除句尾句點（。／.）",
+            target: self,
+            action: #selector(saveSettings(_:))
+        )
+        stripTrailingPunctuation.identifier = NSUserInterfaceItemIdentifier("stripTrailingPunctuation")
+        stripTrailingPunctuation.state = settings.stripTrailingPunctuation ? .on : .off
 
         // Dynamic status only now — see `shortcutInfo` above for the static
         // "按一下快捷鍵按鈕即可修改" usage tip that used to be appended here.
@@ -1075,6 +1082,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             [NSGridCell.emptyContentView, feedback],
             [NSGridCell.emptyContentView, autoInsert],
             [NSGridCell.emptyContentView, preview],
+            [NSGridCell.emptyContentView, stripTrailingPunctuation],
         ])
         let buttonGrid = settingsGrid([[NSGridCell.emptyContentView, buttons]])
 
@@ -1854,6 +1862,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             settings.serviceExecutable = serviceExecutable.stringValue
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        if let stripTrailingPunctuation = controls.stripTrailingPunctuation {
+            settings.stripTrailingPunctuation = stripTrailingPunctuation.state == .on
+        }
         return true
     }
 
@@ -1920,7 +1931,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         autoInsert: NSButton?, preview: NSButton?, inputDevice: NSPopUpButton?,
         inputChannel: NSPopUpButton?, shortcut: ShortcutButton?,
         interactionMode: NSPopUpButton?, feedback: NSButton?,
-        serviceExecutable: NSTextField?
+        serviceExecutable: NSTextField?, stripTrailingPunctuation: NSButton?
     ) {
         var fields: [String: NSControl] = [:]
         func visit(_ view: NSView) {
@@ -1946,7 +1957,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             // happily match it if it shared a key — the dictionary lookup
             // here is keyed on the identifier string, not the type, so a
             // distinct identifier is what actually keeps them apart.
-            fields["serviceExecutable"] as? NSTextField
+            fields["serviceExecutable"] as? NSTextField,
+            fields["stripTrailingPunctuation"] as? NSButton
         )
     }
 
