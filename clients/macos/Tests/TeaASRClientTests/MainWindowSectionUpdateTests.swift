@@ -94,17 +94,141 @@ final class MainWindowSectionUpdateTests: XCTestCase {
         XCTAssertEqual(controller.debugDividerDragRect(), .zero, "the divider must expose no drag hit area")
     }
 
+    /// 驗證音訊電平監看在進入設定頁時啟動、切換到其他頁面停止、視窗關閉時停止。
     @MainActor
-    private func makeController() -> MainWindowController {
+    func testAudioLevelMonitorLifecycleAcrossSectionSwitchAndWindowClose() {
+        let controller = makeController()
+
+        // 預設為 overview，monitor 應處於停止 (idle) 狀態
+        XCTAssertEqual(controller.debugAudioLevelMonitor.state, .idle)
+
+        // 切換至設定頁，monitor 應啟動（非 idle 或已回報權限/失敗狀態）
+        controller.show(section: .settings)
+        XCTAssertGreaterThanOrEqual(controller.debugMonitorStartCount, 1)
+
+        // 切換至操作頁，離開設定頁後 monitor 應停止
+        controller.show(section: .operations)
+        XCTAssertEqual(controller.debugAudioLevelMonitor.state, .idle)
+
+        // 再次切換回設定頁，monitor 應重新啟動
+        let countBeforeReturn = controller.debugMonitorStartCount
+        controller.show(section: .settings)
+        XCTAssertGreaterThan(controller.debugMonitorStartCount, countBeforeReturn)
+
+        // 視窗關閉時，monitor 應停止
+        controller.windowWillClose(Notification(name: NSWindow.willCloseNotification))
+        XCTAssertEqual(controller.debugAudioLevelMonitor.state, .idle)
+    }
+
+    /// 驗證在設定頁中切換輸入裝置或聲道時，電平監看會重新啟動。
+    @MainActor
+    func testAudioLevelMonitorRestartsOnInputDeviceAndChannelSelection() {
+        let controller = makeController()
+        controller.show(section: .settings)
+
+        guard let mountedView = controller.debugMountedSectionView else {
+            XCTFail("設定頁應已載入視圖")
+            return
+        }
+
+        // 尋找 inputDevice 與 inputChannel 控制項
+        guard let inputDevicePopup: NSPopUpButton = findView(identifier: "inputDevice", in: mountedView),
+              let inputChannelPopup: NSPopUpButton = findView(identifier: "inputChannel", in: mountedView) else {
+            XCTFail("找不到 inputDevice 或 inputChannel 控制項")
+            return
+        }
+
+        // 切換輸入裝置時重啟 monitor
+        let countBeforeDeviceChange = controller.debugMonitorStartCount
+        if let target = inputDevicePopup.target, let action = inputDevicePopup.action {
+            _ = target.perform(action, with: inputDevicePopup)
+        }
+        XCTAssertGreaterThan(controller.debugMonitorStartCount, countBeforeDeviceChange, "切換輸入裝置應重啟電平監看")
+
+        // 切換聲道時重啟 monitor
+        let countBeforeChannelChange = controller.debugMonitorStartCount
+        if let target = inputChannelPopup.target, let action = inputChannelPopup.action {
+            _ = target.perform(action, with: inputChannelPopup)
+        }
+        XCTAssertGreaterThan(controller.debugMonitorStartCount, countBeforeChannelChange, "切換聲道應重啟電平監看")
+    }
+
+    /// 驗證設定頁十個 identifier 依然完整保留，且包含 AudioLevelBarView。
+    @MainActor
+    func testSettingsViewRetainsTenIdentifiersAndIncludesAudioLevelBar() {
+        let controller = makeController()
+        controller.show(section: .settings)
+
+        guard let mountedView = controller.debugMountedSectionView else {
+            XCTFail("設定頁應已載入視圖")
+            return
+        }
+
+        let requiredIdentifiers = [
+            "host", "port", "token", "autoInsert", "preview",
+            "inputDevice", "inputChannel", "shortcut", "interactionMode", "feedback"
+        ]
+
+        for id in requiredIdentifiers {
+            let found = findView(identifier: id, in: mountedView) as NSView?
+            XCTAssertNotNil(found, "設定頁必須保留 identifier: \(id)")
+        }
+
+        // 檢查是否包含 AudioLevelBarView
+        var foundBar: AudioLevelBarView?
+        func searchBar(_ view: NSView) {
+            if let bar = view as? AudioLevelBarView {
+                foundBar = bar
+            }
+            view.subviews.forEach(searchBar)
+        }
+        searchBar(mountedView)
+        XCTAssertNotNil(foundBar, "音訊輸入群組中必須包含 AudioLevelBarView")
+        XCTAssertTrue(controller.debugLabelTexts().contains("輸入電平"), "設定頁應有「輸入電平」標籤")
+    }
+
+    /// 驗證 ASR 開始時電平監看停止，ASR 結束回到 idle 時電平監看重啟。
+    @MainActor
+    func testAudioLevelMonitorStopsWhenASRStartsAndRestartsWhenIdle() {
+        let appState = AppState()
+        let controller = makeController(appState: appState)
+        controller.show(section: .settings)
+
+        // 開始 ASR（模式非 idle）
+        appState.setMode(.dictation)
+        controller.refresh()
+        XCTAssertEqual(controller.debugAudioLevelMonitor.state, .idle, "ASR 開始時 monitor 必須停止")
+
+        // ASR 結束回到 idle
+        let countBeforeIdle = controller.debugMonitorStartCount
+        appState.setMode(.idle)
+        controller.refresh()
+        XCTAssertGreaterThan(controller.debugMonitorStartCount, countBeforeIdle, "ASR 結束且在設定頁時 monitor 應重啟")
+    }
+
+    @MainActor
+    private func makeController(appState: AppState = AppState()) -> MainWindowController {
         let suiteName = "MainWindowSectionUpdateTests-\(UUID().uuidString)"
         let settings = Settings(defaults: UserDefaults(suiteName: suiteName)!)
-        let appState = AppState()
         let permissions = PermissionCoordinator(
             platform: FakeSectionUpdateTestPlatform(),
             autoInsert: true,
             requiresInputMonitoring: false
         )
         return MainWindowController(settings: settings, appState: appState, permissions: permissions)
+    }
+
+    @MainActor
+    private func findView<T: NSView>(identifier: String, in root: NSView) -> T? {
+        if root.identifier?.rawValue == identifier, let match = root as? T {
+            return match
+        }
+        for subview in root.subviews {
+            if let found: T = findView(identifier: identifier, in: subview) {
+                return found
+            }
+        }
+        return nil
     }
 }
 

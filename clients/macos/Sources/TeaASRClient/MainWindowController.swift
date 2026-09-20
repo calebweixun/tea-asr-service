@@ -126,6 +126,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private var sectionButtons: [NSButton] = []
     private var selectedSection: Section = .overview
     private var sectionRuntimes: [Section: SectionRuntime] = [:]
+    private let audioLevelMonitor = AudioLevelMonitor(callbackQueue: .main)
+    private let audioLevelBar = AudioLevelBarView()
+    private var isWindowOpen = true
+    #if DEBUG
+    private(set) var monitorStartCount = 0
+    #endif
 
     private enum TranscriptEntryKind {
         case finalText
@@ -204,7 +210,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             guard let self else { return }
             self.refreshPermissionSection()
         }
+        audioLevelMonitor.onState = { [weak self] state in
+            self?.audioLevelBar.setState(state)
+        }
+        audioLevelMonitor.onLevel = { [weak self] sample in
+            self?.audioLevelBar.setLevel(sample)
+        }
         build()
+    }
+
+    deinit {
+        audioLevelMonitor.stop()
     }
 
     @available(*, unavailable)
@@ -368,6 +384,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func show(section: Section = .overview) {
+        isWindowOpen = true
         select(section: section)
         showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -377,11 +394,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// used to start dictation. This is intentionally separate from `show` so
     /// menu-bar/hot-key dictation never activates this window implicitly.
     func hideForDictation() {
+        stopAudioLevelMonitor()
         window?.orderOut(nil)
         NSApp.hide(nil)
     }
 
     func refresh() {
+        if appState.mode != .idle {
+            stopAudioLevelMonitor()
+        } else if selectedSection == .settings && isWindowOpen {
+            if audioLevelMonitor.state == .idle {
+                startAudioLevelMonitor()
+            }
+        }
         // Health polls and client transitions must not rebuild settings fields
         // while the user is editing unsaved values.
         guard selectedSection != .settings else { return }
@@ -391,6 +416,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             permissions.refresh()
         }
         updateSection(selectedSection)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        isWindowOpen = false
+        stopAudioLevelMonitor()
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
@@ -435,6 +465,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func setAudioDiagnostics(_ diagnostics: AudioDiagnostics) {
+        if diagnostics.isRunning {
+            stopAudioLevelMonitor()
+        }
         audioDiagnostics = diagnostics
         // AudioCapture emits one snapshot per tap buffer (can be well over
         // 100/sec). Applying an update is now cheap — it assigns a string to
@@ -543,6 +576,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         // section that displays that state, not only the visible one, so a
         // section can go stale while it is not mounted and must catch up here.
         runtime.update()
+        if selectedSection == .settings {
+            startAudioLevelMonitor()
+        } else {
+            stopAudioLevelMonitor()
+        }
     }
 
     private func sectionRuntime(for section: Section) -> SectionRuntime {
@@ -816,6 +854,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             popup.widthAnchor.constraint(greaterThanOrEqualToConstant: Metrics.fieldWidth).isActive = true
             popup.setContentHuggingPriority(.required, for: .horizontal)
         }
+        audioLevelBar.widthAnchor.constraint(equalToConstant: Metrics.fieldWidth).isActive = true
+        audioLevelBar.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        audioLevelBar.setContentHuggingPriority(.required, for: .horizontal)
         host.identifier = NSUserInterfaceItemIdentifier("host")
         port.identifier = NSUserInterfaceItemIdentifier("port")
         token.identifier = NSUserInterfaceItemIdentifier("token")
@@ -826,6 +867,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         token.target = self
         inputDevice.target = self
         inputDevice.action = #selector(audioDeviceSelectionChanged(_:))
+        inputChannel.target = self
+        inputChannel.action = #selector(audioChannelSelectionChanged(_:))
         host.action = #selector(saveSettings(_:))
         port.action = #selector(saveSettings(_:))
         token.action = #selector(saveSettings(_:))
@@ -842,6 +885,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let audioGrid = settingsGrid([
             [settingsLabel("輸入裝置"), inputDevice],
             [settingsLabel("聲道"), inputChannel],
+            [settingsLabel("輸入電平"), audioLevelBar],
         ])
 
         let autoInsert = NSButton(
@@ -1019,6 +1063,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if appState.mode == .dictation {
             onStopSession?()
         } else {
+            stopAudioLevelMonitor()
             onStartDictation?()
         }
     }
@@ -1027,6 +1072,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if appState.mode == .meeting {
             onStopSession?()
         } else {
+            stopAudioLevelMonitor()
             onStartMeeting?()
         }
     }
@@ -1055,6 +1101,62 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         guard let channelPopup = controlsInSettingsView().inputChannel else { return }
         let uid = sender.selectedItem?.representedObject as? String
         populateInputChannelPopup(channelPopup, deviceUID: uid)
+        startAudioLevelMonitor()
+    }
+
+    @objc private func audioChannelSelectionChanged(_ sender: NSPopUpButton) {
+        startAudioLevelMonitor()
+    }
+
+    // MARK: - 音訊電平監看
+
+    private func startAudioLevelMonitor() {
+        stopAudioLevelMonitor()
+
+        guard selectedSection == .settings, isWindowOpen, appState.mode == .idle else { return }
+
+        #if DEBUG
+        monitorStartCount += 1
+        #endif
+
+        let targetUID: String
+        let targetName: String?
+
+        let controls = controlsInSettingsView()
+        let rawSelectedUID = controls.inputDevice?.selectedItem?.representedObject as? String
+        let selectedUID = rawSelectedUID ?? settings.inputDeviceUID ?? AudioInputDevice.systemDefaultUID
+
+        if !selectedUID.isEmpty && selectedUID != AudioInputDevice.systemDefaultUID {
+            targetUID = selectedUID
+            targetName = controls.inputDevice?.selectedItem?.title
+        } else {
+            // 系統預設要先用 AudioInputDeviceCatalog.defaultRecordOrThrow() 解析成實際 UID，不要傳空 UID。
+            do {
+                let defaultRecord = try AudioInputDeviceCatalog.defaultRecordOrThrow()
+                targetUID = defaultRecord.descriptor.uid
+                targetName = defaultRecord.descriptor.name
+            } catch {
+                audioLevelBar.setState(.failed(error.localizedDescription))
+                return
+            }
+        }
+
+        do {
+            try audioLevelMonitor.start(
+                configuration: .init(deviceUID: targetUID, deviceName: targetName)
+            )
+        } catch {
+            if audioLevelMonitor.state == .idle {
+                audioLevelBar.setState(.failed(error.localizedDescription))
+            } else {
+                audioLevelBar.setState(audioLevelMonitor.state)
+            }
+        }
+    }
+
+    private func stopAudioLevelMonitor() {
+        audioLevelMonitor.stop()
+        audioLevelBar.setState(.idle)
     }
 
     private func permissionTag(for kind: PermissionKind) -> Int {
@@ -1692,6 +1794,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
 #if DEBUG
 extension MainWindowController {
+    /// 提供測試檢查音訊電平監看器狀態。
+    var debugAudioLevelMonitor: AudioLevelMonitor { audioLevelMonitor }
+
+    /// 提供測試檢查音訊電平視圖狀態。
+    var debugAudioLevelBar: AudioLevelBarView { audioLevelBar }
+
+    /// 提供測試檢查電平監看器啟動次數。
+    var debugMonitorStartCount: Int { monitorStartCount }
+
     /// Test-only introspection of the build-once/update-in-place refactor:
     /// the section view currently mounted in the detail pane, so a test can
     /// assert its identity is stable (`===`) across status updates instead
