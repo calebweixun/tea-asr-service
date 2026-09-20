@@ -15,3 +15,4 @@ clients/macos/build/
 
 # Model and VAD assets (about 1.2 GB); fetched by `tea-asr model-prepare`
 models/
+.claude/worktrees/
