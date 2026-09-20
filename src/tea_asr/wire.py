@@ -14,6 +14,13 @@ MAX_FRAME_PCM_BYTES = 6_400
 FRAME_HEADER_BYTES = 16
 INITIAL_FLOW_WINDOW_SAMPLES = 80_000
 
+#: docs/03-architecture.md: the service only binds 127.0.0.1, so both the HTTP
+#: Host allowlist and the WS Origin allowlist are anchored to these two
+#: hostnames. A native client sending no Host/Origin override at all is a
+#: different case, handled at each call site.
+ALLOWED_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
+ALLOWED_WS_ORIGINS = frozenset(f"http://{host}" for host in ALLOWED_LOCAL_HOSTS)
+
 TimestampQuality = Literal["segment"]
 Boundary = Literal["manual", "silence", "max_duration", "stop"]
 

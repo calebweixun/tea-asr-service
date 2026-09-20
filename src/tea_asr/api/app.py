@@ -12,6 +12,8 @@ from typing import Any, Protocol
 from fastapi import Depends, FastAPI, Header, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from tea_asr.api.stream import (
     ContinuousSessionAdmission,
@@ -27,6 +29,7 @@ from tea_asr.model_spec import TEA_ASR_1_1_MLX_4BIT
 from tea_asr.scheduler import Scheduler
 from tea_asr.vad import VAD_SHA256, SileroVad, locate_vad
 from tea_asr.wire import (
+    ALLOWED_LOCAL_HOSTS,
     MAX_UTTERANCE_PCM_BYTES,
     Capabilities,
     CapabilityFeatures,
@@ -38,6 +41,40 @@ from tea_asr.wire import (
     TranscriptionResponse,
 )
 from tea_asr.worker.supervisor import WorkerSupervisor
+
+
+class HostValidationMiddleware:
+    """Reject HTTP requests whose ``Host`` header is not in the allowlist.
+
+    docs/03-architecture.md requires Host validation as a DNS-rebinding guard:
+    a malicious page served from an attacker-controlled domain that resolves
+    to 127.0.0.1 must not be able to reach this loopback-only API just because
+    the browser happily sends whatever Host the page's origin implies. This is
+    the HTTP half of that guard; the WS half is the Origin allowlist in
+    ``tea_asr.api.stream.run_stream``, which a plain HTTP TrustedHost check
+    cannot safely stand in for (rejecting a WebSocket upgrade this way sends a
+    malformed ASGI response instead of a clean close).
+
+    Applies to every HTTP route, including ``/healthz``/``/readyz``, so an
+    unauthenticated probe cannot be used to fingerprint the service from an
+    off-allowlist host either.
+    """
+
+    def __init__(self, app: ASGIApp, allowed_hosts: frozenset[str]) -> None:
+        self._app = app
+        self._allowed_hosts = allowed_hosts
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        host = Headers(scope=scope).get("host", "").split(":")[0]
+        if host and host not in self._allowed_hosts:
+            error = ApiError("forbidden_origin", f"Host 不在允許清單：{host}")
+            response = JSONResponse(status_code=error.http_status, content=error.envelope())
+            await response(scope, receive, send)
+            return
+        await self._app(scope, receive, send)
 
 #: Sentinel so a caller can say "no VAD" (tests) instead of "load the default".
 _AUTO_VAD: Any = object()
@@ -128,6 +165,10 @@ def create_app(
     continuous_admission = ContinuousSessionAdmission(
         settings.max_continuous_sessions if vad is not None else None
     )
+    #: docs/04-api.md `limits.max_total_connections`: caps concurrent
+    #: `/v1/stream` connections regardless of profile, separately from the
+    #: continuous-only cap above.
+    connection_admission = ContinuousSessionAdmission(settings.max_total_connections)
 
     async def ensure_loaded() -> None:
         """Bring the worker back after an idle unload.
@@ -217,6 +258,7 @@ def create_app(
         lifespan=lifespan,
         responses={"default": {"model": ErrorEnvelope}},
     )
+    app.add_middleware(HostValidationMiddleware, allowed_hosts=ALLOWED_LOCAL_HOSTS)
 
     def _envelope(error: ApiError, request_id: str | None = None) -> JSONResponse:
         return JSONResponse(status_code=error.http_status, content=error.envelope(request_id))
@@ -310,6 +352,7 @@ def create_app(
                 vad=vad,
                 registry=sessions,
                 continuous_admission=continuous_admission,
+                connection_admission=connection_admission,
             )
         finally:
             activity.sessions -= 1

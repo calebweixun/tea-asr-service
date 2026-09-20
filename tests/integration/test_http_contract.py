@@ -188,3 +188,37 @@ def test_requests_are_refused_while_the_model_is_not_ready() -> None:
         response = http.post(TRANSCRIBE, content=b"\0\0" * 1600, headers=AUTH)
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "model_loading"
+
+
+# --- HTTP Host allowlist (docs/03-architecture.md) ---------------------------
+#
+# The service only ever binds 127.0.0.1, and the Host header is the DNS-
+# rebinding guard for HTTP the way Origin is for WS: a page served from an
+# attacker-controlled domain that resolves to 127.0.0.1 must not reach this
+# API just because a browser sends a matching Host for that domain.
+
+
+@pytest.mark.parametrize("host", ["evil.example.com", "127.0.0.1.evil.com", "0.0.0.0"])
+def test_requests_with_a_disallowed_host_are_rejected(client: TestClient, host: str) -> None:
+    with client as http:
+        response = http.get("/healthz", headers={"Host": host})
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "forbidden_origin"
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost"])
+def test_requests_with_an_allowed_host_pass_through(client: TestClient, host: str) -> None:
+    with client as http:
+        response = http.get("/healthz", headers={"Host": host})
+        assert response.status_code == 200
+
+
+def test_host_allowlist_also_covers_unauthenticated_health_endpoints(
+    client: TestClient,
+) -> None:
+    """A disallowed Host must be rejected before auth is even considered."""
+
+    with client as http:
+        response = http.get("/v1/status", headers={"Host": "evil.example.com", **AUTH})
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "forbidden_origin"

@@ -107,7 +107,7 @@ WS 每 frame 建議 20–100ms，最大 200ms＝6,400 PCM bytes；VAD adapter �
 - scheduler 只在片段邊界換工作；已有 GPU 推論不可搶占。
 - 選擇順序：已等待15秒的 realtime 最早者；否則 interactive；否則 realtime；最後 batch。同級 round-robin session、session 內依序。
 - interactive 連續執行最多3段，只要 realtime 有候選就先讓1段 realtime。live 活躍時 batch 可暫停，狀態明示 `paused_for_live`，不承諾 batch 同時完成速度。
-- P0/P1 預設最多1個 continuous session、4個其他連線。總等待音訊最多60秒、每 session 最多16段；任一上限先到即生效。active receiving buffer 每 session 最多30秒。HTTP 互動超出容量立即429。
+- P0/P1 的早期設計值；現行實際上限見 [04](04-api.md) `capabilities.limits`：`max_continuous_sessions`（預設2，只算 continuous profile）與 `max_total_connections`（預設4，`/v1/stream` 所有 profile 連線數總和，不是「continuous 之外另外4個」）皆為獨立、確實 enforce 的上限，非文件推導值。總等待音訊最多60秒、每 session 最多16段；任一上限先到即生效。active receiving buffer 每 session 最多30秒。HTTP 互動超出容量立即429。
 - 對 WS 發送 flow-control；忽略暫停仍送超量則顯式 error＋close，不靜默丟音訊。記憶體上限涵蓋 app buffer、WS library queue、IPC 與 outgoing event queue。
 - v0.2 durable 音訊可落 spool，但磁碟上限也需強制；不能用落盤假裝無限容量。batch 只預取1段到 RAM。
 
@@ -129,7 +129,7 @@ v0.2 斷線 session 保留10分鐘可 resume；超過期限 flush 已持久化�
 
 ## 本機服務與發行
 
-只 bind `127.0.0.1:8327`。即使是 localhost，仍使用隨機256-bit bearer token，設定檔權限0600；驗證 Host 與 WS Origin，預設不開 CORS。native client 可無 Origin；若有 Origin 只允許明確 allowlist。v0.1 不支援瀏覽器 token query parameter、token 放 URL 或廣泛 `*` origin。OBS browser overlay 由 bridge 提供呈現，不直接暴露 server 管理 token。
+只 bind `127.0.0.1:8327`。即使是 localhost，仍使用隨機256-bit bearer token，設定檔權限0600；HTTP 端所有路由（含 `/healthz`、`/readyz`）驗證 `Host` 標頭 allowlist（`127.0.0.1`、`localhost`；不符回403 `forbidden_origin`），WS upgrade 另外驗證 `Origin` allowlist，兩者是各自獨立的檢查（`HostValidationMiddleware` 與 `run_stream` 的 Origin 檢查各自處理，因為對一個中止中的 WebSocket 升級直接套用 HTTP 層 Host 中介層會送出不合法的 ASGI 回應，見 `tea_asr/api/app.py`），預設不開 CORS。native client 可無 Origin；若有 Origin 只允許明確 allowlist。v0.1 不支援瀏覽器 token query parameter、token 放 URL 或廣泛 `*` origin。OBS browser overlay 由 bridge 提供呈現，不直接暴露 server 管理 token。
 
 HTTP 健康探針只回最小狀態；其餘需授權。log 不包含 bearer、PCM、prompt、逐字稿或任意使用者檔案路徑。關閉預設 telemetry，只有明確執行 `tea-asr model-prepare` 才連外取得固定資產。
 

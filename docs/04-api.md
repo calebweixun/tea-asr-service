@@ -7,10 +7,26 @@
 > 尚未實作：durable session、`/v1/jobs`、resume；這些選項一律回 `unsupported_option` 或404，不會靜默降級。
 > P2a的1.1擴充已通過驗收並預設開啟（`TEA_ASR_REVISABLE_PREVIEW=0` 可關閉），量測見 [P2a報告](benchmarks/p2a-preview-report.md)。
 
+## 目前真實契約（W1 凍結，2026-09-20）
+
+以下項目已對照 `src/tea_asr/` 實作逐一確認，後續工作（含 dashboard／LAN）可直接信任，不必重新逐行核對原始碼；任何要放寬或改變下列行為的改動，都必須同步更新本節：
+
+- **認證**：除 `/healthz`、`/readyz` 外，HTTP 與 WS 都要求 `Authorization: Bearer <token>`（`src/tea_asr/api/app.py` `authorize`／`src/tea_asr/api/stream.py::run_stream`）。
+- **HTTP Host allowlist**：所有 HTTP 路由（含健康檢查）由 `HostValidationMiddleware` 驗證 `Host` 標頭僅限 `127.0.0.1`／`localhost`，早於 auth 檢查；不符回 `forbidden_origin`／403（`src/tea_asr/api/app.py`）。
+- **WS Origin allowlist**：`/v1/stream` upgrade 驗證 `Origin` 僅限 `http://127.0.0.1`／`http://localhost`；省略 Origin（native client）視為合法；不符 close 1008 `forbidden_origin`（`src/tea_asr/api/stream.py::run_stream`）。這與上一條 Host 檢查是兩段獨立程式碼，不是同一個中介層。
+- **`limits.max_continuous_sessions`**：伺服器實際 enforce，預設2，只算 `profile=continuous`；超過回 `concurrent_session_limit`，close 4029（`ContinuousSessionAdmission`）。
+- **`limits.max_total_connections`**：伺服器實際 enforce，預設4，涵蓋 `/v1/stream` 所有 profile 的連線總數；超過在 `accept()` 之前拒絕，close 1013 `session_limit`（收不到 `hello`）（`ContinuousSessionAdmission` 重用於 `connection_admission`）。
+- **capabilities.features**：固定輸出10個布林欄位（含 `context_biasing`、`durable_revisable`），只有實際驗收過的功能才是 `true`；目前只有 `partial_transcripts` 依 `TEA_ASR_REVISABLE_PREVIEW` 可能為 `true`，其餘一律 `false`（`src/tea_asr/wire.py::CapabilityFeatures`）。
+- **flow.control 節奏**：只在流控窗口實際往前推進時送出，不是固定週期輪詢（`src/tea_asr/api/stream.py::_handle_frame`）。
+- **WS 心跳**：server 每15秒送 WS-layer ping，30秒未收到 pong 判定斷線（`uvicorn.run(..., ws_ping_interval=15, ws_ping_timeout=30)`，`src/tea_asr/cli.py`）。
+- **v0.2 端點**：`/v1/jobs*` 未實作，一律404，不回假 202（`tests/integration/test_schema_export.py::test_v0_2_endpoints_are_absent_not_faked`）。
+- **錯誤碼全集**：`unauthenticated`、`forbidden_origin`、`invalid_audio`、`unsupported_option`、`protocol_error`、`conflict`、`payload_too_large`、`queue_full`、`session_limit`、`concurrent_session_limit`、`model_loading`、`model_unavailable`、`model_incompatible`、`inference_failed`、`inference_timeout`、`timeline_gap`、`internal_error`、`storage_full`（v0.2）；HTTP 狀態碼與 WS close code 對照見下方錯誤表，唯一真相來源是 `src/tea_asr/errors.py`。
+
 ## 共通規則
 
 - 本機 URL：`http://127.0.0.1:8327`；WS 為 `ws://127.0.0.1:8327/v1/stream`。port 可由設定檔改，但預設刻意避開 8765 等 AI 工具常用 port。
 - 除 `/healthz`、`/readyz` 外，需要 `Authorization: Bearer <token>`。WS upgrade 時驗證。
+- 每個 HTTP 請求（含 `/healthz`、`/readyz`）都驗證 `Host` 標頭 allowlist（`127.0.0.1`、`localhost`；不含 port），不符回 `forbidden_origin`／403，在 auth 檢查之前生效；WS upgrade 則另外驗證 `Origin`（省略 Origin 視為合法的 native client），兩者是各自獨立的檢查，不是同一段程式碼。
 - IDs 為 server UUID 字串；client `request_id` 為1–64字元識別碼，同一 session 不得重用於不同操作。
 - JSON 為 UTF-8；拒絕未知 client 欄位與不支援選項，不能 silently ignore。client 可忽略未知 server 欄位，但未知 event type 要記錄診斷。
 - 所有 duration/timing 欄位單位明示；`start_sample`／`end_sample` 採16kHz來源時間軸、左閉右開。
@@ -69,15 +85,17 @@ Capabilities 最少有：
   "protocol_version":"1.0",
   "audio":{"sample_rate":16000,"channels":1,"format":"pcm_s16le"},
   "profiles":["utterance","continuous"],
-  "features":{"native_audio_streaming":false,"partial_transcripts":false,"word_timestamps":false,"translation":false,"diarization":false,"hotwords":false,"durable_sessions":false,"batch_jobs":false},
-  "limits":{"max_frame_pcm_bytes":6400,"max_utterance_ms":30000,"max_continuous_sessions":2,"max_total_connections":5}
+  "features":{"native_audio_streaming":false,"partial_transcripts":false,"word_timestamps":false,"translation":false,"diarization":false,"hotwords":false,"context_biasing":false,"durable_sessions":false,"durable_revisable":false,"batch_jobs":false},
+  "limits":{"max_frame_pcm_bytes":6400,"max_utterance_ms":30000,"max_continuous_sessions":2,"max_total_connections":4}
 }
 ```
 
-feature 只有完成該功能驗收才變 true；即使 mock mode 也不能假稱真模型。
+feature 只有完成該功能驗收才變 true；即使 mock mode 也不能假稱真模型。`context_biasing`、`durable_revisable` 是 P2a／P4 新增欄位，即使兩者都還是 false 也一律出現在回應中（Pydantic model 固定欄位，不是可選省略）。
 
 `limits.max_continuous_sessions` 回報的是伺服器**實際會擋**的上限，不是文件推導值：超過時 `/v1/stream` 對新的 `session.start`（`profile=continuous`）回 `concurrent_session_limit`（見下方錯誤表），既有 session 不受影響。預設 2，量測方法與依據見
 [docs/benchmarks/concurrency-report.md](benchmarks/concurrency-report.md)；可用 `config.toml` 的 `service.max_continuous_sessions` 調整，已量測安全上限為 4。
+
+`limits.max_total_connections` 同樣是伺服器**實際 enforce** 的上限，涵蓋 `/v1/stream` 的**所有** profile（utterance＋continuous 總和），不是 continuous 之外「另外」的名額。超過時新連線在 WS upgrade 完成、`accept()` 之前即被拒絕並以 close code 1013（`session_limit`）關閉，因此被拒絕的連線收不到 `hello`；名額在連線關閉時立即釋出，可供下一個連線使用。預設 4，可用 `config.toml` 的 `service.max_total_connections` 調整。
 
 ## WebSocket：v0.1
 
@@ -91,7 +109,7 @@ feature 只有完成該功能驗收才變 true；即使 mock mode 也不能假�
 {"type":"session.started","session_id":"session-uuid","profile":"continuous","next_seq":0,"next_sample":0,"send_until_sample":80000}
 ```
 
-`send_until_sample` 是流控窗口上界；初始5秒。任何 frame 的 end_sample 不得超過此值。server 釋放緩衝後以 `flow.control` 提高窗口，永不回退。每次 grant 先保留 session/global buffer capacity，避免多連線同時超配。server 每250ms或窗口變動時可送 update；未取得新窗口時 client 必須暫存或停止送出。client 即時收音本身不能停頓來偽造連續錄音。
+`send_until_sample` 是流控窗口上界；初始5秒。任何 frame 的 end_sample 不得超過此值。server 釋放緩衝後以 `flow.control` 提高窗口，永不回退。每次 grant 先保留 session/global buffer capacity，避免多連線同時超配。server 只在視窗實際變動時（收到的音訊逼近視窗下緣）送出 `flow.control`，不是固定週期輪詢；未取得新窗口時 client 必須暫存或停止送出。client 即時收音本身不能停頓來偽造連續錄音。
 
 ### Binary frame
 
@@ -166,14 +184,18 @@ outgoing events 最多256項或1MiB，先到為準。flow/ACK可合併成最新�
 
 | 錯誤 | HTTP | WS處置 |
 |---|---|---|
-| unauthenticated／forbidden_origin | 401／403 | upgrade拒絕 |
+| unauthenticated／forbidden_origin | 401／403 | upgrade拒絕；`forbidden_origin` 也是 HTTP `Host` allowlist 未過時的錯誤碼（含 `/healthz`、`/readyz`），不只限 WS Origin |
 | invalid_audio／unsupported_option | 422 | error；協定損壞close1008 |
+| protocol_error | 400 | 訊息不是合法 JSON、缺 `type`、未知欄位、seq／sample clock 不連續、frame 超出流控窗口等協定層違規；一律 close1008，不當成單一控制訊息的可恢復錯誤 |
+| conflict | 409 | 同一 `request_id` 對應到不同內容的控制訊息（見上方 commit/stop 去重規則）；連線不中止，回 `error` 事件即可 |
 | payload_too_large | 413 | close1009 |
-| queue_full／session_limit | 429 | start拒絕或flow pause；超配close1013 |
+| queue_full／session_limit | 429 | start拒絕或flow pause；超配close1013；`session_limit` 也用於 `/v1/stream` 連線數已達 `limits.max_total_connections` 時拒絕新連線（accept前即拒絕，收不到hello），與單一 session 的等待片段佇列滿共用同一碼 |
 | concurrent_session_limit | 429 | 併發 continuous session 數已達 `limits.max_continuous_sessions`；`session.start` 被拒，close **4029**（不與queue_full／session_limit／slow_client共用的1013混在一起，這三者目前仍共用1013，client無法從close code分辨，見下方已知限制）；retryable=true，client應該退避後重試或等其他session結束 |
 | model_loading／model_unavailable | 503 | start拒絕；既有session送狀態相關error |
+| model_incompatible | 503 | worker 載入的 checkpoint 不符合預期格式／權重；不可重試，不進入自動重啟迴圈（見03） |
 | inference_failed／inference_timeout | 500／504 | segment.error；必要時worker復原 |
 | timeline_gap | 409 | 機器睡眠等原因使 sample clock 出現缺口；送 error 後close1012，client 須開新 session |
+| internal_error | 500 | 單一片段辨識時的未預期例外；回該片段的 `segment.error`，不中止連線 |
 | storage_full（v0.2） | 507 | 停止 durable ACK、error、close1013 |
 
 **已知限制（尚未修）：** `queue_full`／`session_limit`／`slow_client` 三者仍共用 close 1013，client 無法單從 close code 分辨是「自己這個 session 的待轉錄佇列滿了」還是「被伺服器整體限速」。`concurrent_session_limit` 是唯一一個在本次改動中拿到獨立 close code（4029）的錯誤，因為它是連線admission階段就拒絕、語意與那三者都不同；把既有三者也拆開是更大範圍的改動，不在本次範圍內。

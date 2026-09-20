@@ -19,6 +19,7 @@ from tea_asr.logs import event as log_event
 from tea_asr.segmenter import ContinuousSegmenter, SegmentClosed, SegmenterConfig, SpeechStarted
 from tea_asr.vad import SileroVad
 from tea_asr.wire import (
+    ALLOWED_WS_ORIGINS,
     INITIAL_FLOW_WINDOW_SAMPLES,
     MAX_FRAME_PCM_BYTES,
     MAX_SAFE_INT,
@@ -177,6 +178,11 @@ class ContinuousSessionAdmission:
     ``StreamSession.run``'s profile assignment.  Reservations are made while
     holding one event-loop lock, so an admitted-but-not-yet-started session is
     counted immediately.
+
+    Despite the name, this is a plain counted-slot reservation with no
+    ``continuous``-specific logic, so ``run_stream`` reuses it unchanged to
+    enforce `limits.max_total_connections` (docs/04-api.md) across every
+    profile, keyed by a token distinct from the per-session one above.
     """
 
     def __init__(self, max_sessions: int | None) -> None:
@@ -972,13 +978,25 @@ async def run_stream(
     vad: SileroVad | None = None,
     registry: set[StreamSession] | None = None,
     continuous_admission: ContinuousSessionAdmission | None = None,
+    connection_admission: ContinuousSessionAdmission | None = None,
 ) -> None:
     if websocket.headers.get("authorization") != f"Bearer {auth_token}":
         await websocket.close(code=1008, reason="unauthenticated")
         return
     origin = websocket.headers.get("origin")
-    if origin and origin not in {"http://127.0.0.1", "http://localhost"}:
+    if origin and origin not in ALLOWED_WS_ORIGINS:
         await websocket.close(code=1008, reason="forbidden_origin")
+        return
+
+    #: docs/04-api.md `limits.max_total_connections`: reserved before `accept()`
+    #: so two connections racing the handshake cannot both slip in over the
+    #: cap (same race `ContinuousSessionAdmission` guards against above).
+    connection_token = object()
+    if connection_admission is not None and not await connection_admission.try_acquire(
+        connection_token
+    ):
+        close_error = ApiError("session_limit", "同時連線數已達上限，請稍後再試。")
+        await websocket.close(code=close_error.ws_close_code or 1013, reason="session_limit")
         return
 
     await websocket.accept()
@@ -1012,6 +1030,8 @@ async def run_stream(
         if registry is not None:
             registry.discard(session)
         session.release_continuous_admission()
+        if connection_admission is not None:
+            connection_admission.release(connection_token)
         for task in (main_task, writer_task, watchdog_task):
             task.cancel()
         # Teardown runs while the connection is already going away, so a
