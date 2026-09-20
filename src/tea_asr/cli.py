@@ -248,7 +248,15 @@ def main() -> int:
         print(f"log：{log_file}")
         try:
             uvicorn.run(
-                create_app(model_path, config=settings), host=host, port=port, workers=1
+                create_app(model_path, config=settings),
+                host=host,
+                port=port,
+                workers=1,
+                # docs/04-api.md: 15s server ping, 30s without a pong disconnects.
+                # Uvicorn's own defaults (20s/20s) do not match, so they must be
+                # set explicitly rather than left to whatever the library ships.
+                ws_ping_interval=15,
+                ws_ping_timeout=30,
             )
         finally:
             lock.release()

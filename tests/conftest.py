@@ -73,6 +73,7 @@ def build_client(
     filter_pua: bool = True,
     vad: Any = None,
     max_continuous_sessions: int = 1,
+    max_total_connections: int = 4,
 ) -> TestClient:
     app = create_app(
         Path("unused"),
@@ -82,10 +83,15 @@ def build_client(
             revisable_preview=revisable_preview,
             filter_pua=filter_pua,
             max_continuous_sessions=max_continuous_sessions,
+            max_total_connections=max_total_connections,
         ),
         vad_model=vad,
     )
-    return TestClient(app)
+    # The service only ever binds 127.0.0.1 (docs/03-architecture.md), and
+    # HostValidationMiddleware enforces that Host allowlist on every HTTP
+    # request; TestClient's default base_url ("http://testserver") would fail
+    # it, so tests use a real allowed host instead of special-casing "testserver".
+    return TestClient(app, base_url="http://127.0.0.1")
 
 
 @pytest.fixture

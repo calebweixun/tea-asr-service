@@ -814,3 +814,51 @@ def test_continuous_slot_is_freed_after_start_validation_failure(
             admitted.receive_json()
             admitted.send_json({**CONTINUOUS, "request_id": "start-2"})
             assert admitted.receive_json()["type"] == "session.started"
+
+
+# --- total connection limit (docs/04-api.md `limits.max_total_connections`) --
+#
+# Distinct from the continuous-only cap above: this rejects any additional
+# `/v1/stream` connection, regardless of profile, once the total is reached.
+
+
+def test_total_connection_limit_refuses_additional_connections(
+    supervisor: FakeSupervisor,
+) -> None:
+    client = build_client(supervisor, max_total_connections=1)
+    with client as http:
+        with http.websocket_connect("/v1/stream", headers=AUTH) as first:
+            first.receive_json()  # hello
+
+            with (
+                pytest.raises(WebSocketDisconnect) as excinfo,
+                http.websocket_connect("/v1/stream", headers=AUTH) as second,
+            ):
+                second.receive_json()
+            assert excinfo.value.code == 1013
+
+        # Releasing the first connection frees the slot for a new one.
+        with http.websocket_connect("/v1/stream", headers=AUTH) as third:
+            hello = third.receive_json()
+            assert hello["type"] == "hello"
+
+
+def test_total_connection_limit_counts_utterance_sessions_too(
+    supervisor: FakeSupervisor,
+) -> None:
+    """The cap is on connections, not on the `continuous` profile specifically."""
+
+    client = build_client(supervisor, max_total_connections=2)
+    with (
+        client as http,
+        http.websocket_connect("/v1/stream", headers=AUTH) as first,
+        http.websocket_connect("/v1/stream", headers=AUTH) as second,
+    ):
+        first.receive_json()
+        second.receive_json()
+        with (
+            pytest.raises(WebSocketDisconnect) as excinfo,
+            http.websocket_connect("/v1/stream", headers=AUTH) as third,
+        ):
+            third.receive_json()
+        assert excinfo.value.code == 1013
