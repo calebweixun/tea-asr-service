@@ -54,28 +54,43 @@ final class AudioCapture {
     }
 
     enum CaptureError: LocalizedError {
-        case converterUnavailable
+        case converterUnavailable(name: String, uid: String, sourceSampleRate: Double)
         case permissionDenied
         case noDefaultInputDevice
         case inputDeviceUnavailable(uid: String)
-        case deviceConfigurationFailed(name: String, reason: String)
-        case channelUnavailable(policy: AudioChannelPolicy, available: Int)
+        case deviceCatalogFailed(uid: String?, reason: String)
+        case deviceConfigurationFailed(name: String, uid: String, reason: String)
+        case formatUnavailable(name: String, uid: String, sampleRate: Double, channels: Int, reason: String)
+        case channelUnavailable(name: String, uid: String, policy: AudioChannelPolicy, available: Int)
+        case engineStartFailed(name: String, uid: String, reason: String)
+        case processingQueueOverflow(name: String, uid: String)
         case deviceMonitoringUnavailable(reason: String)
 
         var errorDescription: String? {
             switch self {
-            case .converterUnavailable:
-                return "無法建立音訊轉換器（來源格式不支援）。"
+            case .converterUnavailable(let name, let uid, let sampleRate):
+                return "無法使用輸入裝置「\(name)」（UID: \(uid)）建立音訊轉換器；原生取樣率為 \(sampleRate) Hz。"
             case .permissionDenied:
                 return "沒有麥克風權限。請到「系統設定 → 隱私權與安全性 → 麥克風」允許 TEA ASR。"
             case .noDefaultInputDevice:
                 return "找不到系統預設輸入裝置。請在「系統設定 → 聲音 → 輸入」選擇麥克風，或在 TEA ASR 設定指定裝置。"
             case .inputDeviceUnavailable(let uid):
                 return "找不到已選取的輸入裝置（UID: \(uid)）。請在設定改選「系統預設」或重新插入該裝置。"
-            case .deviceConfigurationFailed(let name, let reason):
-                return "無法使用輸入裝置「\(name)」：\(reason) 請改選其他裝置後再試。"
-            case .channelUnavailable(let policy, let available):
-                return "輸入裝置無法使用「\(policy.title)」；目前只有 \(available) 個聲道。請改用自動混音或重新選擇聲道。"
+            case .deviceCatalogFailed(let uid, let reason):
+                if let uid, !uid.isEmpty {
+                    return "無法查詢指定輸入裝置（UID: \(uid)）：\(reason)"
+                }
+                return "無法查詢輸入裝置：\(reason)"
+            case .deviceConfigurationFailed(let name, let uid, let reason):
+                return "無法使用輸入裝置「\(name)」（UID: \(uid)）：\(reason) 請改選其他裝置後再試。"
+            case .formatUnavailable(let name, let uid, let sampleRate, let channels, let reason):
+                return "輸入裝置「\(name)」（UID: \(uid)）回報無法使用的格式（\(sampleRate) Hz、\(channels) 聲道）：\(reason)"
+            case .channelUnavailable(let name, let uid, let policy, let available):
+                return "輸入裝置「\(name)」（UID: \(uid)）無法使用「\(policy.title)」；目前只有 \(available) 個聲道。請改用自動混音或重新選擇聲道。"
+            case .engineStartFailed(let name, let uid, let reason):
+                return "輸入裝置「\(name)」（UID: \(uid)）啟動音訊引擎失敗：\(reason)"
+            case .processingQueueOverflow(let name, let uid):
+                return "輸入裝置「\(name)」（UID: \(uid)）的音訊處理佇列已滿；為避免靜默丟失音訊，錄音已停止。"
             case .deviceMonitoringUnavailable(let reason):
                 return "無法監測輸入裝置變更：\(reason) 請重新啟動 TEA ASR 後再試。"
             }
@@ -83,11 +98,21 @@ final class AudioCapture {
     }
 
     private let engine = AVAudioEngine()
+    private var activeInputNode: AVAudioInputNode?
     private var converter: AVAudioConverter?
     private var tapInstalled = false
+    private var inputLease: AudioInputLease?
     private var pending = Data()
     private let lock = NSLock()
     private let frameBytes = Wire.frameSamples * 2
+    private let processingQueue = DispatchQueue(
+        label: "com.tea-asr.audio-capture.processing",
+        qos: .userInitiated
+    )
+    private let processingQueueKey = DispatchSpecificKey<Void>()
+    private let processingQueueSlots = DispatchSemaphore(value: 4)
+    private var processingGeneration: UInt64 = 0
+    private var processingActive = false
     private var framesProduced: UInt64 = 0
     private var framesDropped: UInt64 = 0
     private var lastError: String?
@@ -106,9 +131,9 @@ final class AudioCapture {
     private var deviceAliveAddress: AudioObjectPropertyAddress?
     private var monitoredDeviceID: AudioDeviceID?
 
-    /// Called on the audio thread's behalf with exactly one frame of PCM.
+    /// Called from the capture processing queue with exactly one frame of PCM.
     var onFrame: ((Data) -> Void)?
-    /// Called on the audio thread. Consumers must dispatch UI work to main.
+    /// Called from the capture processing queue. Consumers must dispatch UI work to main.
     var onDiagnostics: ((AudioDiagnostics) -> Void)?
     /// Called once when the selected input disappears or the engine becomes
     /// unusable while recording. Consumers should stop the ASR session and
@@ -116,6 +141,10 @@ final class AudioCapture {
     var onError: ((String) -> Void)?
 
     private(set) var isRunning = false
+
+    init() {
+        processingQueue.setSpecific(key: processingQueueKey, value: ())
+    }
 
     static func requestPermission(_ completion: @escaping (Bool) -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -145,8 +174,15 @@ final class AudioCapture {
         lastError = nil
         lock.unlock()
 
-        let input = engine.inputNode
-        let records = AudioInputDeviceCatalog.records()
+        let records: [AudioInputDeviceCatalog.Record]
+        do {
+            records = try AudioInputDeviceCatalog.recordsOrThrow()
+        } catch {
+            throw CaptureError.deviceCatalogFailed(
+                uid: configuration.deviceUID,
+                reason: error.localizedDescription
+            )
+        }
         let available = records.map(\.descriptor)
         let resolution = AudioInputDeviceSelection.resolve(
             storedUID: configuration.deviceUID,
@@ -155,10 +191,22 @@ final class AudioCapture {
         let record: AudioInputDeviceCatalog.Record
         switch resolution {
         case .systemDefault:
-            guard let defaultRecord = AudioInputDeviceCatalog.defaultRecord() else {
-                throw CaptureError.noDefaultInputDevice
+            do {
+                record = try AudioInputDeviceCatalog.defaultRecordOrThrow()
+            } catch let error as AudioInputDeviceCatalog.Error {
+                if case .defaultDeviceNotInCatalog = error {
+                    throw CaptureError.noDefaultInputDevice
+                }
+                throw CaptureError.deviceCatalogFailed(
+                    uid: configuration.deviceUID,
+                    reason: error.localizedDescription
+                )
+            } catch {
+                throw CaptureError.deviceCatalogFailed(
+                    uid: configuration.deviceUID,
+                    reason: error.localizedDescription
+                )
             }
-            record = defaultRecord
         case .selected(let device):
             guard let selectedRecord = records.first(where: { $0.descriptor.uid == device.uid }) else {
                 throw CaptureError.inputDeviceUnavailable(uid: device.uid)
@@ -168,61 +216,172 @@ final class AudioCapture {
             throw CaptureError.inputDeviceUnavailable(uid: uid)
         }
 
+        // This catalog-level check keeps zero-channel/output-only objects away
+        // from AVFAudio's inputNode path. The native format is checked again
+        // below because a device can change its format after enumeration.
+        guard record.descriptor.inputChannels > 0 else {
+            throw CaptureError.formatUnavailable(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                sampleRate: 0,
+                channels: record.descriptor.inputChannels,
+                reason: "CoreAudio 裝置沒有可用的輸入 stream"
+            )
+        }
+        if case .channel(let index) = configuration.channelPolicy,
+           !(0..<record.descriptor.inputChannels).contains(index) {
+            throw CaptureError.channelUnavailable(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                policy: configuration.channelPolicy,
+                available: record.descriptor.inputChannels
+            )
+        }
+
+        switch Self.queryDeviceLiveness(record.deviceID) {
+        case .alive:
+            break
+        case .dead:
+            throw CaptureError.deviceConfigurationFailed(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                reason: "CoreAudio 回報裝置已失效"
+            )
+        case .queryFailed(let status):
+            throw CaptureError.deviceConfigurationFailed(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                reason: "無法確認裝置存活狀態（CoreAudio OSStatus: \(status)）"
+            )
+        }
+
+        // Do not touch AVAudioEngine.inputNode until the strict CoreAudio
+        // preflight above has found a real device.  On a host with no audio
+        // objects AVFAudio raises an Objective-C exception here instead of a
+        // Swift error, so this ordering is part of the failure policy.
+        let input = engine.inputNode
+
+        let acquiredLease: AudioInputLease
+        do {
+            acquiredLease = try AudioInputLeaseCoordinator.acquire(
+                deviceUID: record.descriptor.uid
+            )
+        } catch {
+            throw CaptureError.deviceConfigurationFailed(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                reason: error.localizedDescription
+            )
+        }
+        inputLease = acquiredLease
+        var leaseCommitted = false
+        defer {
+            if !leaseCommitted {
+                teardownCapture()
+                acquiredLease.release()
+            }
+        }
+        let processingToken = beginProcessingSession()
+
         // Apply this even for System Default. The same AVAudioEngine is reused
         // after stop(), and an earlier explicit device selection must not leak
         // into a later default-device session.
-        if let routingError = Self.setInputDevice(record.deviceID, on: input) {
+        do {
+            try AudioInputDeviceRouting.configure(deviceID: record.deviceID, on: input)
+        } catch {
             throw CaptureError.deviceConfigurationFailed(
                 name: record.descriptor.name,
-                reason: routingError
+                uid: record.descriptor.uid,
+                reason: error.localizedDescription
             )
         }
 
         let inputFormat = input.outputFormat(forBus: 0)
         let inputChannelCount = Int(inputFormat.channelCount)
-        guard inputChannelCount > 0 else {
-            throw CaptureError.deviceConfigurationFailed(
-                name: record.descriptor.name,
-                reason: "裝置沒有可用的輸入聲道"
+        do {
+            try AudioInputFormatPolicy.validate(
+                sampleRate: inputFormat.sampleRate,
+                channelCount: inputChannelCount,
+                commonFormat: inputFormat.commonFormat,
+                channelPolicy: configuration.channelPolicy
             )
-        }
-        if case .channel(let index) = configuration.channelPolicy,
-           !(0..<inputChannelCount).contains(index) {
-            throw CaptureError.channelUnavailable(
-                policy: configuration.channelPolicy,
-                available: inputChannelCount
+        } catch let error as AudioInputFormatError {
+            if case .channelOutOfBounds = error {
+                throw CaptureError.channelUnavailable(
+                    name: record.descriptor.name,
+                    uid: record.descriptor.uid,
+                    policy: configuration.channelPolicy,
+                    available: inputChannelCount
+                )
+            }
+            throw CaptureError.formatUnavailable(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                sampleRate: inputFormat.sampleRate,
+                channels: inputChannelCount,
+                reason: error.localizedDescription
+            )
+        } catch {
+            throw CaptureError.formatUnavailable(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                sampleRate: inputFormat.sampleRate,
+                channels: inputChannelCount,
+                reason: error.localizedDescription
             )
         }
         inputDeviceName = record.descriptor.name
 
-        guard
-            let target = AVAudioFormat(
-                commonFormat: .pcmFormatInt16,
-                sampleRate: Double(Wire.sampleRate),
-                channels: 1,
-                interleaved: true
-            ),
-            let monoFormat = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
+        guard let target = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: Double(Wire.sampleRate),
+            channels: 1,
+            interleaved: true
+        ) else {
+            throw CaptureError.formatUnavailable(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
                 sampleRate: inputFormat.sampleRate,
-                channels: 1,
-                interleaved: false
-            ),
-            let converter = AVAudioConverter(from: monoFormat, to: target)
-        else {
-            throw CaptureError.converterUnavailable
+                channels: inputChannelCount,
+                reason: "無法建立服務需要的 16 kHz mono PCM16 目標格式"
+            )
+        }
+        guard let monoFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: inputFormat.sampleRate,
+            channels: 1,
+            interleaved: false
+        ) else {
+            throw CaptureError.formatUnavailable(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                sampleRate: inputFormat.sampleRate,
+                channels: inputChannelCount,
+                reason: "無法建立裝置原生取樣率的 mono Float32 格式"
+            )
+        }
+        guard let converter = AVAudioConverter(from: monoFormat, to: target) else {
+            throw CaptureError.converterUnavailable(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                sourceSampleRate: inputFormat.sampleRate
+            )
         }
         converter.sampleRateConverterQuality = AVAudioQuality.high.rawValue
         self.converter = converter
 
         input.installTap(onBus: 0, bufferSize: 4_096, format: inputFormat) { [weak self] buffer, _ in
-            self?.consume(
-                buffer,
+            self?.enqueue(
+                buffer: buffer,
                 converter: converter,
                 target: target,
-                channelPolicy: configuration.channelPolicy
+                channelPolicy: configuration.channelPolicy,
+                generation: processingToken,
+                deviceName: record.descriptor.name,
+                deviceUID: record.descriptor.uid
             )
         }
+        activeInputNode = input
         tapInstalled = true
         engine.prepare()
         do {
@@ -234,12 +393,18 @@ final class AudioCapture {
             // installed" on the next start attempt.
             teardownCapture()
             publishDiagnostics()
-            throw error
+            let nsError = error as NSError
+            throw CaptureError.engineStartFailed(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                reason: "\(nsError.localizedDescription)（domain: \(nsError.domain), code: \(nsError.code)）"
+            )
         }
         isRunning = true
         activeConfiguration = configuration
         activeDevice = record
         monitoredDeviceID = record.deviceID
+        leaseCommitted = true
         do {
             try installRuntimeObservers(for: record)
         } catch {
@@ -255,6 +420,75 @@ final class AudioCapture {
         publishDiagnostics()
     }
 
+    private func beginProcessingSession() -> UInt64 {
+        processingQueue.sync {
+            processingGeneration &+= 1
+            processingActive = true
+            return processingGeneration
+        }
+    }
+
+    private func invalidateProcessingSession() {
+        let invalidate = {
+            self.processingActive = false
+            self.processingGeneration &+= 1
+        }
+        if DispatchQueue.getSpecific(key: processingQueueKey) != nil {
+            invalidate()
+        } else {
+            processingQueue.sync(execute: invalidate)
+        }
+    }
+
+    private func enqueue(
+        buffer: AVAudioPCMBuffer,
+        converter: AVAudioConverter,
+        target: AVAudioFormat,
+        channelPolicy: AudioChannelPolicy,
+        generation: UInt64,
+        deviceName: String,
+        deviceUID: String
+    ) {
+        // A full queue ends the session loudly instead of dropping a buffer and
+        // quietly compressing the sample timeline sent to the server.
+        guard processingQueueSlots.wait(timeout: .now()) == .success else {
+            DispatchQueue.main.async { [weak self] in
+                self?.failRuntime(
+                    .processingQueueOverflow(name: deviceName, uid: deviceUID)
+                )
+            }
+            return
+        }
+
+        guard let copiedBuffer = buffer.copy() as? AVAudioPCMBuffer else {
+            processingQueueSlots.signal()
+            DispatchQueue.main.async { [weak self] in
+                self?.failRuntime(
+                    .deviceConfigurationFailed(
+                        name: deviceName,
+                        uid: deviceUID,
+                        reason: "無法保留音訊 buffer；為避免靜默丟失音訊，錄音已停止"
+                    )
+                )
+            }
+            return
+        }
+
+        processingQueue.async { [weak self] in
+            defer { self?.processingQueueSlots.signal() }
+            guard let self,
+                  self.processingActive,
+                  self.processingGeneration == generation
+            else { return }
+            self.consume(
+                copiedBuffer,
+                converter: converter,
+                target: target,
+                channelPolicy: channelPolicy
+            )
+        }
+    }
+
     /// Stop every capture resource even when a previous start/failure already
     /// flipped `isRunning` to false.  In particular, pending PCM and the
     /// converter must not survive into the next session.
@@ -264,13 +498,18 @@ final class AudioCapture {
         // path or observe a half-torn-down capture.
         isRunning = false
         removeRuntimeObservers()
+        invalidateProcessingSession()
 
         if tapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
+            activeInputNode?.removeTap(onBus: 0)
             tapInstalled = false
         }
+        activeInputNode = nil
         engine.stop()
         converter = nil
+        let lease = inputLease
+        inputLease = nil
+        lease?.release()
 
         lock.lock()
         framesDropped += AudioCaptureTeardownPolicy.clearPending(
@@ -453,6 +692,7 @@ final class AudioCapture {
         failRuntime(
             .deviceConfigurationFailed(
                 name: activeDevice?.descriptor.name ?? "",
+                uid: activeDevice?.descriptor.uid ?? "",
                 reason: "音訊引擎設定已變更；為避免靜默改用其他裝置，請重新開始錄音"
             )
         )
@@ -498,6 +738,7 @@ final class AudioCapture {
             failRuntime(
                 .deviceConfigurationFailed(
                     name: activeDevice?.descriptor.name ?? "",
+                    uid: activeDevice?.descriptor.uid ?? "",
                     reason: "音訊引擎已停止"
                 )
             )
@@ -509,6 +750,7 @@ final class AudioCapture {
                 failRuntime(
                     .deviceConfigurationFailed(
                         name: activeDevice?.descriptor.name ?? "",
+                        uid: activeDevice?.descriptor.uid ?? "",
                         reason: "找不到要監測的輸入裝置 ID；為避免靜默切換，請重新開始錄音"
                     )
                 )
@@ -523,6 +765,7 @@ final class AudioCapture {
                 failRuntime(
                     .deviceConfigurationFailed(
                         name: activeDevice?.descriptor.name ?? "",
+                        uid: activeDevice?.descriptor.uid ?? "",
                         reason: "裝置已失效（CoreAudio 回報不可用）；為避免靜默改用其他裝置，請重新開始錄音"
                     )
                 )
@@ -531,6 +774,7 @@ final class AudioCapture {
                 failRuntime(
                     .deviceConfigurationFailed(
                         name: activeDevice?.descriptor.name ?? "",
+                        uid: activeDevice?.descriptor.uid ?? "",
                         reason: "無法確認裝置存活狀態（CoreAudio 錯誤碼 \(status)）；為避免靜默切換，請重新開始錄音"
                     )
                 )
@@ -540,7 +784,18 @@ final class AudioCapture {
             }
         }
 
-        let records = AudioInputDeviceCatalog.records()
+        let records: [AudioInputDeviceCatalog.Record]
+        do {
+            records = try AudioInputDeviceCatalog.recordsOrThrow()
+        } catch {
+            failRuntime(
+                .deviceCatalogFailed(
+                    uid: configuration.deviceUID,
+                    reason: error.localizedDescription
+                )
+            )
+            return
+        }
         switch AudioInputDeviceSelection.resolve(
             storedUID: configuration.deviceUID,
             available: records.map(\.descriptor)
@@ -548,8 +803,28 @@ final class AudioCapture {
         case .missingStoredDevice(let uid):
             failRuntime(.inputDeviceUnavailable(uid: uid))
         case .systemDefault:
-            guard let defaultRecord = AudioInputDeviceCatalog.defaultRecord() else {
-                failRuntime(.noDefaultInputDevice)
+            let defaultRecord: AudioInputDeviceCatalog.Record
+            do {
+                defaultRecord = try AudioInputDeviceCatalog.defaultRecordOrThrow()
+            } catch let error as AudioInputDeviceCatalog.Error {
+                if case .defaultDeviceNotInCatalog = error {
+                    failRuntime(.noDefaultInputDevice)
+                } else {
+                    failRuntime(
+                        .deviceCatalogFailed(
+                            uid: configuration.deviceUID,
+                            reason: error.localizedDescription
+                        )
+                    )
+                }
+                return
+            } catch {
+                failRuntime(
+                    .deviceCatalogFailed(
+                        uid: configuration.deviceUID,
+                        reason: error.localizedDescription
+                    )
+                )
                 return
             }
             if case .defaultDevice = source {
@@ -563,6 +838,7 @@ final class AudioCapture {
                     failRuntime(
                         .deviceConfigurationFailed(
                             name: activeDevice?.descriptor.name ?? defaultRecord.descriptor.name,
+                            uid: activeDevice?.descriptor.uid ?? defaultRecord.descriptor.uid,
                             reason: "系統預設輸入裝置已變更；為避免靜默改用另一支麥克風，請重新開始錄音"
                         )
                     )
@@ -575,6 +851,8 @@ final class AudioCapture {
                !(0..<defaultRecord.descriptor.inputChannels).contains(index) {
                 failRuntime(
                     .channelUnavailable(
+                        name: defaultRecord.descriptor.name,
+                        uid: defaultRecord.descriptor.uid,
                         policy: configuration.channelPolicy,
                         available: defaultRecord.descriptor.inputChannels
                     )
@@ -589,6 +867,7 @@ final class AudioCapture {
                 failRuntime(
                     .deviceConfigurationFailed(
                         name: descriptor.name,
+                        uid: descriptor.uid,
                         reason: "裝置已重新連線，為避免靜默切換，請重新開始錄音"
                     )
                 )
@@ -598,6 +877,8 @@ final class AudioCapture {
                !(0..<current.descriptor.inputChannels).contains(index) {
                 failRuntime(
                     .channelUnavailable(
+                        name: current.descriptor.name,
+                        uid: current.descriptor.uid,
                         policy: configuration.channelPolicy,
                         available: current.descriptor.inputChannels
                     )
@@ -643,28 +924,6 @@ final class AudioCapture {
         teardownCapture()
         publishDiagnostics()
         onError?(message)
-    }
-
-    private static func setInputDevice(
-        _ deviceID: AudioDeviceID,
-        on input: AVAudioInputNode
-    ) -> String? {
-        guard let audioUnit = input.audioUnit else {
-            return "找不到音訊輸入單元"
-        }
-        var deviceID = deviceID
-        let status = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        guard status == noErr else {
-            return "CoreAudio 無法切換裝置（錯誤碼 \(status)）"
-        }
-        return nil
     }
 
 }

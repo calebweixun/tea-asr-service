@@ -4,6 +4,96 @@ import XCTest
 @testable import TeaASRClient
 
 final class AudioDeviceSelectionTests: XCTestCase {
+    func testRoutingPolicyAcceptsMatchingCurrentDeviceReadback() throws {
+        XCTAssertNoThrow(
+            try AudioInputRoutingPolicy.validate(
+                setStatus: noErr,
+                readbackStatus: noErr,
+                requested: 17,
+                observed: 17
+            )
+        )
+    }
+
+    func testRoutingPolicyRejectsSetFailureWithoutDefaultFallback() {
+        XCTAssertThrowsError(
+            try AudioInputRoutingPolicy.validate(
+                setStatus: -10879,
+                readbackStatus: noErr,
+                requested: 17,
+                observed: 17
+            )
+        ) { error in
+            XCTAssertEqual(error as? AudioInputRoutingError, .setFailed(-10879))
+        }
+    }
+
+    func testRoutingPolicyRejectsReadbackFailureAndMismatch() {
+        XCTAssertThrowsError(
+            try AudioInputRoutingPolicy.validate(
+                setStatus: noErr,
+                readbackStatus: -50,
+                requested: 17,
+                observed: nil
+            )
+        ) { error in
+            XCTAssertEqual(error as? AudioInputRoutingError, .readbackFailed(-50))
+        }
+
+        XCTAssertThrowsError(
+            try AudioInputRoutingPolicy.validate(
+                setStatus: noErr,
+                readbackStatus: noErr,
+                requested: 17,
+                observed: 18
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AudioInputRoutingError,
+                .readbackMismatch(requested: 17, observed: 18)
+            )
+        }
+    }
+
+    func testNativeFormatPreflightRejectsInvalidDeviceAndChannel() {
+        XCTAssertThrowsError(
+            try AudioInputFormatPolicy.validate(
+                sampleRate: 48_000,
+                channelCount: 0,
+                commonFormat: .pcmFormatFloat32,
+                channelPolicy: .mixdown
+            )
+        ) { error in
+            XCTAssertEqual(error as? AudioInputFormatError, .noInputChannels)
+        }
+
+        XCTAssertThrowsError(
+            try AudioInputFormatPolicy.validate(
+                sampleRate: 48_000,
+                channelCount: 1,
+                commonFormat: .pcmFormatFloat32,
+                channelPolicy: .channel(1)
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AudioInputFormatError,
+                .channelOutOfBounds(index: 1, count: 1)
+            )
+        }
+    }
+
+    func testCatalogSkipsOnlyExplicitOutputOnlyStreamStatuses() {
+        XCTAssertTrue(
+            AudioInputDeviceCatalog.isOutputOnlyStatus(kAudioHardwareUnknownPropertyError)
+        )
+        XCTAssertTrue(
+            AudioInputDeviceCatalog.isOutputOnlyStatus(kAudioHardwareBadStreamError)
+        )
+        XCTAssertFalse(
+            AudioInputDeviceCatalog.isOutputOnlyStatus(kAudioHardwareBadDeviceError)
+        )
+    }
+
     func testRuntimeFailureGateDeduplicatesObserverCallbacksUntilReset() {
         var gate = AudioCaptureFailureGate()
 

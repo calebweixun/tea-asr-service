@@ -88,6 +88,146 @@ enum AudioInputDeviceSelection {
     }
 }
 
+/// CoreAudio routing has two independent failure points: setting the device
+/// and asking the audio unit which device it actually owns.  Keeping this
+/// validation pure prevents a failed read-back from becoming an implicit
+/// route to the system default and makes the policy testable without hardware.
+enum AudioInputRoutingError: LocalizedError, Equatable {
+    case audioUnitUnavailable
+    case setFailed(OSStatus)
+    case readbackFailed(OSStatus)
+    case readbackMismatch(requested: AudioDeviceID, observed: AudioDeviceID)
+
+    var errorDescription: String? {
+        switch self {
+        case .audioUnitUnavailable:
+            return "找不到 AVAudioEngine 的輸入單元。"
+        case .setFailed(let status):
+            return "CoreAudio 設定指定輸入裝置失敗（OSStatus: \(status)）。"
+        case .readbackFailed(let status):
+            return "CoreAudio 無法讀回目前輸入裝置（OSStatus: \(status)）。"
+        case .readbackMismatch(let requested, let observed):
+            return "CoreAudio 讀回的裝置 ID (\(observed)) 與指定 ID (\(requested)) 不一致。"
+        }
+    }
+}
+
+enum AudioInputRoutingPolicy {
+    static func validate(
+        setStatus: OSStatus,
+        readbackStatus: OSStatus,
+        requested: AudioDeviceID,
+        observed: AudioDeviceID?
+    ) throws {
+        guard setStatus == noErr else {
+            throw AudioInputRoutingError.setFailed(setStatus)
+        }
+        guard readbackStatus == noErr, let observed else {
+            throw AudioInputRoutingError.readbackFailed(readbackStatus)
+        }
+        guard observed == requested else {
+            throw AudioInputRoutingError.readbackMismatch(
+                requested: requested,
+                observed: observed
+            )
+        }
+    }
+}
+
+/// Configure the input unit before the engine starts, then verify that CoreAudio
+/// accepted the requested device. A successful setter alone is not proof of the
+/// route: some virtual and aggregate devices keep the old device silently.
+enum AudioInputDeviceRouting {
+    static func configure(
+        deviceID: AudioDeviceID,
+        on input: AVAudioInputNode
+    ) throws {
+        guard let audioUnit = input.audioUnit else {
+            throw AudioInputRoutingError.audioUnitUnavailable
+        }
+
+        var requestedDeviceID = deviceID
+        let setStatus = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &requestedDeviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+
+        var observedDeviceID = AudioDeviceID(kAudioObjectUnknown)
+        var readbackSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let readbackStatus = AudioUnitGetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &observedDeviceID,
+            &readbackSize
+        )
+
+        try AudioInputRoutingPolicy.validate(
+            setStatus: setStatus,
+            readbackStatus: readbackStatus,
+            requested: deviceID,
+            observed: readbackStatus == noErr ? observedDeviceID : nil
+        )
+    }
+}
+
+/// The input node reports the device's native format after routing.  Validate
+/// it before installing a tap so an unsupported device fails before the engine
+/// starts instead of failing later from inside the audio callback.
+enum AudioInputFormatError: LocalizedError, Equatable {
+    case invalidSampleRate(Double)
+    case noInputChannels
+    case channelOutOfBounds(index: Int, count: Int)
+    case unsupportedSampleFormat
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidSampleRate(let sampleRate):
+            return "輸入裝置回報無效的原生取樣率（\(sampleRate) Hz）。"
+        case .noInputChannels:
+            return "輸入裝置回報零個輸入聲道。"
+        case .channelOutOfBounds(let index, let count):
+            return "指定聲道 \(index + 1) 超出裝置目前的 \(count) 個聲道。"
+        case .unsupportedSampleFormat:
+            return "輸入裝置的原生 PCM 格式不是目前支援的 Float32 或 Int16。"
+        }
+    }
+}
+
+enum AudioInputFormatPolicy {
+    static func validate(
+        sampleRate: Double,
+        channelCount: Int,
+        commonFormat: AVAudioCommonFormat,
+        channelPolicy: AudioChannelPolicy
+    ) throws {
+        guard sampleRate.isFinite, sampleRate > 0 else {
+            throw AudioInputFormatError.invalidSampleRate(sampleRate)
+        }
+        guard channelCount > 0 else {
+            throw AudioInputFormatError.noInputChannels
+        }
+        if case .channel(let index) = channelPolicy,
+           !(0..<channelCount).contains(index) {
+            throw AudioInputFormatError.channelOutOfBounds(
+                index: index,
+                count: channelCount
+            )
+        }
+        switch commonFormat {
+        case .pcmFormatFloat32, .pcmFormatInt16:
+            break
+        default:
+            throw AudioInputFormatError.unsupportedSampleFormat
+        }
+    }
+}
+
 enum AudioInputDeviceOption: Equatable {
     case systemDefault
     case available(AudioInputDevice)
@@ -395,37 +535,94 @@ enum AudioChannelMixer {
 
 /// Runtime bridge from CoreAudio's volatile IDs to stable descriptors.
 enum AudioInputDeviceCatalog {
+    enum Error: LocalizedError, Equatable {
+        case deviceListSize(OSStatus)
+        case deviceListRead(OSStatus)
+        case invalidDeviceListSize(UInt32)
+        case deviceProperty(deviceID: AudioDeviceID, selector: AudioObjectPropertySelector, status: OSStatus)
+        case missingDeviceProperty(deviceID: AudioDeviceID, selector: AudioObjectPropertySelector)
+        case invalidStreamConfiguration(deviceID: AudioDeviceID, size: UInt32)
+        case defaultDeviceQuery(OSStatus)
+        case defaultDeviceNotInCatalog(AudioDeviceID)
+
+        var errorDescription: String? {
+            switch self {
+            case .deviceListSize(let status):
+                return "無法取得 CoreAudio 輸入裝置清單大小（OSStatus: \(status)）。"
+            case .deviceListRead(let status):
+                return "無法讀取 CoreAudio 輸入裝置清單（OSStatus: \(status)）。"
+            case .invalidDeviceListSize(let size):
+                return "CoreAudio 回報無效的裝置清單大小（\(size) bytes）。"
+            case .deviceProperty(let deviceID, let selector, let status):
+                return "無法讀取 CoreAudio 裝置 \(deviceID) 的屬性 \(selector)（OSStatus: \(status)）。"
+            case .missingDeviceProperty(let deviceID, let selector):
+                return "CoreAudio 裝置 \(deviceID) 沒有屬性 \(selector) 的值。"
+            case .invalidStreamConfiguration(let deviceID, let size):
+                return "CoreAudio 裝置 \(deviceID) 回報無效的輸入 stream configuration（\(size) bytes）。"
+            case .defaultDeviceQuery(let status):
+                return "無法查詢系統預設輸入裝置（OSStatus: \(status)）。"
+            case .defaultDeviceNotInCatalog(let deviceID):
+                return "系統預設輸入裝置 ID \(deviceID) 不在目前的 CoreAudio 裝置清單中。"
+            }
+        }
+    }
+
     struct Record {
         let descriptor: AudioInputDevice
         let deviceID: AudioDeviceID
     }
 
+    private enum InputChannelQuery {
+        case count(Int)
+        case noInputStream
+    }
+
+    /// Output-only AudioObjects are present in the global device list but do
+    /// not expose an input stream configuration.  They must not poison the
+    /// microphone catalog; a selected UID is still retained as a zero-channel
+    /// record so capture reports a visible failure instead of defaulting.
+    static func isOutputOnlyStatus(_ status: OSStatus) -> Bool {
+        status == kAudioHardwareUnknownPropertyError
+            || status == kAudioHardwareBadStreamError
+            || status == kAudioHardwareUnsupportedOperationError
+    }
+
     static func enumerate() -> [AudioInputDevice] {
-        records().map(\.descriptor)
+        records()
+            .filter { $0.descriptor.inputChannels > 0 }
+            .map(\.descriptor)
     }
 
     static func records() -> [Record] {
+        (try? recordsOrThrow()) ?? []
+    }
+
+    static func recordsOrThrow() throws -> [Record] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
         var dataSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
+        let sizeStatus = AudioObjectGetPropertyDataSize(
             AudioObjectID(kAudioObjectSystemObject),
             &address,
             0,
             nil,
             &dataSize
-        ) == noErr else {
-            return []
+        )
+        guard sizeStatus == noErr else {
+            throw Error.deviceListSize(sizeStatus)
         }
 
+        guard dataSize % UInt32(MemoryLayout<AudioDeviceID>.stride) == 0 else {
+            throw Error.invalidDeviceListSize(dataSize)
+        }
         let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.stride
         guard count > 0 else { return [] }
         var ids = [AudioDeviceID](repeating: AudioDeviceID(kAudioObjectUnknown), count: count)
         let readStatus = ids.withUnsafeMutableBytes { bytes in
-            guard let baseAddress = bytes.baseAddress else { return OSStatus(-50) }
+            guard let baseAddress = bytes.baseAddress else { return OSStatus(paramErr) }
             return AudioObjectGetPropertyData(
                 AudioObjectID(kAudioObjectSystemObject),
                 &address,
@@ -435,15 +632,20 @@ enum AudioInputDeviceCatalog {
                 baseAddress
             )
         }
-        guard readStatus == noErr else { return [] }
+        guard readStatus == noErr else {
+            throw Error.deviceListRead(readStatus)
+        }
 
-        return ids.compactMap { deviceID in
-            guard
-                let uid = stringProperty(deviceID, selector: kAudioDevicePropertyDeviceUID),
-                let name = stringProperty(deviceID, selector: kAudioObjectPropertyName),
-                let channelCount = inputChannelCount(deviceID),
-                channelCount > 0
-            else { return nil }
+        return try ids.map { deviceID in
+            let uid = try stringProperty(deviceID, selector: kAudioDevicePropertyDeviceUID)
+            let name = try stringProperty(deviceID, selector: kAudioObjectPropertyName)
+            let channelCount: Int
+            switch try inputChannelCount(deviceID) {
+            case .count(let count):
+                channelCount = count
+            case .noInputStream:
+                channelCount = 0
+            }
             return Record(
                 descriptor: AudioInputDevice(
                     uid: uid,
@@ -456,6 +658,10 @@ enum AudioInputDeviceCatalog {
     }
 
     static func defaultRecord() -> Record? {
+        try? defaultRecordOrThrow()
+    }
+
+    static func defaultRecordOrThrow() throws -> Record {
         var deviceID = AudioDeviceID(kAudioObjectUnknown)
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultInputDevice,
@@ -463,21 +669,27 @@ enum AudioInputDeviceCatalog {
             mElement: kAudioObjectPropertyElementMain
         )
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        guard AudioObjectGetPropertyData(
+        let status = AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject),
             &address,
             0,
             nil,
             &size,
             &deviceID
-        ) == noErr else { return nil }
-        return records().first(where: { $0.deviceID == deviceID })
+        )
+        guard status == noErr else {
+            throw Error.defaultDeviceQuery(status)
+        }
+        guard let record = try recordsOrThrow().first(where: { $0.deviceID == deviceID }) else {
+            throw Error.defaultDeviceNotInCatalog(deviceID)
+        }
+        return record
     }
 
     private static func stringProperty(
         _ deviceID: AudioDeviceID,
         selector: AudioObjectPropertySelector
-    ) -> String? {
+    ) throws -> String {
         var address = AudioObjectPropertyAddress(
             mSelector: selector,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -485,27 +697,47 @@ enum AudioInputDeviceCatalog {
         )
         var value: Unmanaged<CFString>?
         var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        guard AudioObjectGetPropertyData(
+        let status = AudioObjectGetPropertyData(
             deviceID,
             &address,
             0,
             nil,
             &size,
             &value
-        ) == noErr, let value else { return nil }
+        )
+        guard status == noErr else {
+            throw Error.deviceProperty(deviceID: deviceID, selector: selector, status: status)
+        }
+        guard let value else {
+            throw Error.missingDeviceProperty(deviceID: deviceID, selector: selector)
+        }
         return value.takeUnretainedValue() as String
     }
 
-    private static func inputChannelCount(_ deviceID: AudioDeviceID) -> Int? {
+    private static func inputChannelCount(_ deviceID: AudioDeviceID) throws -> InputChannelQuery {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreamConfiguration,
             mScope: kAudioObjectPropertyScopeInput,
             mElement: kAudioObjectPropertyElementMain
         )
         var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr,
-              size >= UInt32(MemoryLayout<AudioBufferList>.size)
-        else { return nil }
+        let sizeStatus = AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size)
+        guard sizeStatus == noErr else {
+            if isOutputOnlyStatus(sizeStatus) {
+                return .noInputStream
+            }
+            throw Error.deviceProperty(
+                deviceID: deviceID,
+                selector: kAudioDevicePropertyStreamConfiguration,
+                status: sizeStatus
+            )
+        }
+        guard size >= UInt32(MemoryLayout<AudioBufferList>.size) else {
+            if size == 0 {
+                return .noInputStream
+            }
+            throw Error.invalidStreamConfiguration(deviceID: deviceID, size: size)
+        }
 
         let raw = UnsafeMutableRawPointer.allocate(
             byteCount: Int(size),
@@ -513,15 +745,25 @@ enum AudioInputDeviceCatalog {
         )
         defer { raw.deallocate() }
         let list = raw.assumingMemoryBound(to: AudioBufferList.self)
-        guard AudioObjectGetPropertyData(
+        let readStatus = AudioObjectGetPropertyData(
             deviceID,
             &address,
             0,
             nil,
             &size,
             list
-        ) == noErr else { return nil }
+        )
+        guard readStatus == noErr else {
+            if isOutputOnlyStatus(readStatus) {
+                return .noInputStream
+            }
+            throw Error.deviceProperty(
+                deviceID: deviceID,
+                selector: kAudioDevicePropertyStreamConfiguration,
+                status: readStatus
+            )
+        }
         let buffers = UnsafeMutableAudioBufferListPointer(list)
-        return buffers.reduce(0) { $0 + Int($1.mNumberChannels) }
+        return .count(buffers.reduce(0) { $0 + Int($1.mNumberChannels) })
     }
 }
