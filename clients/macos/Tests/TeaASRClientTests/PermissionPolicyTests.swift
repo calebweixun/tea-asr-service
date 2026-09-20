@@ -44,6 +44,30 @@ final class PermissionPolicyTests: XCTestCase {
         XCTAssertTrue(state.item(for: .inputMonitoring).explanation.contains("不需要"))
     }
 
+    func testInputMonitoringBecomesRequiredForPushToTalk() {
+        let missing = PermissionPolicy.state(
+            microphone: .authorized,
+            accessibilityTrusted: true,
+            autoInsert: false,
+            inputMonitoringAuthorized: false,
+            requiresInputMonitoring: true
+        )
+        XCTAssertEqual(missing.inputMonitoring.requirement, .required)
+        XCTAssertFalse(missing.requiredPermissionsGranted)
+        XCTAssertEqual(missing.inputMonitoring.authorization, .denied)
+        XCTAssertNotNil(missing.inputMonitoring.actionTitle)
+
+        let granted = PermissionPolicy.state(
+            microphone: .authorized,
+            accessibilityTrusted: true,
+            autoInsert: false,
+            inputMonitoringAuthorized: true,
+            requiresInputMonitoring: true
+        )
+        XCTAssertTrue(granted.requiredPermissionsGranted)
+        XCTAssertTrue(granted.inputMonitoring.isSatisfied)
+    }
+
     func testPermissionSettingsURLsAreStableAndSpecific() {
         XCTAssertEqual(
             PermissionKind.microphone.settingsURL.absoluteString,
@@ -139,6 +163,7 @@ final class PermissionPolicyTests: XCTestCase {
 private final class FakePermissionPlatform: PermissionPlatform {
     var microphoneAuthorization: PermissionAuthorization
     var accessibilityTrusted: Bool
+    var inputMonitoringAuthorized: Bool = false
 
     init(
         microphoneAuthorization: PermissionAuthorization,
@@ -154,6 +179,10 @@ private final class FakePermissionPlatform: PermissionPlatform {
 
     func promptAccessibility() -> Bool {
         accessibilityTrusted
+    }
+
+    func promptInputMonitoring() -> Bool {
+        inputMonitoringAuthorized
     }
 
     func openSettings(for kind: PermissionKind) -> Bool {

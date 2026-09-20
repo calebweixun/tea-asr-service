@@ -1,6 +1,7 @@
 import AVFoundation
 import AppKit
 import ApplicationServices
+import CoreGraphics
 import Foundation
 
 /// Small platform seam that keeps permission policy tests completely away from
@@ -9,10 +10,13 @@ import Foundation
 protocol PermissionPlatform {
     var microphoneAuthorization: PermissionAuthorization { get }
     var accessibilityTrusted: Bool { get }
+    var inputMonitoringAuthorized: Bool { get }
 
     func requestMicrophoneAccess(completion: @escaping (Bool) -> Void)
     @discardableResult
     func promptAccessibility() -> Bool
+    @discardableResult
+    func promptInputMonitoring() -> Bool
     @discardableResult
     func openSettings(for kind: PermissionKind) -> Bool
 }
@@ -44,6 +48,10 @@ struct SystemPermissionPlatform: PermissionPlatform {
         return AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
 
+    var inputMonitoringAuthorized: Bool {
+        CGPreflightListenEventAccess()
+    }
+
     func requestMicrophoneAccess(completion: @escaping (Bool) -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
@@ -67,6 +75,11 @@ struct SystemPermissionPlatform: PermissionPlatform {
             kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
         ]
         return AXIsProcessTrustedWithOptions(options as CFDictionary)
+    }
+
+    @discardableResult
+    func promptInputMonitoring() -> Bool {
+        CGRequestListenEventAccess()
     }
 
     @discardableResult
@@ -95,6 +108,7 @@ enum PermissionRefreshPolicy {
 final class PermissionCoordinator {
     private let platform: PermissionPlatform
     private var autoInsert: Bool
+    private var requiresInputMonitoring: Bool
     private var activationRefreshTask: Task<Void, Never>?
     private var accessibilitySettingsWasOpened = false
 
@@ -107,14 +121,18 @@ final class PermissionCoordinator {
 
     init(
         platform: PermissionPlatform = SystemPermissionPlatform(),
-        autoInsert: Bool = true
+        autoInsert: Bool = true,
+        requiresInputMonitoring: Bool = false
     ) {
         self.platform = platform
         self.autoInsert = autoInsert
+        self.requiresInputMonitoring = requiresInputMonitoring
         self.state = PermissionPolicy.state(
             microphone: platform.microphoneAuthorization,
             accessibilityTrusted: platform.accessibilityTrusted,
-            autoInsert: autoInsert
+            autoInsert: autoInsert,
+            inputMonitoringAuthorized: platform.inputMonitoringAuthorized,
+            requiresInputMonitoring: requiresInputMonitoring
         )
     }
 
@@ -127,13 +145,23 @@ final class PermissionCoordinator {
         refresh()
     }
 
+    /// Push-to-talk needs a passive global key-up monitor.  Toggle mode uses
+    /// Carbon's registered hot key and does not require Input Monitoring.
+    func updateInteractionRequirement(_ required: Bool) {
+        guard requiresInputMonitoring != required else { return }
+        requiresInputMonitoring = required
+        refresh()
+    }
+
     /// Re-read both permissions. Call this when the main window becomes active
     /// again because the user may have changed a TCC switch in System Settings.
     func refresh() {
         state = PermissionPolicy.state(
             microphone: platform.microphoneAuthorization,
             accessibilityTrusted: platform.accessibilityTrusted,
-            autoInsert: autoInsert
+            autoInsert: autoInsert,
+            inputMonitoringAuthorized: platform.inputMonitoringAuthorized,
+            requiresInputMonitoring: requiresInputMonitoring
         )
         if state.accessibility.requirement != .required || state.accessibility.isSatisfied {
             // A successful re-check is the only authoritative signal that the
@@ -222,9 +250,8 @@ final class PermissionCoordinator {
             promptAccessibility()
             _ = openSettings(for: kind)
         case .inputMonitoring:
-            // This app does not use event taps. Keep the method exhaustive so
-            // future permission rows can delegate to one action entry point.
-            break
+            _ = platform.promptInputMonitoring()
+            _ = openSettings(for: kind)
         }
     }
 }

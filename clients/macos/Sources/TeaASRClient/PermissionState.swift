@@ -44,7 +44,7 @@ enum PermissionKind: String, CaseIterable, Identifiable {
         case .accessibility:
             return "只有自動貼上到前景 app 時需要；剪貼簿模式不需要。"
         case .inputMonitoring:
-            return "目前沒有使用 event tap，因此不需要輸入監控權限。"
+            return "按住說話模式需要接收其他 app 的按鍵放開事件。"
         }
     }
 
@@ -104,9 +104,19 @@ struct PermissionItemState: Equatable, Identifiable {
 
     var id: PermissionKind { kind }
     var title: String { kind.title }
-    var explanation: String { kind.explanation }
+    var explanation: String {
+        if kind == .inputMonitoring, requirement == .notRequired {
+            return "目前使用切換模式，不需要輸入監控權限。"
+        }
+        return kind.explanation
+    }
     var settingsURL: URL { kind.settingsURL }
-    var actionTitle: String? { kind.actionTitle }
+    var actionTitle: String? {
+        if kind == .inputMonitoring, requirement == .required {
+            return "開啟輸入監控設定"
+        }
+        return kind.actionTitle
+    }
 
     var isSatisfied: Bool {
         authorization == .authorized || authorization == .notRequired
@@ -164,7 +174,9 @@ struct PermissionState: Equatable {
     static func make(
         microphone: PermissionAuthorization,
         accessibilityTrusted: Bool,
-        autoInsert: Bool = true
+        autoInsert: Bool = true,
+        inputMonitoringAuthorized: Bool = false,
+        requiresInputMonitoring: Bool = false
     ) -> PermissionState {
         PermissionState(
             microphone: PermissionItemState(
@@ -183,8 +195,10 @@ struct PermissionState: Equatable {
             ),
             inputMonitoring: PermissionItemState(
                 kind: .inputMonitoring,
-                requirement: PermissionKind.inputMonitoring.requirement,
-                authorization: .notRequired
+                requirement: requiresInputMonitoring ? .required : .notRequired,
+                authorization: requiresInputMonitoring
+                    ? (inputMonitoringAuthorized ? .authorized : .denied)
+                    : .notRequired
             )
         )
     }
@@ -196,12 +210,16 @@ enum PermissionPolicy {
     static func state(
         microphone: PermissionAuthorization,
         accessibilityTrusted: Bool,
-        autoInsert: Bool = true
+        autoInsert: Bool = true,
+        inputMonitoringAuthorized: Bool = false,
+        requiresInputMonitoring: Bool = false
     ) -> PermissionState {
         PermissionState.make(
             microphone: microphone,
             accessibilityTrusted: accessibilityTrusted,
-            autoInsert: autoInsert
+            autoInsert: autoInsert,
+            inputMonitoringAuthorized: inputMonitoringAuthorized,
+            requiresInputMonitoring: requiresInputMonitoring
         )
     }
 }
