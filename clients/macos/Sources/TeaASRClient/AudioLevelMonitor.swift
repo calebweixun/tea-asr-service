@@ -124,7 +124,74 @@ enum AudioLevelMath {
     }
 }
 
+/// Display scale for the input-level bar.
+///
+/// A linear RMS amplitude is the wrong thing to use as a fill ratio: ordinary
+/// speech sits around 0.02–0.1 RMS, which fills 2–10% of the bar and looks
+/// broken.  Ears — and every conventional level meter — are logarithmic, so the
+/// bar maps dBFS instead.  The floor is −60 dBFS: quiet room tone lands near
+/// the bottom, normal speech (−30…−18 dBFS) lands in the middle half, and
+/// clipping reaches the right edge.
+enum AudioLevelScale {
+    /// Everything at or below this many dBFS maps to an empty bar.
+    static let floorDB: Float = -60
+
+    /// Convert a linear 0…1 amplitude to a 0…1 bar fill ratio on a dBFS scale.
+    static func normalized(amplitude: Float) -> Float {
+        guard amplitude.isFinite, amplitude > 0 else { return 0 }
+        let bounded = min(1, amplitude)
+        let decibels = 20 * log10(bounded)
+        guard decibels > floorDB else { return 0 }
+        return min(1, (decibels - floorDB) / -floorDB)
+    }
+
+    /// Convert a measured (linear) sample into the display units the bar draws.
+    static func display(for sample: AudioLevelSample) -> AudioLevelSample {
+        AudioLevelSample(
+            rms: normalized(amplitude: sample.rms),
+            peak: normalized(amplitude: sample.peak)
+        )
+    }
+}
+
+/// Decides when a freshly smoothed level is worth pushing to the UI.
+///
+/// The tap fires roughly every 43 ms, and pushing every one of those to AppKit
+/// redraws the bar far more often than anyone can see.  Deliveries are capped
+/// at ~30 Hz and skipped entirely while the value is visually unchanged, so a
+/// silent settings page does no drawing work at all.
+enum AudioLevelUpdatePolicy {
+    /// ~30 Hz: the fastest rate a level meter needs to look continuous.
+    static let minimumInterval: TimeInterval = 1.0 / 30.0
+    /// Below this the fill moves less than a pixel on a 220 pt bar.
+    static let minimumChange: Float = 0.004
+    /// Even a frozen value is refreshed this often so the bar always settles.
+    static let idleRefreshInterval: TimeInterval = 0.5
+
+    static func shouldDeliver(
+        pending: AudioLevelSample,
+        lastDelivered: AudioLevelSample?,
+        elapsed: TimeInterval,
+        minimumInterval: TimeInterval = minimumInterval,
+        minimumChange: Float = minimumChange,
+        idleRefreshInterval: TimeInterval = idleRefreshInterval
+    ) -> Bool {
+        guard let lastDelivered else { return true }
+        guard elapsed >= minimumInterval else { return false }
+        let change = max(
+            abs(pending.rms - lastDelivered.rms),
+            abs(pending.peak - lastDelivered.peak)
+        )
+        if change >= minimumChange { return true }
+        return elapsed >= idleRefreshInterval
+    }
+}
+
 /// Attack and release are deliberately separate so speech onset is visible quickly while silence settles gently.
+///
+/// The values fed in are already on the dBFS display scale, so the
+/// coefficients behave uniformly across the whole range instead of crawling
+/// near silence the way linear-amplitude smoothing does.
 struct AudioLevelSmoother {
     let attack: Float
     let release: Float
@@ -184,19 +251,55 @@ final class AudioInputLease {
 }
 
 enum AudioInputLeaseCoordinator {
-    private static let lock = NSLock()
+    /// Upper bound on how long a starting capture waits for the level monitor
+    /// to finish letting go of the device.  The wait exists so a handoff that
+    /// is merely slow does not look like a conflict; it is bounded so a stuck
+    /// holder surfaces as a visible failure instead of hanging the app.
+    static let handoffTimeout: TimeInterval = 1.0
+
+    private static let condition = NSCondition()
     private static var holder: (deviceUID: String, token: UUID)?
 
+    /// True while any audio path in this process owns the input device.
+    static var isHeld: Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return holder != nil
+    }
+
     static func acquire(deviceUID: String) throws -> AudioInputLease {
+        try acquire(deviceUID: deviceUID, waitingUpTo: 0)
+    }
+
+    /// Acquire the process-wide input lease, optionally waiting up to
+    /// `timeout` seconds for the current holder to release it.
+    static func acquire(
+        deviceUID: String,
+        waitingUpTo timeout: TimeInterval
+    ) throws -> AudioInputLease {
         let normalizedUID = deviceUID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedUID.isEmpty else {
             throw AudioLevelMonitorError.invalidDeviceUID
         }
 
-        lock.lock()
-        defer { lock.unlock() }
+        let boundedTimeout = max(0, timeout)
+        let deadline = Date().addingTimeInterval(boundedTimeout)
+
+        condition.lock()
+        defer { condition.unlock() }
+
+        while holder != nil {
+            guard boundedTimeout > 0 else {
+                throw AudioLevelMonitorError.deviceBusy(uid: normalizedUID)
+            }
+            // NSCondition.wait(until:) returns false once the deadline passes.
+            if !condition.wait(until: deadline) { break }
+        }
         guard holder == nil else {
-            throw AudioLevelMonitorError.deviceBusy(uid: normalizedUID)
+            throw AudioLevelMonitorError.deviceHandoffTimedOut(
+                uid: normalizedUID,
+                seconds: boundedTimeout
+            )
         }
 
         let token = UUID()
@@ -204,11 +307,25 @@ enum AudioInputLeaseCoordinator {
         return AudioInputLease(deviceUID: normalizedUID, token: token)
     }
 
+    /// Wait, bounded, until no audio path holds the device.  Returns false if
+    /// the lease is still held when the timeout expires.
+    @discardableResult
+    static func waitUntilIdle(timeout: TimeInterval = handoffTimeout) -> Bool {
+        let deadline = Date().addingTimeInterval(max(0, timeout))
+        condition.lock()
+        defer { condition.unlock() }
+        while holder != nil {
+            if !condition.wait(until: deadline) { break }
+        }
+        return holder == nil
+    }
+
     fileprivate static func release(deviceUID: String, token: UUID) {
-        lock.lock()
-        defer { lock.unlock() }
+        condition.lock()
+        defer { condition.unlock() }
         guard holder?.deviceUID == deviceUID, holder?.token == token else { return }
         holder = nil
+        condition.broadcast()
     }
 }
 
@@ -229,6 +346,7 @@ enum AudioLevelMonitorError: LocalizedError, Equatable {
     case deviceCatalogFailed(reason: String)
     case inputDeviceUnavailable(uid: String)
     case deviceBusy(uid: String)
+    case deviceHandoffTimedOut(uid: String, seconds: TimeInterval)
     case audioUnitUnavailable(name: String, uid: String)
     case deviceConfigurationFailed(name: String, uid: String, reason: String)
     case invalidNativeFormat(name: String, uid: String, sampleRate: Double, channels: Int)
@@ -248,6 +366,8 @@ enum AudioLevelMonitorError: LocalizedError, Equatable {
             return "找不到指定的輸入裝置（UID: \(uid)）；沒有改用系統預設裝置。"
         case .deviceBusy(let uid):
             return "輸入裝置目前由另一個錄音路徑使用中（UID: \(uid)）。請先停止錄音或電平監看。"
+        case .deviceHandoffTimedOut(let uid, let seconds):
+            return "等待輸入電平監看釋放輸入裝置逾時（UID: \(uid)，已等 \(String(format: "%.1f", seconds)) 秒）。請關閉設定頁面後再試一次。"
         case .audioUnitUnavailable(let name, let uid):
             return "輸入裝置「\(name)」（UID: \(uid)）沒有可用的音訊單元。"
         case .deviceConfigurationFailed(let name, let uid, let reason):
@@ -322,6 +442,9 @@ final class AudioLevelMonitor {
     private var hasReceivedSample = false
     private var noDataWorkItem: DispatchWorkItem?
     private var smoother = AudioLevelSmoother()
+    /// Throttle bookkeeping; only touched on `levelQueue`.
+    private var lastDeliveredSample: AudioLevelSample?
+    private var lastDeliveredAt: Date?
     private var engine: AVAudioEngine?
     private var lease: AudioInputLease?
     private var tapInstalled = false
@@ -530,10 +653,24 @@ final class AudioLevelMonitor {
             self.hasReceivedSample = true
             self.stateLock.unlock()
 
-            let smoothed = self.smoother.update(sample)
+            // Map to the dBFS display scale before smoothing so attack/release
+            // behave the same at speech level and at room-tone level.
+            let smoothed = self.smoother.update(AudioLevelScale.display(for: sample))
             if self.state == .noData {
                 self.setState(.monitoring)
             }
+
+            // levelQueue is serial, so this throttle state needs no extra lock.
+            let now = Date()
+            let elapsed = self.lastDeliveredAt.map { now.timeIntervalSince($0) } ?? .infinity
+            guard AudioLevelUpdatePolicy.shouldDeliver(
+                pending: smoothed,
+                lastDelivered: self.lastDeliveredSample,
+                elapsed: elapsed
+            ) else { return }
+            self.lastDeliveredSample = smoothed
+            self.lastDeliveredAt = now
+
             self.deliver(smoothed, generation: token)
         }
     }
@@ -590,7 +727,18 @@ final class AudioLevelMonitor {
 
         levelQueue.async { [weak self] in
             self?.smoother.reset()
+            self?.lastDeliveredSample = nil
+            self?.lastDeliveredAt = nil
         }
+    }
+
+    /// Wait, bounded, until this process no longer holds the input device.
+    /// AudioCapture uses this so a start never races a monitor teardown.
+    @discardableResult
+    static func waitForInputHandoff(
+        timeout: TimeInterval = AudioInputLeaseCoordinator.handoffTimeout
+    ) -> Bool {
+        AudioInputLeaseCoordinator.waitUntilIdle(timeout: timeout)
     }
 
     private func fail(_ error: AudioLevelMonitorError) {
