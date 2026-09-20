@@ -95,6 +95,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         case operations
         case settings
         case diagnostics
+        case logs
 
         var title: String {
             switch self {
@@ -102,6 +103,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             case .operations: return "操作"
             case .settings: return "設定"
             case .diagnostics: return "診斷與權限"
+            case .logs: return "日誌"
             }
         }
 
@@ -111,6 +113,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             case .operations: return "mic"
             case .settings: return "gearshape"
             case .diagnostics: return "stethoscope"
+            case .logs: return "doc.plaintext"
             }
         }
     }
@@ -118,6 +121,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let settings: Settings
     private let appState: AppState
     private let permissions: PermissionCoordinator
+    private let logsClient: LogsFetching
 
     private let splitViewController = FixedSidebarSplitViewController()
     private let sidebarController = NSViewController()
@@ -158,6 +162,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let transcriptStartedAt = Date()
     private var autosaveStatus = "尚未寫入自動存檔"
     private var shortcutStatus = "尚未註冊"
+
+    // MARK: - 日誌頁狀態
+    //
+    // The level defaults to `.warning` (warning + error), not `.debug`: the
+    // whole point of this page is that an error is visible at a glance the
+    // moment it opens, without being buried under routine debug/info noise.
+    // `limit` sits well inside the server's 1–500 ceiling — enough recent
+    // context without a pathologically large single response.
+    private var logsSelectedLevel: LogLevel = .warning
+    private let logsLimit = 200
+    private var logsEntries: [LogEntry] = []
+    private var logsHasMore = false
+    private var logsFetchState: LogsFetchState = .idle
+    /// Kept only so `#if DEBUG` tests can read back the rendered log lines;
+    /// the text view itself lives inside the section's own view tree and is
+    /// otherwise addressed only through `update()`.
+    private var logsTextView: NSTextView?
     private lazy var autosaveURL: URL = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmm"
@@ -176,10 +197,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     var onShortcutEditorWillBegin: (() -> Void)?
     var onShortcutEditorDidEnd: (() -> Void)?
 
-    init(settings: Settings, appState: AppState, permissions: PermissionCoordinator) {
+    init(
+        settings: Settings,
+        appState: AppState,
+        permissions: PermissionCoordinator,
+        logsClient: LogsFetching = LogsClient()
+    ) {
         self.settings = settings
         self.appState = appState
         self.permissions = permissions
+        self.logsClient = logsClient
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 980, height: 650),
@@ -548,6 +575,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             button.font = .systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
         }
         mountSelectedSection()
+        // Logs are pulled on demand only: switching into the page or hitting
+        // its own refresh button, never a background timer (see the note on
+        // `refresh()`). This is the "switching to the page" half of that
+        // contract.
+        if section == .logs {
+            fetchLogs()
+        }
     }
 
     /// The permission rows live in Diagnostics now, so a TCC change refreshes
@@ -595,6 +629,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         case .operations: runtime = buildOperationsSection()
         case .settings: runtime = buildSettingsSection()
         case .diagnostics: runtime = buildDiagnosticsSection()
+        case .logs: runtime = buildLogsSection()
         }
         sectionRuntimes[section] = runtime
         return runtime
@@ -1125,6 +1160,81 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         return SectionRuntime(view: view, update: update)
     }
 
+    /// The log page: a level filter, a refresh button, one status/notice line
+    /// (loading / error / empty / "there is more but no paging"), and the
+    /// event list itself. Built once like every other section — `update()`
+    /// only reassigns the popup selection, the status label's text/colour,
+    /// and the text view's attributed string; it never rebuilds the row
+    /// stack, so switching pages and back preserves scroll position.
+    private func buildLogsSection() -> SectionRuntime {
+        let levelPopup = NSPopUpButton()
+        levelPopup.identifier = NSUserInterfaceItemIdentifier("logsLevel")
+        for level in LogLevel.allCases {
+            levelPopup.addItem(withTitle: level.filterTitle)
+            levelPopup.item(at: levelPopup.numberOfItems - 1)?.representedObject = level.rawValue
+        }
+        levelPopup.target = self
+        levelPopup.action = #selector(logsLevelChanged(_:))
+        levelPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: Metrics.fieldWidth).isActive = true
+        levelPopup.setContentHuggingPriority(.required, for: .horizontal)
+
+        let refresh = actionButton(title: "重新整理", action: #selector(refreshLogs(_:)))
+        let controlsRow = buttonRow([levelPopup, refresh])
+
+        // Can carry a full connection/auth error message (see
+        // logsStatusPresentation()), so it opts out of the fixed-height,
+        // truncating row the same way "最近錯誤" does on Diagnostics.
+        let statusLabel = stableLabel(font: .systemFont(ofSize: 12), maxLines: nil, color: .secondaryLabelColor)
+
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: Metrics.tight, height: Metrics.tight)
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = true
+        scroll.backgroundColor = .textBackgroundColor
+        scroll.borderType = .bezelBorder
+        scroll.documentView = textView
+        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
+        logsTextView = textView
+
+        let view = sectionStack(views: [
+            group(title: "日誌", views: [controlsRow, statusLabel, scroll]),
+        ])
+
+        func update() {
+            if let item = levelPopup.itemArray.first(where: {
+                ($0.representedObject as? String) == logsSelectedLevel.rawValue
+            }) {
+                levelPopup.select(item)
+            }
+            let presentation = logsStatusPresentation()
+            if statusLabel.stringValue != presentation.text { statusLabel.stringValue = presentation.text }
+            statusLabel.textColor = presentation.color
+
+            let rendered = logsRenderedText()
+            if textView.attributedString().string != rendered.string {
+                let wasAtBottom = isScrolledToBottom(scroll)
+                textView.textStorage?.setAttributedString(rendered)
+                if wasAtBottom {
+                    scrollToBottom(scroll)
+                }
+            }
+        }
+        update()
+        return SectionRuntime(view: view, update: update)
+    }
+
     // MARK: - Actions
 
     @objc private func startDictation(_ sender: Any?) {
@@ -1174,6 +1284,109 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func audioChannelSelectionChanged(_ sender: NSPopUpButton) {
         startAudioLevelMonitor()
+    }
+
+    // MARK: - 日誌
+
+    @objc private func refreshLogs(_ sender: Any?) {
+        fetchLogs()
+    }
+
+    @objc private func logsLevelChanged(_ sender: NSPopUpButton) {
+        guard
+            let rawValue = sender.selectedItem?.representedObject as? String,
+            let level = LogLevel(rawValue: rawValue)
+        else { return }
+        logsSelectedLevel = level
+        fetchLogs()
+    }
+
+    /// The only place `/v1/logs` is ever requested: called when the user
+    /// switches into the Logs page (`select(section:)`) or presses its own
+    /// "重新整理" button/changes the level filter. There is intentionally no
+    /// timer here — a log page that refreshes itself in the background would
+    /// also be a page that quietly scrolls out from under someone reading it.
+    private func fetchLogs() {
+        logsFetchState = .loading
+        updateSection(.logs)
+        let token = try? settings.token()
+        logsClient.fetch(
+            host: settings.host,
+            port: settings.port,
+            token: token,
+            level: logsSelectedLevel,
+            limit: logsLimit
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let response):
+                self.logsEntries = response.items
+                self.logsHasMore = response.hasMore
+                self.logsFetchState = .loaded
+            case .failure(let error):
+                self.logsEntries = []
+                self.logsHasMore = false
+                self.logsFetchState = .failed(error)
+            }
+            self.updateSection(.logs)
+        }
+    }
+
+    /// The status line above the log list. A failed fetch and a genuinely
+    /// empty result must never render the same text (see
+    /// `LogsFetchState`/`LogsPresentation`): a service that is offline, or a
+    /// token the server rejected, says so explicitly instead of looking like
+    /// "there is nothing to report".
+    private func logsStatusPresentation() -> (text: String, color: NSColor) {
+        switch logsFetchState {
+        case .idle:
+            return (LogsPresentation.idleNotice(), .secondaryLabelColor)
+        case .loading:
+            return (LogsPresentation.loadingNotice(), .secondaryLabelColor)
+        case .failed(let error):
+            return (error.localizedDescription, .systemRed)
+        case .loaded:
+            var message = logsEntries.isEmpty
+                ? LogsPresentation.emptyNotice()
+                : LogsPresentation.loadedSummary(count: logsEntries.count)
+            if logsHasMore {
+                message += " " + LogsPresentation.hasMoreNotice(shown: logsEntries.count)
+            }
+            return (message, .secondaryLabelColor)
+        }
+    }
+
+    /// Renders the fetched entries as one line per row. Colour is used only
+    /// for its semantic meaning — error in red, warning in orange — every
+    /// other level (and every other part of the line) stays in the system's
+    /// neutral label colour rather than a per-level rainbow.
+    private func logsRenderedText() -> NSAttributedString {
+        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let result = NSMutableAttributedString()
+        guard !logsEntries.isEmpty else {
+            let placeholder = logsFetchState == .loading ? "" : logsStatusPresentation().text
+            result.append(NSAttributedString(
+                string: placeholder,
+                attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: font]
+            ))
+            return result
+        }
+        for (index, entry) in logsEntries.enumerated() {
+            let color: NSColor
+            switch entry.level.uppercased() {
+            case "ERROR": color = .systemRed
+            case "WARNING", "WARN": color = .systemOrange
+            default: color = .labelColor
+            }
+            result.append(NSAttributedString(
+                string: LogsPresentation.line(for: entry),
+                attributes: [.foregroundColor: color, .font: font]
+            ))
+            if index < logsEntries.count - 1 {
+                result.append(NSAttributedString(string: "\n"))
+            }
+        }
+        return result
     }
 
     // MARK: - 音訊電平監看
@@ -1941,5 +2154,10 @@ extension MainWindowController {
         detailView.subviews.forEach(visit)
         return texts
     }
+
+    /// The Logs page's rendered event list, for asserting on content that
+    /// lives in an `NSTextView` rather than an `NSTextField` (so it never
+    /// shows up in `debugLabelTexts()`).
+    var debugLogsRenderedText: String? { logsTextView?.string }
 }
 #endif
