@@ -59,6 +59,91 @@ struct ProcessedTranscript: Equatable {
     let appliedSteps: [String]
 }
 
+/// Removes a single trailing full-stop-class character from the end of the
+/// text. Interior punctuation, and any other trailing mark such as "？" or
+/// "！", are left untouched.
+///
+/// Scope, deliberately narrow (see `clients/macos/README.md`, "文字處理邊界"):
+/// - Only a *period* is removed. The user's report was specifically about
+///   the model appending a sentence-final full stop; question marks and
+///   exclamation marks carry intonation the user did not ask to lose, so a
+///   trailing "？"/"！" is never touched by this rule.
+/// - Three characters count as a period: the CJK ideographic full stop "。"
+///   (U+3002), the full-width Latin full stop "．" (U+FF0E), and the ASCII
+///   period "." (U+002E). Any other trailing character — including
+///   whitespace — leaves the text unchanged, so this rule looks past
+///   trailing whitespace to find the last non-whitespace character.
+/// - A decimal point ("3.14") or a common abbreviation ("Inc.") must never
+///   be stripped. Both are a single ASCII/full-width period that is
+///   indistinguishable from a sentence-final period by position alone, so
+///   two local, deterministic guards run before removing one:
+///     1. the character immediately before it is not a digit (protects any
+///        digit-period ending, not only a period followed by more digits —
+///        a conservative choice that never mistakes a decimal for a full
+///        stop, at the cost of also protecting a rarer digit-ending
+///        sentence such as "編號 5。"), and
+///     2. for the ASCII period specifically, the run of ASCII letters
+///        immediately before it, compared case-insensitively, is not in a
+///        small fixed abbreviation list (`TrailingPeriodStripRule.abbreviations`).
+///   Both guards are local string inspection: no dictionary, network call,
+///   or model inference, matching the "no cloud formatter" constraint.
+struct TrailingPeriodStripRule: TranscriptProcessingRule {
+    let identifier = "stripTrailingPunctuation"
+
+    /// Common English abbreviations that legitimately end a sentence with a
+    /// single ASCII period. Deliberately small, fixed, and single-token
+    /// (no internal "." such as "u.s") so the lookback stays a simple
+    /// contiguous run of ASCII letters.
+    static let abbreviations: Set<String> = [
+        "inc", "ltd", "co", "corp", "llc", "etc",
+        "mr", "mrs", "ms", "dr", "st", "jr", "sr",
+        "vs", "eg", "ie", "no", "vol", "fig", "approx"
+    ]
+
+    private static let fullStops: Set<Character> = ["\u{3002}", "\u{FF0E}", "."]
+
+    func apply(to text: String) -> String {
+        guard let lastIndex = text.indices.last(where: { !text[$0].isWhitespace }) else {
+            // Empty, or whitespace-only: nothing to do.
+            return text
+        }
+        let lastChar = text[lastIndex]
+        guard Self.fullStops.contains(lastChar) else { return text }
+
+        if lastIndex > text.startIndex {
+            let precedingIndex = text.index(before: lastIndex)
+            let precedingChar = text[precedingIndex]
+            if precedingChar.isNumber {
+                // Guard 1: a digit immediately before the mark — protects a
+                // decimal point regardless of what follows it.
+                return text
+            }
+            if lastChar == "." {
+                let word = Self.trailingASCIILetters(before: lastIndex, in: text)
+                if !word.isEmpty, Self.abbreviations.contains(word.lowercased()) {
+                    // Guard 2: a known abbreviation such as "Inc.".
+                    return text
+                }
+            }
+        }
+
+        var result = text
+        result.remove(at: lastIndex)
+        return result
+    }
+
+    private static func trailingASCIILetters(before index: String.Index, in text: String) -> String {
+        var start = index
+        while start > text.startIndex {
+            let prev = text.index(before: start)
+            let character = text[prev]
+            guard character.isASCII, character.isLetter else { break }
+            start = prev
+        }
+        return String(text[start..<index])
+    }
+}
+
 /// Applies deterministic client-side rules in a declared order.
 ///
 /// Cleaning rules run first and produce `cleanedText`; paste rules then run on
@@ -69,20 +154,37 @@ struct TranscriptProcessor {
     let cleaningRules: [any TranscriptProcessingRule]
     let pasteRules: [any TranscriptProcessingRule]
 
-    /// The default pipeline is intentionally a strict no-op.
+    /// Re-evaluated on every `process` call rather than baked in once at
+    /// construction time. `TranscriptEventProcessor` is built once and kept
+    /// for the app's lifetime (see `AppController`), so if this were decided
+    /// only in `init`, toggling the setting would need no changes to that
+    /// file at all — but it also would not take effect until the app
+    /// restarted. Re-checking per call lets the setting apply to the very
+    /// next transcript instead.
+    let isTrailingPunctuationStripEnabled: () -> Bool
+
+    /// The default pipeline is intentionally a strict no-op: `cleaningRules`
+    /// and `pasteRules` default to empty, and the trailing-punctuation rule
+    /// defaults to the user setting, which itself defaults to off.
     init(
         cleaningRules: [any TranscriptProcessingRule] = [],
-        pasteRules: [any TranscriptProcessingRule] = []
+        pasteRules: [any TranscriptProcessingRule] = [],
+        isTrailingPunctuationStripEnabled: @escaping () -> Bool = { Settings().stripTrailingPunctuation }
     ) {
         self.cleaningRules = cleaningRules
         self.pasteRules = pasteRules
+        self.isTrailingPunctuationStripEnabled = isTrailingPunctuationStripEnabled
     }
 
     func process(rawTranscript: String) -> TranscriptProcessingResult {
         var appliedSteps: [String] = []
+        var effectiveCleaningRules = cleaningRules
+        if isTrailingPunctuationStripEnabled() {
+            effectiveCleaningRules.append(TrailingPeriodStripRule())
+        }
         let cleanedText = apply(
             rawTranscript,
-            rules: cleaningRules,
+            rules: effectiveCleaningRules,
             appliedSteps: &appliedSteps
         )
         let pasteText = apply(
