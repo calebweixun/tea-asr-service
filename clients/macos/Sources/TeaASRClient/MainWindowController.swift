@@ -426,7 +426,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     private func buildOverviewSection() -> SectionRuntime {
         let hero = buildStatusHero()
-        let service = buildMetricCard(title: "服務", symbolName: "server.rack", tint: .systemBlue)
+        // "服務" can render a full service error (via serverSummary()), so it
+        // opts out of the fixed-height metric card and is allowed to grow —
+        // see buildMetricCard's doc comment. "模型" stays fixed since its
+        // value is always a short status/model-name summary.
+        let service = buildMetricCard(title: "服務", symbolName: "server.rack", tint: .systemBlue, maxLines: nil)
         let model = buildMetricCard(title: "模型", symbolName: "cpu", tint: .systemPurple)
         let sessionRow = buildValueRow(title: "Session")
         let audioRow = buildValueRow(title: "輸入")
@@ -806,10 +810,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     private func buildDiagnosticsSection() -> SectionRuntime {
         let stateRow = buildValueRow(title: "App state")
-        let clientRow = buildValueRow(title: "Client state")
+        // Client state's `.failed` case, the service probe summary, and the
+        // last-error row can all carry a full error message (see
+        // clientStateSummary()'s `.failed` branch and serverSummary()'s error
+        // passthrough). Truncating those to two lines hides the only clue to
+        // what broke, which is worse than the row growing — so these three
+        // opt out of the fixed-height row. "App state" and "Audio" stay
+        // fixed: their values are always short, fixed-vocabulary summaries.
+        let clientRow = buildValueRow(title: "Client state", maxLines: nil)
         let audioRow = buildValueRow(title: "Audio")
-        let serviceRow = buildValueRow(title: "Service probe")
-        let errorRow = buildValueRow(title: "最近錯誤")
+        let serviceRow = buildValueRow(title: "Service probe", maxLines: nil)
+        let errorRow = buildValueRow(title: "最近錯誤", maxLines: nil)
         let refresh = actionButton(title: "重新檢查服務", action: #selector(testService(_:)))
         let view = sectionStack(
             title: "診斷",
@@ -1225,15 +1236,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         return pair
     }
 
-    /// A metric card's value label uses `stableLabel`, which reserves a fixed
-    /// two-line height up front. That is what keeps the two overview metric
-    /// cards equal height across updates without an explicit height
-    /// constraint between them: neither card's content can grow past the
-    /// space it already reserved.
+    /// A metric card's value label uses `stableLabel`, which by default
+    /// reserves a fixed two-line height up front. That is what keeps the two
+    /// overview metric cards equal height across updates without an explicit
+    /// height constraint between them: neither card's content can grow past
+    /// the space it already reserved. Pass `maxLines: nil` (used for the
+    /// "服務" card, whose value can be a full service error) to opt that
+    /// card out and let it grow instead of truncating the error away; see
+    /// `stableLabel`'s doc comment for the full trade-off.
     private func buildMetricCard(
         title: String,
         symbolName: String,
-        tint: NSColor
+        tint: NSColor,
+        maxLines: Int? = 2
     ) -> (view: NSView, update: (String) -> Void) {
         let icon = NSImageView(
             image: NSImage(systemSymbolName: symbolName, accessibilityDescription: title) ?? NSImage()
@@ -1244,7 +1259,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 11, weight: .semibold)
         label.textColor = .secondaryLabelColor
-        let valueLabel = stableLabel(font: .systemFont(ofSize: 13, weight: .medium), maxLines: 2)
+        let valueLabel = stableLabel(font: .systemFont(ofSize: 13, weight: .medium), maxLines: maxLines)
         let heading = NSStackView(views: [icon, label])
         heading.orientation = .horizontal
         heading.alignment = .centerY
@@ -1325,25 +1340,39 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// minimum), so a status string going from one line to two — or back —
     /// never shifts the cards below it. Longer text truncates with an
     /// ellipsis instead of growing the layout.
-    private func stableLabel(font: NSFont, maxLines: Int, color: NSColor? = nil) -> NSTextField {
+    ///
+    /// `maxLines: nil` opts out of that trade entirely: the label gets no
+    /// line cap and no fixed height, so it wraps and grows like the label
+    /// this refactor replaced. Error/diagnostic text (service errors,
+    /// "Service probe", "Client state" failures) uses this — hiding the
+    /// only clue to what went wrong behind an ellipsis is worse than the
+    /// card occasionally growing. Everything else keeps the fixed-height
+    /// path, since those fields update far more often (every status tick)
+    /// and are the ones the earlier jitter bug was actually about.
+    private func stableLabel(font: NSFont, maxLines: Int?, color: NSColor? = nil) -> NSTextField {
         let label = NSTextField(wrappingLabelWithString: "")
         label.font = font
-        label.maximumNumberOfLines = maxLines
-        label.lineBreakMode = .byTruncatingTail
         if let color {
             label.textColor = color
         }
+        guard let maxLines else {
+            label.maximumNumberOfLines = 0
+            label.lineBreakMode = .byWordWrapping
+            return label
+        }
+        label.maximumNumberOfLines = maxLines
+        label.lineBreakMode = .byTruncatingTail
         let lineHeight = (font.ascender - font.descender + font.leading).rounded(.up)
         label.heightAnchor.constraint(equalToConstant: lineHeight * CGFloat(maxLines)).isActive = true
         return label
     }
 
-    private func buildValueRow(title: String) -> (view: NSView, update: (String) -> Void) {
+    private func buildValueRow(title: String, maxLines: Int? = 2) -> (view: NSView, update: (String) -> Void) {
         let key = NSTextField(labelWithString: title)
         key.font = .systemFont(ofSize: 12, weight: .semibold)
         key.textColor = .secondaryLabelColor
         key.widthAnchor.constraint(equalToConstant: 100).isActive = true
-        let value = stableLabel(font: .systemFont(ofSize: 13), maxLines: 2)
+        let value = stableLabel(font: .systemFont(ofSize: 13), maxLines: maxLines)
         let row = NSStackView(views: [key, value])
         row.orientation = .horizontal
         row.alignment = .firstBaseline
