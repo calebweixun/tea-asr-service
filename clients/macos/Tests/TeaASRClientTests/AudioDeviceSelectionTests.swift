@@ -315,9 +315,62 @@ final class AudioDeviceSelectionTests: XCTestCase {
     }
 
     func testCatalogExposesInputDevicesByStableUIDOnly() {
-        let devices = AudioInputDeviceCatalog.enumerate()
+        switch AudioInputDeviceCatalog.enumerationResult() {
+        case .success(let devices):
+            XCTAssertTrue(devices.allSatisfy { !$0.uid.isEmpty })
+            XCTAssertTrue(devices.allSatisfy { $0.inputChannels > 0 })
+        case .failure(let error):
+            XCTAssertFalse(error.localizedDescription.isEmpty)
+        }
+    }
 
-        XCTAssertTrue(devices.allSatisfy { !$0.uid.isEmpty })
-        XCTAssertTrue(devices.allSatisfy { $0.inputChannels > 0 })
+    func testDeviceOptionsExposeEnumerationFailureAsVisibleDisabledError() {
+        let options = AudioInputSettingsOptions.deviceOptions(
+            storedUID: nil,
+            enumeration: .failure(.deviceListSize(-50))
+        )
+
+        XCTAssertEqual(options.first, .systemDefault)
+        guard case .enumerationError(let message) = options[1] else {
+            return XCTFail("expected a visible enumeration error option")
+        }
+        XCTAssertTrue(message.contains("OSStatus: -50"))
+        XCTAssertTrue(options[1].title.contains("無法列出輸入裝置"))
+        XCTAssertFalse(options[1].isEnabled)
+    }
+
+    func testEmptyEnumerationAlsoShowsWhyOnlySystemDefaultIsAvailable() {
+        let options = AudioInputSettingsOptions.deviceOptions(
+            storedUID: nil,
+            enumeration: .success([])
+        )
+
+        XCTAssertEqual(options.first, .systemDefault)
+        XCTAssertTrue(options.contains {
+            if case .enumerationError = $0 { return true }
+            return false
+        })
+    }
+
+    func testInputDescriptorsKeepMultichannelAndVirtualInputs() {
+        let records = [
+            AudioInputDeviceCatalog.Record(
+                descriptor: AudioInputDevice(uid: "stereo", name: "Stereo mic", inputChannels: 2),
+                deviceID: 1
+            ),
+            AudioInputDeviceCatalog.Record(
+                descriptor: AudioInputDevice(uid: "virtual", name: "Virtual mic", inputChannels: 8),
+                deviceID: 2
+            ),
+            AudioInputDeviceCatalog.Record(
+                descriptor: AudioInputDevice(uid: "output-only", name: "Output only", inputChannels: 0),
+                deviceID: 3
+            ),
+        ]
+
+        XCTAssertEqual(
+            AudioInputDeviceCatalog.inputDescriptors(from: records).map(\.uid),
+            ["stereo", "virtual"]
+        )
     }
 }

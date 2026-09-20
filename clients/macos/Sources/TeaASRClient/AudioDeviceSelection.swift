@@ -232,6 +232,7 @@ enum AudioInputDeviceOption: Equatable {
     case systemDefault
     case available(AudioInputDevice)
     case unavailable(uid: String)
+    case enumerationError(message: String)
 
     var uid: String? {
         switch self {
@@ -241,6 +242,8 @@ enum AudioInputDeviceOption: Equatable {
             return device.uid
         case .unavailable(let uid):
             return uid
+        case .enumerationError:
+            return nil
         }
     }
 
@@ -252,11 +255,14 @@ enum AudioInputDeviceOption: Equatable {
             return device.name
         case .unavailable(let uid):
             return "不可用：\(uid)"
+        case .enumerationError(let message):
+            return "無法列出輸入裝置：\(message)"
         }
     }
 
     var isEnabled: Bool {
         if case .unavailable = self { return false }
+        if case .enumerationError = self { return false }
         return true
     }
 }
@@ -295,6 +301,31 @@ enum AudioInputChannelOption: Equatable {
 }
 
 enum AudioInputSettingsOptions {
+    static func deviceOptions(
+        storedUID: String?,
+        enumeration: Result<[AudioInputDevice], AudioInputDeviceCatalog.Error>
+    ) -> [AudioInputDeviceOption] {
+        let available: [AudioInputDevice]
+        let failureMessage: String?
+        switch enumeration {
+        case .success(let devices):
+            available = devices
+            failureMessage = devices.isEmpty
+                ? "CoreAudio 未回報任何輸入裝置（裝置清單為 0 bytes）。"
+                : nil
+        case .failure(let error):
+            available = []
+            failureMessage = error.localizedDescription
+        }
+
+        let storedOption = deviceOption(storedUID: storedUID, available: available)
+        let failureOption = failureMessage.map(AudioInputDeviceOption.enumerationError)
+        return [AudioInputDeviceOption.systemDefault]
+            + (failureOption.map { [$0] } ?? [])
+            + available.map(AudioInputDeviceOption.available)
+            + (storedOption.isEnabled ? [] : [storedOption])
+    }
+
     static func deviceOption(
         storedUID: String?,
         available: [AudioInputDevice]
@@ -587,14 +618,31 @@ enum AudioInputDeviceCatalog {
             || status == kAudioHardwareUnsupportedOperationError
     }
 
-    static func enumerate() -> [AudioInputDevice] {
-        records()
+    static func enumerate() throws -> [AudioInputDevice] {
+        inputDescriptors(from: try records())
+    }
+
+    static func enumerationResult() -> Result<[AudioInputDevice], Error> {
+        do {
+            return .success(try enumerate())
+        } catch let error as Error {
+            return .failure(error)
+        } catch {
+            // `enumerate()` only throws `AudioInputDeviceCatalog.Error`, but
+            // keep this seam total if a future implementation adds another
+            // CoreAudio failure type.
+            return .failure(.deviceListRead(OSStatus(paramErr)))
+        }
+    }
+
+    static func inputDescriptors(from records: [Record]) -> [AudioInputDevice] {
+        records
             .filter { $0.descriptor.inputChannels > 0 }
             .map(\.descriptor)
     }
 
-    static func records() -> [Record] {
-        (try? recordsOrThrow()) ?? []
+    static func records() throws -> [Record] {
+        try recordsOrThrow()
     }
 
     static func recordsOrThrow() throws -> [Record] {
