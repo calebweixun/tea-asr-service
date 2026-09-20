@@ -43,16 +43,26 @@ final class AudioLevelMonitorTests: XCTestCase {
     }
 
     func testSmootherUsesFastAttackAndGentleRelease() {
-        var smoother = AudioLevelSmoother(attack: 0.5, release: 0.25)
+        // One time constant covers 1 - 1/e of the distance, so a step of
+        // exactly `attackSeconds` lands on ~0.632 and the matching release
+        // step falls back by the same fraction of what is left.
+        var smoother = AudioLevelSmoother(attackSeconds: 0.01, releaseSeconds: 0.04)
 
-        XCTAssertEqual(smoother.update(AudioLevelSample(rms: 1, peak: 1)), .init(rms: 0.5, peak: 0.5))
-        XCTAssertEqual(smoother.update(.zero), .init(rms: 0.375, peak: 0.375))
+        let up = smoother.update(AudioLevelSample(rms: 1, peak: 1), interval: 0.01)
+        XCTAssertEqual(up.rms, 0.6321, accuracy: 0.001)
+
+        let down = smoother.update(.zero, interval: 0.04)
+        XCTAssertEqual(down.rms, 0.6321 * (1 - 0.6321), accuracy: 0.001)
+        XCTAssertLessThan(down.rms, up.rms)
     }
 
     func testSmootherClampsInvalidTargets() {
-        var smoother = AudioLevelSmoother(attack: 1, release: 1)
+        var smoother = AudioLevelSmoother(attackSeconds: 0, releaseSeconds: 0)
 
-        XCTAssertEqual(smoother.update(AudioLevelSample(rms: 2, peak: -.infinity)), .init(rms: 1, peak: 0))
+        XCTAssertEqual(
+            smoother.update(AudioLevelSample(rms: 2, peak: -.infinity), interval: 0.01),
+            .init(rms: 1, peak: 0)
+        )
         smoother.reset()
         XCTAssertEqual(smoother.current, .zero)
     }

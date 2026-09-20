@@ -86,6 +86,9 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var hotKeyRegistered = false
     private var hotKeyRegistrationOutcome: ShortcutRegistrationOutcome = .unavailable
     private var interactionMachine = DictationInteractionStateMachine(mode: .toggle)
+    /// Drops shortcut presses that arrive while a previous start is still
+    /// waiting on microphone consent (see `SessionStartGate`).
+    private var startGate = SessionStartGate()
     private let dictationOverlay = DictationOverlayController()
     private var workspaceObservers: [NSObjectProtocol] = []
     private var insertedDictationSegments = Set<String>()
@@ -510,6 +513,13 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     private func start(mode newMode: Mode) {
         guard mode == .idle else { stopSession(); return }
+        // `mode` is only assigned in `reallyStart`, i.e. after the
+        // asynchronous consent callback, so the guard above cannot stop a
+        // second press that arrives before then. Without this gate those
+        // presses stacked `capture.start` calls on one AVAudioEngine and
+        // blocked the main thread repeatedly — the "repeat it and the app
+        // stops responding" report.
+        guard startGate.begin() else { return }
         if newMode == .dictation {
             // Feedback first, before anything that can block or go async: the
             // Accessibility focus query below, microphone consent, the
@@ -534,6 +544,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         AudioCapture.requestPermission { [weak self] granted in
             guard let self else { return }
             guard granted else {
+                self.startGate.finish()
                 if newMode == .dictation {
                     self.dictationInsertionTarget = nil
                     self.interactionMachine.resetAfterStartFailure()
@@ -551,6 +562,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             if newMode == .dictation,
                self.settings.interactionMode == .pushToTalk,
                !self.interactionMachine.active {
+                self.startGate.finish()
                 self.dictationInsertionTarget = nil
                 // The `.starting` overlay was put up on key-down; nothing
                 // will follow it now, so it must not be left on screen.
@@ -562,6 +574,9 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func reallyStart(mode newMode: Mode) {
+        // Every exit from here on has a session (or a reported failure), so
+        // the gate reopens exactly once, at the end of this function.
+        defer { startGate.finish() }
         mode = newMode
         appState.setMode(newMode == .meeting ? .meeting : .dictation)
         capture.onFrame = { [weak self] frame in self?.client.send(pcm: frame) }
@@ -583,16 +598,16 @@ final class AppController: NSObject, NSApplicationDelegate {
                 self.render()
             }
         }
-        var managementWindowWasVisible = false
         if newMode == .dictation {
-            // Ordered *before* `capture.start` on purpose. This hides the
-            // management window (so TEA ASR cannot become the paste target)
-            // and, in doing so, stops the input level meter — which holds the
-            // process-wide input lease. Doing it afterwards made every
-            // dictation start from an open Settings page wait out
-            // `AudioInputLeaseCoordinator.handoffTimeout` for a device this
-            // app was about to release anyway.
-            managementWindowWasVisible = mainWindow?.window?.isVisible ?? false
+            // Ordered *before* `capture.start` on purpose: it stops the input
+            // level meter, which holds the process-wide input lease. Doing it
+            // afterwards made every dictation start from an open Settings page
+            // wait out `AudioInputLeaseCoordinator.handoffTimeout` for a device
+            // this app was about to release anyway.
+            //
+            // It no longer hides the management window. The user's window
+            // staying put is the point; `dictationInsertionTarget` above is
+            // what keeps a final out of TEA ASR itself.
             mainWindow?.hideForDictation()
         }
         do {
@@ -604,11 +619,6 @@ final class AppController: NSObject, NSApplicationDelegate {
             appState.setMode(.idle)
             if newMode == .dictation {
                 dictationOverlay.showError(error.localizedDescription)
-                // The window was hidden a moment ago for a session that never
-                // started; put it back exactly where the user left it.
-                if managementWindowWasVisible {
-                    mainWindow?.show(section: .overview)
-                }
             }
             mainWindow?.setStatus("無法開始錄音：\(error.localizedDescription)")
             alert("無法開始錄音", error.localizedDescription)
