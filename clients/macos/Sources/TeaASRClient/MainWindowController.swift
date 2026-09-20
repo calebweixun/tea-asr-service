@@ -1009,9 +1009,31 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let serviceControlStatus = stableLabel(font: .systemFont(ofSize: 12), maxLines: nil, color: .secondaryLabelColor)
         let serviceControlButton = actionButton(title: "啟動服務", action: #selector(toggleManagedService(_:)))
         serviceControlButton.identifier = NSUserInterfaceItemIdentifier("serviceControlButton")
+        // Scoped on purpose: this only ever stops the process *this app*
+        // launched from the button above and still holds a handle to. A
+        // LaunchAgent or a terminal-launched service is never touched, which
+        // is why this can default to on without breaking a deliberately
+        // resident service (see `ServiceQuitPolicy`).
+        let stopServiceOnQuit = NSButton(
+            checkboxWithTitle: "結束 TEA ASR 時一併停止本 app 啟動的服務",
+            target: self,
+            action: #selector(saveSettings(_:))
+        )
+        stopServiceOnQuit.identifier = NSUserInterfaceItemIdentifier("stopServiceOnQuit")
+        stopServiceOnQuit.state = settings.stopServiceOnQuit ? .on : .off
+        let stopServiceOnQuitNote = stableLabel(
+            font: .systemFont(ofSize: 12),
+            maxLines: nil,
+            color: .secondaryLabelColor
+        )
+        stopServiceOnQuitNote.stringValue =
+            "只對這個 app 啟動的服務行程有效。由 LaunchAgent 或你自己在終端機啟動的服務不會被動到。"
+            + "強制結束（Force Quit）或當機時也無法停止服務。"
         let serviceControlGrid = settingsGrid([
             [settingsLabel("執行狀態"), serviceControlStatus],
             [NSGridCell.emptyContentView, buttonRow([serviceControlButton])],
+            [NSGridCell.emptyContentView, stopServiceOnQuit],
+            [NSGridCell.emptyContentView, stopServiceOnQuitNote],
         ])
 
         // Model info + the one model action this build actually has: asking
@@ -1212,6 +1234,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         updateSection(.settings)
         updateSection(.logs)
     }
+
+    /// The service process this window launched, if any, so the app's quit
+    /// path can honour `stopServiceOnQuit` without ever discovering a process
+    /// by name. `nil` means this app launched nothing it can stop.
+    var managedServiceProcess: ManagedProcess? { managedService }
 
     /// Triggers the one model action that already exists server-side:
     /// `tea-asr model-prepare`. This is not a model *switch* — the CLI takes
@@ -1865,6 +1892,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if let stripTrailingPunctuation = controls.stripTrailingPunctuation {
             settings.stripTrailingPunctuation = stripTrailingPunctuation.state == .on
         }
+        if let stopServiceOnQuit = controls.stopServiceOnQuit {
+            settings.stopServiceOnQuit = stopServiceOnQuit.state == .on
+        }
         return true
     }
 
@@ -1931,7 +1961,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         autoInsert: NSButton?, preview: NSButton?, inputDevice: NSPopUpButton?,
         inputChannel: NSPopUpButton?, shortcut: ShortcutButton?,
         interactionMode: NSPopUpButton?, feedback: NSButton?,
-        serviceExecutable: NSTextField?, stripTrailingPunctuation: NSButton?
+        serviceExecutable: NSTextField?, stripTrailingPunctuation: NSButton?,
+        stopServiceOnQuit: NSButton?
     ) {
         var fields: [String: NSControl] = [:]
         func visit(_ view: NSView) {
@@ -1958,7 +1989,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             // here is keyed on the identifier string, not the type, so a
             // distinct identifier is what actually keeps them apart.
             fields["serviceExecutable"] as? NSTextField,
-            fields["stripTrailingPunctuation"] as? NSButton
+            fields["stripTrailingPunctuation"] as? NSButton,
+            fields["stopServiceOnQuit"] as? NSButton
         )
     }
 

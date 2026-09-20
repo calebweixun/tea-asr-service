@@ -54,7 +54,13 @@ struct DictationInteractionStateMachine: Equatable {
             }
 
         case .shortcutUp:
-            guard shortcutIsDown else { return [] }
+            // Deliberately not guarded on `shortcutIsDown`. The latch exists
+            // to suppress duplicate *downs*; making the release depend on it
+            // means a latch that was cleared for any other reason (the hot
+            // key being re-registered under the user's finger, a manual
+            // session start) turns a real key release into a no-op and leaves
+            // push-to-talk recording with nothing left to stop it. An
+            // unmatched release while nothing is active is still a no-op.
             shortcutIsDown = false
             guard mode == .pushToTalk else { return [] }
             guard active else { return [] }
@@ -75,6 +81,20 @@ struct DictationInteractionStateMachine: Equatable {
             active = false
             return [.stop]
         }
+    }
+
+    /// Drops the physical-press latch without touching `active`.
+    ///
+    /// Unregistering a Carbon hot key discards the pending
+    /// `kEventHotKeyReleased` for a key that is physically down right now, so
+    /// after a re-registration the latch can never be cleared by a release
+    /// that will never arrive. Every later key-down is then read as a
+    /// duplicate and silently dropped — the "pressed it and nothing
+    /// happened" symptom. Callers that (un)register the hot key must call
+    /// this, because from that moment on the latch is a claim about the
+    /// keyboard that this process can no longer substantiate.
+    mutating func releaseShortcutLatch() {
+        shortcutIsDown = false
     }
 
     mutating func resetAfterStartFailure() {

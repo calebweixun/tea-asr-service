@@ -154,11 +154,12 @@ final class MainWindowSectionUpdateTests: XCTestCase {
         XCTAssertGreaterThan(controller.debugMonitorStartCount, countBeforeChannelChange, "切換聲道應重啟電平監看")
     }
 
-    /// 驗證設定頁十一個 identifier 依然完整保留（第十一個是新增的
-    /// `serviceExecutable`，用來手動指定 tea-asr 執行檔路徑），且包含
-    /// AudioLevelBarView。
+    /// 驗證設定頁十二個 identifier 依然完整保留（第十一個是
+    /// `serviceExecutable`，用來手動指定 tea-asr 執行檔路徑；第十二個是
+    /// `stopServiceOnQuit`，決定結束 app 時要不要一併停掉本 app 啟動的
+    /// 服務行程），且包含 AudioLevelBarView。
     @MainActor
-    func testSettingsViewRetainsElevenIdentifiersAndIncludesAudioLevelBar() {
+    func testSettingsViewRetainsTwelveIdentifiersAndIncludesAudioLevelBar() {
         let controller = makeController()
         controller.show(section: .settings)
 
@@ -170,8 +171,9 @@ final class MainWindowSectionUpdateTests: XCTestCase {
         let requiredIdentifiers = [
             "host", "port", "token", "autoInsert", "preview",
             "inputDevice", "inputChannel", "shortcut", "interactionMode", "feedback",
-            "serviceExecutable"
+            "serviceExecutable", "stopServiceOnQuit"
         ]
+        XCTAssertEqual(requiredIdentifiers.count, 12)
 
         for id in requiredIdentifiers {
             let found = findView(identifier: id, in: mountedView) as NSView?
