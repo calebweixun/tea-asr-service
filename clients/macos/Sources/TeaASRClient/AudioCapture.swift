@@ -42,6 +42,58 @@ enum AudioCaptureTeardownPolicy {
     }
 }
 
+enum AudioEngineConfigurationChangeDecision: Equatable {
+    /// The engine was reconfigured but still points at the selected device with
+    /// the same format, so the running session stays valid.
+    case keepRunning
+    /// Something that invalidates the session changed; stop and tell the user.
+    case failRecording(reason: String)
+}
+
+/// Why `AVAudioEngineConfigurationChange` cannot be treated as "the device
+/// changed": AVAudioEngine posts it for our *own* reconfiguration too.  Setting
+/// `kAudioOutputUnitProperty_CurrentDevice` during start, and the HAL settling
+/// after the level monitor releases the same microphone, both produce one —
+/// asynchronously on the main queue, i.e. after the session is already running.
+///
+/// Treating those as an external device switch is what aborts dictation started
+/// from the settings page.  The silent-fallback guard from docs/06 still has to
+/// hold, so instead of trusting the notification this policy re-reads the
+/// facts: it keeps the session only when the input unit is *provably* still
+/// bound to the selected device with an unchanged format, and fails otherwise —
+/// including when the readback itself fails, because then we cannot prove it.
+enum AudioEngineConfigurationChangePolicy {
+    static let deviceChangedReason =
+        "音訊引擎設定已變更；為避免靜默改用其他裝置，請重新開始錄音"
+
+    static func decide(
+        isRunning: Bool,
+        expectedDeviceID: AudioDeviceID?,
+        boundDeviceID: AudioDeviceID?,
+        expectedFormat: AudioInputFormatSignature?,
+        currentFormat: AudioInputFormatSignature?
+    ) -> AudioEngineConfigurationChangeDecision {
+        guard isRunning else { return .keepRunning }
+        guard let expectedDeviceID, let expectedFormat else {
+            return .failRecording(reason: deviceChangedReason)
+        }
+        guard let boundDeviceID, let currentFormat else {
+            return .failRecording(
+                reason: "音訊引擎設定已變更且無法確認目前的輸入裝置；為避免靜默改用其他裝置，請重新開始錄音"
+            )
+        }
+        guard boundDeviceID == expectedDeviceID else {
+            return .failRecording(reason: deviceChangedReason)
+        }
+        guard currentFormat == expectedFormat else {
+            return .failRecording(
+                reason: "輸入裝置格式已變更（\(expectedFormat.sampleRate) Hz/\(expectedFormat.channelCount) ch → \(currentFormat.sampleRate) Hz/\(currentFormat.channelCount) ch）；為避免重採樣靜默失真，請重新開始錄音"
+            )
+        }
+        return .keepRunning
+    }
+}
+
 /// Microphone capture resampled to the 16 kHz mono PCM16 the service accepts.
 ///
 /// AVAudioConverter is used rather than a hand-rolled resampler: docs/03 asks
@@ -60,6 +112,7 @@ final class AudioCapture {
         case inputDeviceUnavailable(uid: String)
         case deviceCatalogFailed(uid: String?, reason: String)
         case deviceConfigurationFailed(name: String, uid: String, reason: String)
+        case inputHandoffTimedOut(name: String, uid: String, seconds: TimeInterval)
         case formatUnavailable(name: String, uid: String, sampleRate: Double, channels: Int, reason: String)
         case channelUnavailable(name: String, uid: String, policy: AudioChannelPolicy, available: Int)
         case engineStartFailed(name: String, uid: String, reason: String)
@@ -83,6 +136,8 @@ final class AudioCapture {
                 return "無法查詢輸入裝置：\(reason)"
             case .deviceConfigurationFailed(let name, let uid, let reason):
                 return "無法使用輸入裝置「\(name)」（UID: \(uid)）：\(reason) 請改選其他裝置後再試。"
+            case .inputHandoffTimedOut(let name, let uid, let seconds):
+                return "輸入裝置「\(name)」（UID: \(uid)）仍被輸入電平監看佔用，等待 \(String(format: "%.1f", seconds)) 秒後仍未釋放；沒有改用其他裝置。請離開設定頁面後再開始錄音。"
             case .formatUnavailable(let name, let uid, let sampleRate, let channels, let reason):
                 return "輸入裝置「\(name)」（UID: \(uid)）回報無法使用的格式（\(sampleRate) Hz、\(channels) 聲道）：\(reason)"
             case .channelUnavailable(let name, let uid, let policy, let available):
@@ -121,6 +176,8 @@ final class AudioCapture {
     private var inputDeviceName: String?
     private var activeConfiguration: AudioInputConfiguration?
     private var activeDevice: AudioInputDeviceCatalog.Record?
+    /// The input format the running converter and tap were built for.
+    private var activeInputFormat: AudioInputFormatSignature?
     private var failureGate = AudioCaptureFailureGate()
     private var configurationChangeObserver: NSObjectProtocol?
     private var deviceListListener: AudioObjectPropertyListenerBlock?
@@ -261,10 +318,28 @@ final class AudioCapture {
         // Swift error, so this ordering is part of the failure policy.
         let input = engine.inputNode
 
+        // Starting dictation straight from the settings page hands the device
+        // over from the level monitor.  The monitor is stopped first, but its
+        // teardown can still be finishing, so wait — bounded, never forever —
+        // for the process-wide lease instead of failing on a transient busy.
         let acquiredLease: AudioInputLease
         do {
             acquiredLease = try AudioInputLeaseCoordinator.acquire(
-                deviceUID: record.descriptor.uid
+                deviceUID: record.descriptor.uid,
+                waitingUpTo: AudioInputLeaseCoordinator.handoffTimeout
+            )
+        } catch let error as AudioLevelMonitorError {
+            if case .deviceHandoffTimedOut(_, let seconds) = error {
+                throw CaptureError.inputHandoffTimedOut(
+                    name: record.descriptor.name,
+                    uid: record.descriptor.uid,
+                    seconds: seconds
+                )
+            }
+            throw CaptureError.deviceConfigurationFailed(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                reason: error.localizedDescription
             )
         } catch {
             throw CaptureError.deviceConfigurationFailed(
@@ -403,6 +478,7 @@ final class AudioCapture {
         isRunning = true
         activeConfiguration = configuration
         activeDevice = record
+        activeInputFormat = AudioInputFormatSignature(inputFormat)
         monitoredDeviceID = record.deviceID
         leaseCommitted = true
         do {
@@ -520,6 +596,7 @@ final class AudioCapture {
 
         activeConfiguration = nil
         activeDevice = nil
+        activeInputFormat = nil
         monitoredDeviceID = nil
     }
 
@@ -689,13 +766,34 @@ final class AudioCapture {
 
     private func handleEngineConfigurationChange() {
         guard isRunning else { return }
-        failRuntime(
-            .deviceConfigurationFailed(
-                name: activeDevice?.descriptor.name ?? "",
-                uid: activeDevice?.descriptor.uid ?? "",
-                reason: "音訊引擎設定已變更；為避免靜默改用其他裝置，請重新開始錄音"
-            )
+        let currentFormat = activeInputNode.map {
+            AudioInputFormatSignature($0.outputFormat(forBus: 0))
+        }
+        let boundDeviceID = activeInputNode.flatMap {
+            AudioInputDeviceRouting.boundDeviceID(on: $0)
+        }
+        let decision = AudioEngineConfigurationChangePolicy.decide(
+            isRunning: isRunning,
+            expectedDeviceID: activeDevice?.deviceID,
+            boundDeviceID: boundDeviceID,
+            expectedFormat: activeInputFormat,
+            currentFormat: currentFormat
         )
+        switch decision {
+        case .keepRunning:
+            // Self-inflicted reconfiguration (routing during start, or the HAL
+            // settling after the level monitor let go).  Nothing changed that
+            // the session depends on, so keep recording.
+            return
+        case .failRecording(let reason):
+            failRuntime(
+                .deviceConfigurationFailed(
+                    name: activeDevice?.descriptor.name ?? "",
+                    uid: activeDevice?.descriptor.uid ?? "",
+                    reason: reason
+                )
+            )
+        }
     }
 
     private func removeRuntimeObservers() {

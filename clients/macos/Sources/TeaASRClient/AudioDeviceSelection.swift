@@ -1,4 +1,5 @@
 import AVFoundation
+import AudioToolbox
 import CoreAudio
 import Foundation
 
@@ -172,6 +173,50 @@ enum AudioInputDeviceRouting {
             readbackStatus: readbackStatus,
             requested: deviceID,
             observed: readbackStatus == noErr ? observedDeviceID : nil
+        )
+    }
+
+    /// Read back which CoreAudio device the engine's input unit is bound to
+    /// right now.  `nil` means the readback itself failed, which callers must
+    /// treat as "cannot prove the device is still ours" rather than as "fine".
+    static func boundDeviceID(on input: AVAudioInputNode) -> AudioDeviceID? {
+        guard let audioUnit = input.audioUnit else { return nil }
+        var observedDeviceID = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioUnitGetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &observedDeviceID,
+            &size
+        )
+        guard status == noErr, observedDeviceID != AudioDeviceID(kAudioObjectUnknown) else {
+            return nil
+        }
+        return observedDeviceID
+    }
+}
+
+/// The parts of an input format that make a running capture session valid.
+/// Kept as a plain value so the engine-reconfiguration policy can be tested
+/// without an audio device.
+struct AudioInputFormatSignature: Equatable {
+    let sampleRate: Double
+    let channelCount: Int
+    let commonFormat: AVAudioCommonFormat
+
+    init(sampleRate: Double, channelCount: Int, commonFormat: AVAudioCommonFormat) {
+        self.sampleRate = sampleRate
+        self.channelCount = channelCount
+        self.commonFormat = commonFormat
+    }
+
+    init(_ format: AVAudioFormat) {
+        self.init(
+            sampleRate: format.sampleRate,
+            channelCount: Int(format.channelCount),
+            commonFormat: format.commonFormat
         )
     }
 }
