@@ -23,6 +23,129 @@ struct SessionGeneration {
     }
 }
 
+/// Why a session that still *looks* live stopped making progress.
+enum SessionStall: Equatable {
+    /// No PCM frame reached the client for this long: the microphone tap, the
+    /// audio engine or the capture queue stopped feeding us.
+    case audioStopped(seconds: TimeInterval)
+    /// Nothing at all arrived from the service for this long. A live session
+    /// gets one `audio.ack` per frame plus a `pong` per keepalive, so this
+    /// means the socket died without reporting it.
+    case serverSilent(seconds: TimeInterval)
+
+    var issue: ConnectionIssue {
+        switch self {
+        case .audioStopped(let seconds):
+            return ConnectionIssue(
+                code: "audio_stalled",
+                message: "已經 \(Int(seconds.rounded())) 秒沒有收到麥克風音訊，錄音已停止。請重新開始聆聽。",
+                retryable: true,
+                closeCode: nil
+            )
+        case .serverSilent(let seconds):
+            return ConnectionIssue(
+                code: "connection_stalled",
+                message: "已經 \(Int(seconds.rounded())) 秒沒有收到服務的回應，連線已中斷。請重新開始聆聽。",
+                retryable: true,
+                closeCode: nil
+            )
+        }
+    }
+}
+
+/// Liveness bookkeeping for one live session.
+///
+/// docs/06 constraint 4 (visible failure) is the whole point: a session that
+/// quietly stops working must never keep showing "listening". Nothing here
+/// touches URLSession or AVAudioEngine, so the whole policy — including the
+/// keepalive cadence that keeps a *silent* session alive — is unit-testable.
+struct SessionWatchdog {
+    enum Action: Equatable {
+        case none
+        /// Send an application-level `ping`. A long pause still carries audio
+        /// frames, but a keepalive proves the socket in both directions
+        /// without depending on the audio path being healthy.
+        case keepalive
+        case fail(SessionStall)
+    }
+
+    /// Frames arrive every 100 ms, so 4 s is 40 missed frames: far outside
+    /// normal scheduling jitter, still fast enough that the user sees the
+    /// overlay change instead of talking into a void.
+    static let audioStallTimeout: TimeInterval = 4.0
+    /// An idle session still produces one `audio.ack` per frame plus a `pong`
+    /// per keepalive. Two missed keepalive round-trips is the budget.
+    static let serverSilenceTimeout: TimeInterval = 20.0
+    /// Comfortably inside the service's own 120 s idle timeout, so a session
+    /// whose audio path hiccups does not lose the connection as well.
+    static let keepaliveInterval: TimeInterval = 10.0
+    /// How often the owner should call `tick`.
+    static let checkInterval: TimeInterval = 1.0
+
+    let audioStallTimeout: TimeInterval
+    let serverSilenceTimeout: TimeInterval
+    let keepaliveInterval: TimeInterval
+
+    private(set) var isArmed = false
+    private(set) var lastFrameAt: Date?
+    private(set) var lastServerEventAt: Date?
+    private(set) var lastKeepaliveAt: Date?
+
+    init(
+        audioStallTimeout: TimeInterval = SessionWatchdog.audioStallTimeout,
+        serverSilenceTimeout: TimeInterval = SessionWatchdog.serverSilenceTimeout,
+        keepaliveInterval: TimeInterval = SessionWatchdog.keepaliveInterval
+    ) {
+        self.audioStallTimeout = audioStallTimeout
+        self.serverSilenceTimeout = serverSilenceTimeout
+        self.keepaliveInterval = keepaliveInterval
+    }
+
+    mutating func arm(at now: Date) {
+        isArmed = true
+        lastFrameAt = now
+        lastServerEventAt = now
+        lastKeepaliveAt = now
+    }
+
+    mutating func disarm() {
+        isArmed = false
+        lastFrameAt = nil
+        lastServerEventAt = nil
+        lastKeepaliveAt = nil
+    }
+
+    mutating func noteFrame(at now: Date) {
+        guard isArmed else { return }
+        lastFrameAt = now
+    }
+
+    mutating func noteServerEvent(at now: Date) {
+        guard isArmed else { return }
+        lastServerEventAt = now
+    }
+
+    /// The server is checked first: when the socket dies the audio path often
+    /// stalls too, and "the service stopped answering" is the more actionable
+    /// of the two messages.
+    mutating func tick(now: Date) -> Action {
+        guard isArmed else { return .none }
+        if let lastServerEventAt {
+            let silent = now.timeIntervalSince(lastServerEventAt)
+            if silent >= serverSilenceTimeout { return .fail(.serverSilent(seconds: silent)) }
+        }
+        if let lastFrameAt {
+            let stalled = now.timeIntervalSince(lastFrameAt)
+            if stalled >= audioStallTimeout { return .fail(.audioStopped(seconds: stalled)) }
+        }
+        if let lastKeepaliveAt, now.timeIntervalSince(lastKeepaliveAt) >= keepaliveInterval {
+            self.lastKeepaliveAt = now
+            return .keepalive
+        }
+        return .none
+    }
+}
+
 /// Drives one continuous session against the local service.
 ///
 /// Everything the wire contract requires of a client lives here: the flow
@@ -63,6 +186,11 @@ final class ASRClient: NSObject {
     private var backlog = AudioPreRollBuffer(capacity: 150)  // 15 s at 100 ms
     private var wantsPreview = false
     private var modelWaits = 0
+
+    /// Liveness for the running session. Owned by `queue` like everything else.
+    private var watchdog = SessionWatchdog()
+    private var watchdogTimer: DispatchSourceTimer?
+    private var keepaliveCounter: UInt64 = 0
 
     private let queue = DispatchQueue(label: "tea-asr.client")
 
@@ -146,6 +274,11 @@ final class ASRClient: NSObject {
             // Set this first: while waiting for the model to load there is no
             // task yet, and a pending reconnect would otherwise ignore the stop.
             self.stopping = true
+            // The caller stops the microphone before stopping us, and the
+            // service may take a while to drain the last segment. Both look
+            // exactly like a stall from here, so the watchdog stands down;
+            // "停止中…等待最後一句" is already an honest description of it.
+            self.stopWatchdog()
             guard self.task != nil else {
                 self.teardown()
                 return
@@ -170,6 +303,7 @@ final class ASRClient: NSObject {
     func send(pcm: Data) {
         queue.async {
             guard !self.stopping else { return }
+            self.watchdog.noteFrame(at: Date())
             guard self.backlog.append(pcm) else {
                 // Dropping frames here would splice the audio while the sample
                 // clock kept counting, so the server would see a continuous
@@ -279,6 +413,10 @@ final class ASRClient: NSObject {
             case .success(let message):
                 self.queue.async {
                     guard self.task === task, self.generation.accepts(generation) else { return }
+                    // Any frame from the service — including the per-audio-frame
+                    // `audio.ack` and the keepalive `pong` — proves the socket
+                    // is still carrying traffic.
+                    self.watchdog.noteServerEvent(at: Date())
                     if case .string(let text) = message {
                         self.handle(text: text)
                     }
@@ -349,6 +487,7 @@ final class ASRClient: NSObject {
                 protocolVersion: started.transcriptMode == "revisable" ? "1.1" : "1.0",
                 preview: started.transcriptMode == "revisable"
             )
+            startWatchdog()
             drain()
         case "flow.control":
             guard let flow = try? decoder.decode(Wire.FlowControl.self, from: data) else { return }
@@ -395,6 +534,48 @@ final class ASRClient: NSObject {
         ])
     }
 
+    // MARK: - Liveness
+
+    /// Arm the liveness watchdog for the session that just became live.
+    ///
+    /// Two jobs, and both are required: the keepalive keeps a *silent* session
+    /// connected (the service drops a connection that sends nothing for 120 s),
+    /// and the stall checks make sure that when the session dies anyway the
+    /// state leaves `.listening` at once instead of lying to the user.
+    private func startWatchdog() {
+        stopWatchdog()
+        watchdog.arm(at: Date())
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(
+            deadline: .now() + SessionWatchdog.checkInterval,
+            repeating: SessionWatchdog.checkInterval,
+            leeway: .milliseconds(200)
+        )
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            switch self.watchdog.tick(now: Date()) {
+            case .none:
+                return
+            case .keepalive:
+                self.keepaliveCounter &+= 1
+                self.send(json: [
+                    "type": "ping",
+                    "request_id": "mac-keepalive-\(self.keepaliveCounter)",
+                ])
+            case .fail(let stall):
+                self.fail(stall.issue)
+            }
+        }
+        watchdogTimer = timer
+        timer.resume()
+    }
+
+    private func stopWatchdog() {
+        watchdogTimer?.cancel()
+        watchdogTimer = nil
+        watchdog.disarm()
+    }
+
     private func notify(_ message: String) {
         DispatchQueue.main.async { [weak self] in self?.onNotice?(message) }
     }
@@ -412,6 +593,10 @@ final class ASRClient: NSObject {
         // the references. A new connection can then safely use the same client
         // without an old receive/send completion changing its state.
         generation.invalidate()
+        // Must come before the socket goes away: a tick that fires during
+        // teardown would otherwise report a stall for a session that is
+        // already ending on purpose.
+        stopWatchdog()
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
         session?.invalidateAndCancel()

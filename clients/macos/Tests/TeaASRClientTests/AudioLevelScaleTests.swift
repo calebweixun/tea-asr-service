@@ -58,36 +58,75 @@ final class AudioLevelScaleTests: XCTestCase {
 
     func testSmootherDefaultsStayFastOnAttackAndGentleOnRelease() {
         let smoother = AudioLevelSmoother()
-        XCTAssertEqual(smoother.attack, 0.65, accuracy: 0.0001)
-        XCTAssertEqual(smoother.release, 0.18, accuracy: 0.0001)
-        XCTAssertGreaterThan(smoother.attack, smoother.release)
+        XCTAssertEqual(smoother.attackSeconds, 0.012, accuracy: 0.0001)
+        XCTAssertEqual(smoother.releaseSeconds, 0.220, accuracy: 0.0001)
+        XCTAssertLessThan(smoother.attackSeconds, smoother.releaseSeconds)
     }
 
-    func testSmoothingInDisplayUnitsReachesSpeechLevelWithinAFewBuffers() {
-        // Smoothing now runs on the dBFS display value, so a speech onset is
-        // visible after two ~43 ms buffers instead of crawling up from a tiny
-        // linear amplitude.
+    /// The reported symptom was latency, and this is the number behind it: at
+    /// the tap's ~10.7 ms buffer the bar must be essentially at the new level
+    /// within about three buffers, not a tenth of a second.
+    func testSpeechOnsetIsAlmostCompleteWithinFortyMilliseconds() {
         var smoother = AudioLevelSmoother()
         let speech = AudioLevelScale.display(for: AudioLevelSample(rms: 0.05, peak: 0.2))
+        let buffer = 512.0 / 48_000.0
 
-        _ = smoother.update(speech)
-        let afterTwo = smoother.update(speech)
+        var value: Float = 0
+        var elapsed = 0.0
+        while elapsed < 0.04 {
+            value = smoother.update(speech, interval: buffer).rms
+            elapsed += buffer
+        }
 
-        XCTAssertGreaterThan(afterTwo.rms, speech.rms * 0.85)
-        XCTAssertLessThanOrEqual(afterTwo.rms, speech.rms)
+        XCTAssertGreaterThan(value, speech.rms * 0.95)
+        XCTAssertLessThanOrEqual(value, speech.rms)
+    }
+
+    /// The whole point of expressing attack as a time constant: the filter
+    /// must not become sluggish because the HAL handed over a different
+    /// buffer size than expected.
+    func testAttackTakesTheSameWallTimeAtAnyBufferSize() {
+        func riseAfter(_ seconds: TimeInterval, buffer: TimeInterval) -> Float {
+            var smoother = AudioLevelSmoother()
+            var elapsed = 0.0
+            var value: Float = 0
+            while elapsed + buffer <= seconds + 1e-9 {
+                value = smoother.update(AudioLevelSample(rms: 1, peak: 1), interval: buffer).rms
+                elapsed += buffer
+            }
+            return value
+        }
+
+        let small = riseAfter(0.048, buffer: 0.002)
+        let large = riseAfter(0.048, buffer: 0.012)
+        XCTAssertEqual(small, large, accuracy: 0.02)
+        XCTAssertGreaterThan(small, 0.95)
     }
 
     func testSmootherDecaysTowardsSilenceWithoutOvershooting() {
-        var smoother = AudioLevelSmoother(attack: 1, release: 0.18)
-        _ = smoother.update(AudioLevelSample(rms: 1, peak: 1))
+        var smoother = AudioLevelSmoother()
+        let buffer = 512.0 / 48_000.0
+        _ = smoother.update(AudioLevelSample(rms: 1, peak: 1), interval: 0.1)
 
         var value = smoother.current.rms
-        for _ in 0..<20 {
-            value = smoother.update(.zero).rms
+        var elapsed = 0.0
+        while elapsed < 0.7 {
+            value = smoother.update(.zero, interval: buffer).rms
             XCTAssertGreaterThanOrEqual(value, 0)
+            elapsed += buffer
         }
-        // ~20 buffers is under a second at the ~23 Hz tap rate.
-        XCTAssertLessThan(value, 0.05)
+        // ~3 release time constants: the bar has visibly settled inside a
+        // second, without dropping out between syllables on the way there.
+        XCTAssertLessThan(value, 0.06)
+    }
+
+    func testReleaseIsSlowEnoughToSurviveOneQuietBuffer() {
+        var smoother = AudioLevelSmoother()
+        let buffer = 512.0 / 48_000.0
+        _ = smoother.update(AudioLevelSample(rms: 1, peak: 1), interval: 0.1)
+
+        let afterOneQuietBuffer = smoother.update(.zero, interval: buffer).rms
+        XCTAssertGreaterThan(afterOneQuietBuffer, 0.9)
     }
 
     // MARK: - Update throttling
@@ -110,7 +149,36 @@ final class AudioLevelScaleTests: XCTestCase {
                 elapsed: 0.01
             )
         )
-        XCTAssertEqual(AudioLevelUpdatePolicy.minimumInterval, 1.0 / 30.0, accuracy: 0.0001)
+        XCTAssertEqual(AudioLevelUpdatePolicy.minimumInterval, 1.0 / 60.0, accuracy: 0.0001)
+    }
+
+    /// The bar's real frame rate is set by the tap buffer, not by the cap.
+    /// A 2,048-frame buffer at 48 kHz could never beat ~23 Hz however
+    /// generous the throttle was, which is what "low frame rate" meant.
+    func testEffectiveUpdateRateIsSetByTheTapBufferNotTheCap() {
+        let oldRate = AudioLevelUpdatePolicy.effectiveRate(
+            sourceInterval: 2_048.0 / 48_000.0,
+            minimumInterval: 1.0 / 30.0
+        )
+        XCTAssertEqual(oldRate, 23.4, accuracy: 0.2)
+
+        let newRate = AudioLevelUpdatePolicy.effectiveRate(
+            sourceInterval: 512.0 / 48_000.0
+        )
+        XCTAssertEqual(newRate, 46.9, accuracy: 0.2)
+        XCTAssertGreaterThan(newRate, oldRate * 1.5)
+    }
+
+    func testEffectiveRateNeverExceedsTheSourceRate() {
+        XCTAssertEqual(
+            AudioLevelUpdatePolicy.effectiveRate(
+                sourceInterval: 0.1,
+                minimumInterval: 1.0 / 60.0
+            ),
+            10,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(AudioLevelUpdatePolicy.effectiveRate(sourceInterval: 0), 0)
     }
 
     func testAVisibleChangeIsDeliveredOnceTheIntervalHasPassed() {
@@ -127,7 +195,7 @@ final class AudioLevelScaleTests: XCTestCase {
         // A silent settings page must not repaint the bar at all.
         XCTAssertFalse(
             AudioLevelUpdatePolicy.shouldDeliver(
-                pending: AudioLevelSample(rms: 0.2001, peak: 0.3001),
+                pending: AudioLevelSample(rms: 0.20005, peak: 0.30005),
                 lastDelivered: AudioLevelSample(rms: 0.2, peak: 0.3),
                 elapsed: 0.1
             )
@@ -137,7 +205,7 @@ final class AudioLevelScaleTests: XCTestCase {
     func testAFrozenValueIsStillRefreshedSoTheBarSettles() {
         XCTAssertTrue(
             AudioLevelUpdatePolicy.shouldDeliver(
-                pending: AudioLevelSample(rms: 0.2001, peak: 0.3001),
+                pending: AudioLevelSample(rms: 0.20005, peak: 0.30005),
                 lastDelivered: AudioLevelSample(rms: 0.2, peak: 0.3),
                 elapsed: AudioLevelUpdatePolicy.idleRefreshInterval
             )

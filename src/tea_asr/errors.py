@@ -29,6 +29,11 @@ ERROR_HTTP_STATUS: dict[str, int] = {
     #: matter once the service can be reached from more than one process on
     #: the same machine (LAN mode).
     "rate_limited": 429,
+    #: The connection carried no message at all for `IDLE_TIMEOUT_S`. A live
+    #: capture sends a frame every 100 ms plus a keepalive, so reaching this
+    #: means the client's audio path died. It has to be *reported*, not
+    #: silently dropped, or the client goes on showing "listening" (docs/06 #4).
+    "idle_timeout": 408,
 }
 
 #: Close codes for session-level failures. Anything not listed keeps the
@@ -59,6 +64,11 @@ ERROR_WS_CLOSE: dict[str, int] = {
     #: throttle, not a session-level failure, and the private-use range is
     #: already the home for that category.
     "rate_limited": 1013,
+    #: Its own private-use code rather than 1000/1001: the client must be able
+    #: to tell "you went quiet, so I ended the session" apart from a normal
+    #: close or a backpressure drop, because only this one means the client's
+    #: own capture stopped.
+    "idle_timeout": 4408,
 }
 
 RETRYABLE_CODES = frozenset(
@@ -71,6 +81,7 @@ RETRYABLE_CODES = frozenset(
         "inference_timeout",
         "timeline_gap",
         "rate_limited",
+        "idle_timeout",
     }
 )
 

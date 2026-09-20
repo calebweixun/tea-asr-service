@@ -282,3 +282,32 @@ enum InputMonitorInstallPolicy {
         return result
     }
 }
+
+/// Admission for "start a session" requests.
+///
+/// `AppController.start` checks `mode == .idle`, but `mode` is only assigned
+/// after the asynchronous microphone-consent callback returns. Every hot-key
+/// press that lands inside that window therefore passed the check and queued
+/// another `reallyStart`, so two or more starts ran against the same
+/// `AVAudioEngine` — a second `installTap` on a node that already has one,
+/// two websocket sessions, and each attempt blocking the main thread on the
+/// input-device lease and on CoreAudio. Rapidly repeating the shortcut is
+/// exactly how the app stopped responding.
+///
+/// The gate closes when the request is admitted and reopens only when that
+/// request has either produced a session or failed, so a duplicate press is
+/// dropped rather than stacked.
+struct SessionStartGate: Equatable {
+    private(set) var isStarting = false
+
+    /// True when this request may proceed.
+    mutating func begin() -> Bool {
+        guard !isStarting else { return false }
+        isStarting = true
+        return true
+    }
+
+    mutating func finish() {
+        isStarting = false
+    }
+}

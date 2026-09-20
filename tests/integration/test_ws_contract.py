@@ -862,3 +862,58 @@ def test_total_connection_limit_counts_utterance_sessions_too(
         ):
             third.receive_json()
         assert excinfo.value.code == 1013
+
+
+def test_idle_timeout_is_reported_instead_of_silently_dropping_the_session(
+    supervisor: FakeSupervisor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client that goes quiet must be *told*, not just disconnected.
+
+    The read loop's `asyncio.wait_for` used to let a bare `TimeoutError`
+    escape, which `run_stream` swallowed on its `except (WebSocketDisconnect,
+    TimeoutError)` branch. The connection then went away with no `error`
+    event, so the macOS client had nothing to react to and kept showing
+    "listening" (docs/06 constraint 4: failures have to be visible).
+    """
+
+    from tea_asr.api import stream as stream_module
+
+    monkeypatch.setattr(stream_module, "IDLE_TIMEOUT_S", 0.2)
+
+    with build_client(supervisor) as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as socket:
+        socket.receive_json()  # hello
+        socket.send_json(START)
+        assert socket.receive_json()["type"] == "session.started"
+
+        # Say nothing at all past the idle timeout.
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["code"] == "idle_timeout"
+        assert error["retryable"] is True
+
+        with pytest.raises(WebSocketDisconnect) as caught:
+            socket.receive_json()
+        assert caught.value.code == 4408
+
+
+def test_keepalive_pings_hold_a_silent_session_open(supervisor: FakeSupervisor) -> None:
+    """The client's keepalive is what keeps a long pause from timing out.
+
+    Each ping carries its own request_id, so the control dedup must answer
+    every one of them rather than collapsing them into a single pong.
+    """
+
+    with build_client(supervisor) as http, http.websocket_connect(
+        "/v1/stream", headers=AUTH
+    ) as socket:
+        socket.receive_json()  # hello
+        socket.send_json(START)
+        assert socket.receive_json()["type"] == "session.started"
+
+        for index in range(5):
+            socket.send_json({"type": "ping", "request_id": f"mac-keepalive-{index + 1}"})
+            pong = socket.receive_json()
+            assert pong["type"] == "pong"
+            assert pong["request_id"] == f"mac-keepalive-{index + 1}"

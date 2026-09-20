@@ -156,15 +156,21 @@ enum AudioLevelScale {
 
 /// Decides when a freshly smoothed level is worth pushing to the UI.
 ///
-/// The tap fires roughly every 43 ms, and pushing every one of those to AppKit
-/// redraws the bar far more often than anyone can see.  Deliveries are capped
-/// at ~30 Hz and skipped entirely while the value is visually unchanged, so a
+/// The cap used to be 30 Hz while the tap handed over a ~43 ms buffer, so the
+/// throttle never actually fired: the *source* was the limit and the bar
+/// updated at ~23 Hz.  The tap now delivers ~10.7 ms buffers, so the cap is
+/// what sets the rate, and it is raised to 60 Hz to match a normal display.
+/// Deliveries are still skipped while the value is visually unchanged, so a
 /// silent settings page does no drawing work at all.
 enum AudioLevelUpdatePolicy {
-    /// ~30 Hz: the fastest rate a level meter needs to look continuous.
-    static let minimumInterval: TimeInterval = 1.0 / 30.0
-    /// Below this the fill moves less than a pixel on a 220 pt bar.
-    static let minimumChange: Float = 0.004
+    /// 60 Hz: one delivery per display refresh, and above the ~23 Hz the old
+    /// pairing of a 43 ms tap buffer with a 30 Hz cap could ever reach.
+    static let minimumInterval: TimeInterval = 1.0 / 60.0
+    /// Below this the fill moves less than half a point on a 220 pt bar.
+    /// Lower than the previous 0.004 because at 60 Hz the tail of a release
+    /// moves in smaller steps, and gating those out made the bar settle in
+    /// visible jumps.
+    static let minimumChange: Float = 0.002
     /// Even a frozen value is refreshed this often so the bar always settles.
     static let idleRefreshInterval: TimeInterval = 0.5
 
@@ -185,38 +191,94 @@ enum AudioLevelUpdatePolicy {
         if change >= minimumChange { return true }
         return elapsed >= idleRefreshInterval
     }
+
+    /// Deliveries per second a *continuously changing* signal can achieve when
+    /// the tap produces one sample every `sourceInterval` seconds.
+    ///
+    /// The throttle can only drop whole source samples, so the answer is not
+    /// `1 / minimumInterval`: it is the source rate divided by the number of
+    /// source samples that fit inside one minimum interval.  This is the
+    /// number to look at when the bar "feels like a low frame rate", and it is
+    /// why shrinking the tap buffer matters more than raising the cap.
+    static func effectiveRate(
+        sourceInterval: TimeInterval,
+        minimumInterval: TimeInterval = minimumInterval
+    ) -> Double {
+        guard sourceInterval > 0 else { return 0 }
+        guard minimumInterval > 0 else { return 1 / sourceInterval }
+        let stride = max(1, Int((minimumInterval / sourceInterval).rounded(.up)))
+        return 1 / (Double(stride) * sourceInterval)
+    }
 }
 
-/// Attack and release are deliberately separate so speech onset is visible quickly while silence settles gently.
+/// One-pole attack/release smoothing expressed as *time constants*.
+///
+/// The previous version applied a fixed coefficient per buffer, which made the
+/// filter's behaviour depend on whatever buffer size the HAL happened to hand
+/// over: the same 0.65 attack is ~43 ms of rise at a 2048-frame buffer and
+/// ~11 ms at 512.  Anchoring to seconds keeps attack and release identical
+/// across devices, and is what makes the "is the attack fast enough?" question
+/// answerable in a test rather than by eye.
 ///
 /// The values fed in are already on the dBFS display scale, so the
 /// coefficients behave uniformly across the whole range instead of crawling
 /// near silence the way linear-amplitude smoothing does.
 struct AudioLevelSmoother {
-    let attack: Float
-    let release: Float
+    /// 12 ms: a speech onset is >95 % of the way up within ~36 ms, i.e. inside
+    /// three tap buffers, so the visible delay is the buffer and the display
+    /// refresh rather than the filter.  The old per-buffer 0.65 needed three
+    /// ~43 ms buffers (~130 ms) for the same rise — the reported lag.
+    static let defaultAttackSeconds: TimeInterval = 0.012
+    /// 220 ms: falls to ~5 % in about 0.65 s.  Long enough that the bar does
+    /// not flicker between syllables, short enough that it visibly settles
+    /// when the talker stops.
+    static let defaultReleaseSeconds: TimeInterval = 0.220
+    /// Used when a caller has no measured buffer duration to offer.
+    static let defaultInterval: TimeInterval = 1.0 / 60.0
+
+    let attackSeconds: TimeInterval
+    let releaseSeconds: TimeInterval
     private(set) var current = AudioLevelSample.zero
 
-    init(attack: Float = 0.65, release: Float = 0.18) {
-        self.attack = max(0, min(1, attack))
-        self.release = max(0, min(1, release))
+    init(
+        attackSeconds: TimeInterval = AudioLevelSmoother.defaultAttackSeconds,
+        releaseSeconds: TimeInterval = AudioLevelSmoother.defaultReleaseSeconds
+    ) {
+        self.attackSeconds = max(0, attackSeconds)
+        self.releaseSeconds = max(0, releaseSeconds)
+    }
+
+    /// Fraction of the remaining distance a one-pole filter covers in
+    /// `interval` seconds for the given time constant.
+    static func coefficient(timeConstant: TimeInterval, interval: TimeInterval) -> Float {
+        guard interval > 0 else { return 0 }
+        guard timeConstant > 0 else { return 1 }
+        return Float(1 - exp(-interval / timeConstant))
     }
 
     mutating func reset() {
         current = .zero
     }
 
-    mutating func update(_ sample: AudioLevelSample) -> AudioLevelSample {
+    mutating func update(
+        _ sample: AudioLevelSample,
+        interval: TimeInterval = AudioLevelSmoother.defaultInterval
+    ) -> AudioLevelSample {
+        // A buffer duration reported as zero or nonsense must not freeze the
+        // meter, and an absurdly long one (a stalled queue catching up) must
+        // not make the filter overshoot; both are clamped into a sane range.
+        let bounded = min(max(interval.isFinite ? interval : 0, 0.001), 0.2)
         current = AudioLevelSample(
-            rms: smooth(current.rms, target: sample.rms),
-            peak: smooth(current.peak, target: sample.peak)
+            rms: smooth(current.rms, target: sample.rms, interval: bounded),
+            peak: smooth(current.peak, target: sample.peak, interval: bounded)
         )
         return current
     }
 
-    private func smooth(_ current: Float, target: Float) -> Float {
+    private func smooth(_ current: Float, target: Float, interval: TimeInterval) -> Float {
         let boundedTarget = max(0, min(1, target.isFinite ? target : 0))
-        let coefficient = boundedTarget >= current ? attack : release
+        let timeConstant = boundedTarget >= current ? attackSeconds : releaseSeconds
+        let coefficient = Self.coefficient(timeConstant: timeConstant, interval: interval)
         return current + ((boundedTarget - current) * coefficient)
     }
 }
@@ -610,9 +672,19 @@ final class AudioLevelMonitor {
         lease = acquiredLease
         stateLock.unlock()
 
-        input.installTap(onBus: 0, bufferSize: 2_048, format: nativeFormat) { [weak self] buffer, _ in
+        // 512 rather than 2,048 frames: at 48 kHz that is ~10.7 ms of audio
+        // per measurement instead of ~42.7 ms.  The old size put a hard ~23 Hz
+        // ceiling on the meter no matter what the delivery throttle allowed,
+        // which is what made the bar look like a low-frame-rate widget.  The
+        // work per buffer is an RMS/peak pass over a few hundred floats, so
+        // four times as many callbacks is still negligible, and nothing here
+        // feeds the ASR timeline.
+        input.installTap(onBus: 0, bufferSize: 512, format: nativeFormat) { [weak self] buffer, _ in
             guard let self, let sample = AudioLevelMath.measure(buffer: buffer) else { return }
-            self.enqueue(sample: sample, generation: token)
+            let duration = buffer.format.sampleRate > 0
+                ? Double(buffer.frameLength) / buffer.format.sampleRate
+                : AudioLevelSmoother.defaultInterval
+            self.enqueue(sample: sample, duration: duration, generation: token)
         }
 
         stateLock.lock()
@@ -642,7 +714,11 @@ final class AudioLevelMonitor {
         setState(.idle)
     }
 
-    private func enqueue(sample: AudioLevelSample, generation token: UInt64) {
+    private func enqueue(
+        sample: AudioLevelSample,
+        duration: TimeInterval,
+        generation token: UInt64
+    ) {
         // A full level queue drops only a redundant display sample; it never drops audio frames used by ASR.
         guard levelQueueSlots.wait(timeout: .now()) == .success else { return }
         levelQueue.async { [weak self] in
@@ -655,7 +731,13 @@ final class AudioLevelMonitor {
 
             // Map to the dBFS display scale before smoothing so attack/release
             // behave the same at speech level and at room-tone level.
-            let smoothed = self.smoother.update(AudioLevelScale.display(for: sample))
+            // The real buffer duration, not a nominal one: attack and release
+            // are time constants, so they stay identical whatever size the
+            // HAL actually hands over.
+            let smoothed = self.smoother.update(
+                AudioLevelScale.display(for: sample),
+                interval: duration
+            )
             if self.state == .noData {
                 self.setState(.monitoring)
             }

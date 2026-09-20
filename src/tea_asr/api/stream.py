@@ -782,7 +782,20 @@ class StreamSession:
         )
 
         while True:
-            message = await asyncio.wait_for(self._websocket.receive(), timeout=IDLE_TIMEOUT_S)
+            try:
+                message = await asyncio.wait_for(
+                    self._websocket.receive(), timeout=IDLE_TIMEOUT_S
+                )
+            except TimeoutError as exc:
+                # Letting the bare TimeoutError escape made `run_stream` drop
+                # the session on the `except (WebSocketDisconnect, TimeoutError)`
+                # branch without emitting anything, so a client whose capture
+                # had stalled was never told and kept showing "listening".
+                # docs/06 #4 requires the failure to be visible.
+                raise ApiError(
+                    "idle_timeout",
+                    f"已經 {int(IDLE_TIMEOUT_S)} 秒沒有收到任何音訊或控制訊息，session 已結束。",
+                ) from exc
             if message["type"] == "websocket.disconnect":
                 raise WebSocketDisconnect(message.get("code", 1000))
             if message.get("bytes") is not None:

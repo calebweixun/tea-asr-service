@@ -444,13 +444,25 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// Return focus to the app that was active before the management window was
-    /// used to start dictation. This is intentionally separate from `show` so
-    /// menu-bar/hot-key dictation never activates this window implicitly.
+    /// Release the microphone before a dictation session starts.
+    ///
+    /// This used to `orderOut` the window and `NSApp.hide(nil)` as well, so
+    /// that TEA ASR could not become the paste target. It no longer does, for
+    /// two reasons. The guard against pasting into ourselves does not depend
+    /// on it: `TextInjector.captureFocusedTarget(excluding:)` refuses to
+    /// record this process as a target at all, and `insert(_:ifCurrent:)` only
+    /// pastes when the *captured* pid still owns focus — so a final can never
+    /// reach a TEA ASR window whether it is visible or not. And hiding cost
+    /// the user their window on every hot-key press, while repeating
+    /// `NSApp.hide` / `NSApp.activate(ignoringOtherApps:)` on an `.accessory`
+    /// app churned the activation state for no benefit.
+    ///
+    /// What does still have to happen here is the level meter letting go of
+    /// the process-wide input lease, because `AudioCapture.start` is about to
+    /// ask for the same device and would otherwise block the main thread for
+    /// `AudioInputLeaseCoordinator.handoffTimeout`.
     func hideForDictation() {
         stopAudioLevelMonitor()
-        window?.orderOut(nil)
-        NSApp.hide(nil)
     }
 
     func refresh() {
