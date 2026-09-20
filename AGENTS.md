@@ -5,6 +5,20 @@
 - For all future development work and file modifications, delegate implementation to a subagent whenever subagent execution is available. The root agent is the high-level technical lead: it owns planning, task decomposition, coordination, review, integration, verification, and status reporting.
 - The root agent may perform read-only inspection and the necessary Git integration steps, including staging, committing, and pushing changes. Implementation changes should be made by the delegated subagent, unless a tool limitation makes that impossible and the user explicitly approves an exception.
 - Prefer delegating implementation to `gpt-5.6-luna` with `max` reasoning when that model/reasoning combination is available. Do not use the Terra model for this project.
+
+### 怎麼呼叫 gpt-5.6-luna
+
+這台機器裝了 codex CLI（`~/.local/bin/codex`，已用 ChatGPT 登入，預設 `gpt-5.6-sol` / medium）。非互動派工：
+
+```bash
+codex exec -m gpt-5.6-luna -c model_reasoning_effort=max -s workspace-write "<派工內容>"
+```
+
+- `-s read-only` 只讀不改，`-s workspace-write` 可改工作區檔案。不要用 `--dangerously-bypass-approvals-and-sandbox`。
+- 派工內容長的時候寫成檔案再 `- < file.md`，避免 shell 引號問題。
+- 跑很久，用背景執行並把輸出導到檔案。
+- codex 是獨立 context，正好可以當「不自驗」的產出方；驗收仍由上游自己重跑 build／test 與截圖確認，不直接採信它的回報。
+- 多個 agent 併行時，在派工單裡明確列出**允許修改**與**嚴禁修改**的檔案清單，否則會互相覆蓋。
 - Keep delegated work scoped, independently verifiable, and reported back to the root agent before integration. Do not claim completion without running appropriate validation.
 
 ## Codebase discovery
