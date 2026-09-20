@@ -9,10 +9,12 @@ final class AppLaunchPresentationTests: XCTestCase {
         )
     }
 
-    func testLaunchShowsPermissionsWhenRequiredPermissionsAreMissing() {
+    /// The permission checklist is a group inside Diagnostics now, so that is
+    /// where a launch with a missing required permission must land.
+    func testLaunchShowsDiagnosticsWhenRequiredPermissionsAreMissing() {
         XCTAssertEqual(
             MainWindowLaunchPolicy.section(requiredPermissionsGranted: false),
-            .permissions
+            .diagnostics
         )
     }
 }

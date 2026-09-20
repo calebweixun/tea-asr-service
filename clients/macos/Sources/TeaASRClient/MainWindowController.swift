@@ -18,6 +18,25 @@ private final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
 
+/// A split view controller whose sidebar is furniture, not a resizable pane.
+///
+/// `minimumThickness == maximumThickness` already pins the sidebar's width,
+/// but AppKit still draws a draggable divider there: the user can grab it,
+/// see the cursor change, and get nothing — a control that does not respond
+/// is worse than no control. Reporting an empty effective drag rect removes
+/// the hit area entirely, which is exactly how Mail and System Settings
+/// behave (their sidebars are one fixed width and the divider is inert).
+private final class FixedSidebarSplitViewController: NSSplitViewController {
+    override func splitView(
+        _ splitView: NSSplitView,
+        effectiveRect proposedEffectiveRect: NSRect,
+        forDrawnRect drawnRect: NSRect,
+        ofDividerAt dividerIndex: Int
+    ) -> NSRect {
+        .zero
+    }
+}
+
 @MainActor
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// Fixed sidebar thickness (see `sidebarItem.minimumThickness` in
@@ -72,7 +91,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     enum Section: Int, CaseIterable {
         case overview
         case operations
-        case permissions
         case settings
         case diagnostics
 
@@ -80,7 +98,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             switch self {
             case .overview: return "總覽"
             case .operations: return "操作"
-            case .permissions: return "權限"
             case .settings: return "設定"
             case .diagnostics: return "診斷"
             }
@@ -90,7 +107,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             switch self {
             case .overview: return "rectangle.3.group"
             case .operations: return "mic"
-            case .permissions: return "lock.shield"
             case .settings: return "gearshape"
             case .diagnostics: return "stethoscope"
             }
@@ -101,7 +117,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let appState: AppState
     private let permissions: PermissionCoordinator
 
-    private let splitViewController = NSSplitViewController()
+    private let splitViewController = FixedSidebarSplitViewController()
     private let sidebarController = NSViewController()
     private let detailController = NSViewController()
     private let detailView = FlippedView()
@@ -232,12 +248,27 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarController)
         sidebarItem.minimumThickness = sidebarWidth
         sidebarItem.maximumThickness = sidebarWidth
+        // A sidebar item collapses on two triggers that have nothing to do
+        // with the divider: the toolbar's sidebar button, and AppKit's own
+        // "window got narrow, fold the sidebar away" behaviour. With only
+        // five destinations and a floored window width there is nothing to
+        // gain from either, and a page whose navigation can silently vanish
+        // is not something System Settings does.
+        sidebarItem.canCollapse = false
+        // `minimumThickness == maximumThickness` already fixes the width, so
+        // the holding priority is deliberately left at the stock sidebar
+        // value — raising it would re-enter the width negotiation that the
+        // detail scroll view's floor above was added to settle.
         splitViewController.addSplitViewItem(sidebarItem)
         splitViewController.addSplitViewItem(
             NSSplitViewItem(viewController: detailController)
         )
         splitViewController.splitView.setPosition(sidebarWidth, ofDividerAt: 0)
         window?.contentViewController = splitViewController
+        splitViewController.view.widthAnchor
+            .constraint(greaterThanOrEqualToConstant: minimumWindowSize.width).isActive = true
+        splitViewController.view.heightAnchor
+            .constraint(greaterThanOrEqualToConstant: minimumWindowSize.height).isActive = true
         // Assigning `contentViewController` makes AppKit size the window to the
         // content's fitting size (see the `contentMinSize` note above). Now
         // that the sections are plain rows rather than tall padded cards, that
@@ -289,15 +320,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             return button
         }
 
-        let footer = NSTextField(wrappingLabelWithString: "狀態與設定集中在同一個主畫面。")
-        footer.textColor = .tertiaryLabelColor
-        footer.font = .systemFont(ofSize: 11)
-        footer.translatesAutoresizingMaskIntoConstraints = false
-
         root.addSubview(heading)
         root.addSubview(hint)
         root.addSubview(stack)
-        root.addSubview(footer)
         // Activate this constraint only after the stack has joined the root's
         // hierarchy. Activating it while both views are detached makes AppKit
         // raise an Auto Layout exception because there is no common ancestor.
@@ -312,9 +337,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             stack.topAnchor.constraint(equalTo: hint.bottomAnchor, constant: Metrics.edge),
             stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Metrics.row),
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -Metrics.row),
-            footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
-            footer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
         ])
         sidebarController.view = root
         select(section: .overview)
@@ -338,11 +360,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         // Health polls and client transitions must not rebuild settings fields
         // while the user is editing unsaved values.
         guard selectedSection != .settings else { return }
-        if selectedSection == .permissions {
+        // Diagnostics now also carries the permission list, so a visible
+        // Diagnostics page must re-read TCC as well as the app's own state.
+        if selectedSection == .diagnostics {
             permissions.refresh()
-        } else {
-            updateSection(selectedSection)
         }
+        updateSection(selectedSection)
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
@@ -465,9 +488,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         mountSelectedSection()
     }
 
+    /// The permission rows live in Diagnostics now, so a TCC change refreshes
+    /// that section — through the same build-once + update closure every other
+    /// state change uses, never by rebuilding the view tree.
     private func refreshPermissionSection() {
-        guard selectedSection == .permissions else { return }
-        updateSection(.permissions)
+        updateSection(.diagnostics)
     }
 
     // MARK: - Detail sections
@@ -501,7 +526,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         switch section {
         case .overview: runtime = buildOverviewSection()
         case .operations: runtime = buildOperationsSection()
-        case .permissions: runtime = buildPermissionsSection()
         case .settings: runtime = buildSettingsSection()
         case .diagnostics: runtime = buildDiagnosticsSection()
         }
@@ -526,7 +550,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let service = buildValueRow(title: "服務", maxLines: nil)
         let model = buildValueRow(title: "模型")
         let sessionRow = buildValueRow(title: "Session")
-        let audioRow = buildValueRow(title: "輸入")
+        // audioSummary() concatenates a user-named input device with three
+        // more fields, so it is the one row here that really can wrap.
+        let audioRow = buildValueRow(title: "輸入", maxLines: 2)
         let runtimeGroup = group(
             title: "執行狀態",
             views: [service.view, model.view, sessionRow.view, audioRow.view]
@@ -567,19 +593,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let stop = actionButton(title: "停止目前 session", action: #selector(stopSession(_:)))
         let controls = buttonRow([startDictation, startMeeting, stop])
 
-        let statusRow = buildValueRow(title: "狀態")
-        let audioRow = buildValueRow(title: "音訊")
-        let transcriptInfoRow = buildValueRow(title: "自動存檔")
+        // All three can wrap: sessionStatus grows a "錄音有間隔：<reason>"
+        // suffix, audioSummary() carries a device name, and autosaveStatus
+        // becomes "失敗：<error>". They are also the rows that change on
+        // every session event, so they keep a fixed (two-line) height rather
+        // than resizing with their text.
+        let statusRow = buildValueRow(title: "狀態", maxLines: 2)
+        let audioRow = buildValueRow(title: "音訊", maxLines: 2)
+        let transcriptInfoRow = buildValueRow(title: "自動存檔", maxLines: 2)
         let transcript = buildTranscriptView()
-        let transcriptTitle = NSTextField(labelWithString: "最近文字／會議 transcript")
-        transcriptTitle.font = .systemFont(ofSize: 12)
-        transcriptTitle.textColor = .secondaryLabelColor
         let export = actionButton(title: "匯出 Markdown…", action: #selector(exportMarkdown(_:)))
 
         let view = sectionStack(views: [
             group(title: "開始錄音", views: [controls]),
             group(title: "目前 session", views: [statusRow.view, audioRow.view, transcriptInfoRow.view]),
-            group(title: "即時逐字稿", views: [transcriptTitle, transcript.view]),
+            group(title: "即時逐字稿", views: [transcript.view]),
             export,
         ])
 
@@ -598,7 +626,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         return SectionRuntime(view: view, update: update)
     }
 
-    private func buildPermissionsSection() -> SectionRuntime {
+    /// The permission checklist, as one group that Diagnostics places
+    /// alongside its read-only groups. It used to be a section of its own; a
+    /// sidebar destination that holds three rows the user visits twice in the
+    /// app's lifetime is not a destination, it is a group on the page where
+    /// you already go to find out why something is not working.
+    private func buildPermissionsGroup() -> (view: NSView, update: () -> Void) {
         let summary = NSTextField(wrappingLabelWithString: "")
         let rows = PermissionKind.allCases.map { buildPermissionRow(for: $0) }
         let permissionRows = NSStackView(views: rows.map(\.view))
@@ -607,17 +640,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         permissionRows.spacing = Metrics.row
         stretchArrangedSubviewsToFullWidth(permissionRows)
         summary.textColor = .secondaryLabelColor
+        summary.font = .systemFont(ofSize: 12)
         let refresh = actionButton(title: "重新檢查權限", action: #selector(refreshPermissions(_:)))
-        let view = sectionStack(views: [
-            summary,
-            group(title: "權限清單", views: [permissionRows]),
-            refresh,
-        ])
+        let refreshRow = buttonRow([refresh])
+        let view = group(title: "權限", views: [summary, permissionRows, refreshRow])
 
         func update() {
             let state = permissions.state
             let summaryText = state.requiredPermissionsGranted
-                ? "必要權限已具備。若要自動貼上，仍需允許輔助使用。"
+                ? "必要權限已具備。若要自動貼上，仍需允許\(SystemPermissionNaming.accessibilityTitle)。"
                 : "請完成下列必要權限；完成後回到此視窗，狀態會自動更新。"
             if summary.stringValue != summaryText { summary.stringValue = summaryText }
             for row in rows {
@@ -625,7 +656,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             }
         }
         update()
-        return SectionRuntime(view: view, update: update)
+        return (view, update)
     }
 
     /// A permission row is structurally fixed (icon, title, explanation, and
@@ -920,26 +951,33 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func buildDiagnosticsSection() -> SectionRuntime {
+        // Permissions go first: they are the only thing on this page the user
+        // can act on, and the read-only rows below are usually consulted to
+        // explain a failure the permissions may well be the cause of.
+        let permissionsGroup = buildPermissionsGroup()
         let stateRow = buildValueRow(title: "App state")
         // Client state's `.failed` case, the service probe summary, and the
         // last-error row can all carry a full error message (see
         // clientStateSummary()'s `.failed` branch and serverSummary()'s error
         // passthrough). Truncating those to two lines hides the only clue to
         // what broke, which is worse than the row growing — so these three
-        // opt out of the fixed-height row. "App state" and "Audio" stay
-        // fixed: their values are always short, fixed-vocabulary summaries.
+        // opt out of the fixed-height row. "App state" stays on a single
+        // fixed line (its vocabulary is a handful of short words); "Audio"
+        // keeps two, because it embeds a user-named input device.
         let clientRow = buildValueRow(title: "Client state", maxLines: nil)
-        let audioRow = buildValueRow(title: "Audio")
+        let audioRow = buildValueRow(title: "Audio", maxLines: 2)
         let serviceRow = buildValueRow(title: "Service probe", maxLines: nil)
         let errorRow = buildValueRow(title: "最近錯誤", maxLines: nil)
         let refresh = actionButton(title: "重新檢查服務", action: #selector(testService(_:)))
         let view = sectionStack(views: [
+            permissionsGroup.view,
             group(title: "應用程式", views: [stateRow.view, clientRow.view]),
             group(title: "連線與音訊", views: [audioRow.view, serviceRow.view, errorRow.view]),
             refresh,
         ])
 
         func update() {
+            permissionsGroup.update()
             stateRow.update(appState.displayStatus.title)
             clientRow.update(clientStateSummary())
             audioRow.update(audioSummary())
@@ -973,7 +1011,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func openPermissions(_ sender: Any?) {
-        show(section: .permissions)
+        show(section: .diagnostics)
     }
 
     @objc private func refreshPermissions(_ sender: Any?) {
@@ -1423,11 +1461,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         guard let maxLines else {
             label.maximumNumberOfLines = 0
             label.lineBreakMode = .byWordWrapping
-            // Still reserve the standard two-line box as a *floor*: a short
-            // value then occupies exactly as much room as a fixed-height one,
-            // so rows in the same group keep a single vertical rhythm, while a
-            // long error is still free to grow past it.
-            label.heightAnchor.constraint(greaterThanOrEqualToConstant: lineHeight * 2).isActive = true
+            // Floor at one line so an empty/short value still occupies the
+            // same box as its single-line neighbours (one vertical rhythm per
+            // group) while a long error is free to grow past it. This used to
+            // floor at two lines, which is what made every row in 總覽/診斷
+            // 40pt tall even when every value was a short single line.
+            label.heightAnchor.constraint(greaterThanOrEqualToConstant: lineHeight).isActive = true
             return label
         }
         label.maximumNumberOfLines = maxLines
@@ -1436,7 +1475,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         return label
     }
 
-    private func buildValueRow(title: String, maxLines: Int? = 2) -> (view: NSView, update: (String) -> Void) {
+    /// `maxLines` defaults to **one** line. The fixed-height trick exists to
+    /// stop a row from jittering as its value changes, and one fixed line does
+    /// that just as well as two — while two lines of reserved space under a
+    /// value that is always one line is exactly what made these pages feel
+    /// twice as loose as a System Settings pane. Callers pass `2` only where
+    /// the value genuinely wraps at the window's minimum width (device names,
+    /// gap reasons, autosave error text), and `nil` where the value is an
+    /// error message that must not be truncated at all.
+    private func buildValueRow(title: String, maxLines: Int? = 1) -> (view: NSView, update: (String) -> Void) {
         let key = NSTextField(labelWithString: title)
         key.font = .systemFont(ofSize: 13)
         key.textColor = .secondaryLabelColor
@@ -1626,6 +1673,23 @@ extension MainWindowController {
     /// of being torn down and recreated. Kept behind `DEBUG` so it never
     /// ships as part of the app's runtime surface.
     var debugMountedSectionView: NSView? { detailView.subviews.first }
+
+    /// The sidebar split item, so a test can assert it is fixed furniture
+    /// (pinned width, never collapsible) rather than a resizable pane.
+    var debugSidebarSplitItem: NSSplitViewItem { splitViewController.splitViewItems[0] }
+
+    /// The effective drag rect AppKit would hand the divider. `.zero` means
+    /// there is no hit area, i.e. the divider cannot be grabbed at all.
+    func debugDividerDragRect() -> NSRect {
+        let splitView = splitViewController.splitView
+        let drawn = NSRect(x: sidebarWidth, y: 0, width: splitView.dividerThickness, height: splitView.bounds.height)
+        return splitViewController.splitView(
+            splitView,
+            effectiveRect: drawn,
+            forDrawnRect: drawn,
+            ofDividerAt: 0
+        )
+    }
 
     /// Every `NSTextField.stringValue` currently under the detail pane, for
     /// asserting that an update actually reached the label it targeted.

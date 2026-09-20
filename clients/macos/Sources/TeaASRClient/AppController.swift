@@ -7,9 +7,13 @@ import Carbon.HIToolbox
 /// and a second open request should always reveal the same management window.
 /// Keeping this policy separate also makes the permission-first launch path
 /// easy to verify without constructing AppKit windows in tests.
+///
+/// The permission checklist now lives inside Diagnostics (it is no longer a
+/// sidebar destination of its own), so "launch where the user can fix the
+/// missing permission" means Diagnostics.
 enum MainWindowLaunchPolicy {
     static func section(requiredPermissionsGranted: Bool) -> MainWindowController.Section {
-        requiredPermissionsGranted ? .overview : .permissions
+        requiredPermissionsGranted ? .overview : .diagnostics
     }
 }
 
@@ -179,10 +183,10 @@ final class AppController: NSObject, NSApplicationDelegate {
             else { return }
 
             self.alert(
-                "仍未偵測到輔助使用權限",
-                "macOS 目前仍回報這個 TEA ASR 程序沒有輔助使用權限。"
+                "仍未偵測到\(SystemPermissionNaming.accessibilityTitle)權限",
+                "macOS 目前仍回報這個 TEA ASR 程序沒有\(SystemPermissionNaming.accessibilityTitle)權限。"
                     + "如果你剛在系統設定打開開關，請先完全結束 TEA ASR，再重新開啟目前的 app。"
-                    + "若這是 ad-hoc 開發版，重建後可能需要在輔助使用清單移除舊的 TEA ASR，"
+                    + "若這是 ad-hoc 開發版，重建後可能需要在\(SystemPermissionNaming.accessibilityTitle)清單移除舊的 TEA ASR，"
                     + "再加入目前這個 build；只有 Developer ID 簽章才能讓 TCC 身分跨重建穩定。"
             )
         }
@@ -393,8 +397,8 @@ final class AppController: NSObject, NSApplicationDelegate {
         if settings.autoInsert, !TextInjector.isTrusted {
             TextInjector.requestTrust()
             alert(
-                "需要輔助使用權限",
-                "要把文字貼進其他 app，得在「系統設定 → 隱私權與安全性 → 輔助使用」裡允許 TEA ASR。\n"
+                "需要\(SystemPermissionNaming.accessibilityTitle)權限",
+                "要把文字貼進其他 app，得在「\(SystemPermissionNaming.accessibilitySettingsPath)」裡允許 TEA ASR。\n"
                     + "沒有這個權限時，定稿文字仍會留在剪貼簿。"
             )
         }
@@ -615,7 +619,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         TextInjector.requestTrust()
         alert(
             "文字放進剪貼簿了，但沒有自動貼上",
-            "自動貼上需要輔助使用權限。到「系統設定 → 隱私權與安全性 → 輔助使用」允許 TEA ASR 後，"
+            "自動貼上需要\(SystemPermissionNaming.accessibilityTitle)權限。到「\(SystemPermissionNaming.accessibilitySettingsPath)」允許 TEA ASR 後，"
                 + "重新開始聽寫即可。\n在那之前每段定稿都會放進剪貼簿，按 ⌘V 貼上。"
         )
     }

@@ -1,5 +1,47 @@
 import Foundation
 
+/// The one place that knows what macOS currently *calls* a privacy pane.
+///
+/// macOS renamed the Accessibility privacy category to
+/// 「裝置控制和資料取用」 (Device Control and Data Access). The underlying
+/// TCC service, the API (`AXIsProcessTrusted`) and the System Settings
+/// anchor are unchanged — only the user-facing name moved — so this is
+/// purely a string concern and belongs nowhere near the policy model.
+///
+/// The decision is made from the *runtime* OS version on purpose. A compile
+/// time `if #available` would bake whichever SDK happened to build the app
+/// into the binary, so a build made on an older SDK would keep showing the
+/// old name on a new OS (and vice versa). Users read the name off System
+/// Settings, which is the running OS, not the SDK.
+enum SystemPermissionNaming {
+    /// First macOS major version that uses the new name. macOS 27 is
+    /// confirmed on-device; 26 is assumed to have introduced it (see the
+    /// report's unverified list) — if that turns out to be wrong, this one
+    /// constant is the only thing that has to move.
+    static let firstDeviceControlNamingMajorVersion = 26
+
+    static var currentMajorVersion: Int {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+    }
+
+    /// Pure form, so tests can pin a version instead of the host's.
+    static func accessibilityTitle(majorVersion: Int) -> String {
+        majorVersion >= firstDeviceControlNamingMajorVersion
+            ? "裝置控制和資料取用"
+            : "輔助使用"
+    }
+
+    /// What the current OS calls the Accessibility privacy category.
+    static var accessibilityTitle: String {
+        accessibilityTitle(majorVersion: currentMajorVersion)
+    }
+
+    /// The System Settings path to quote in prose, e.g. in an alert.
+    static var accessibilitySettingsPath: String {
+        "系統設定 → 隱私權與安全性 → \(accessibilityTitle)"
+    }
+}
+
 /// Permissions that can affect the macOS client.
 ///
 /// Input Monitoring is intentionally part of the model even though TEA ASR
@@ -18,7 +60,7 @@ enum PermissionKind: String, CaseIterable, Identifiable {
         case .microphone:
             return "麥克風"
         case .accessibility:
-            return "輔助使用"
+            return SystemPermissionNaming.accessibilityTitle
         case .inputMonitoring:
             return "輸入監控"
         }
@@ -73,7 +115,7 @@ enum PermissionKind: String, CaseIterable, Identifiable {
         case .microphone:
             return "允許麥克風"
         case .accessibility:
-            return "開啟輔助使用設定"
+            return "開啟\(SystemPermissionNaming.accessibilityTitle)設定"
         case .inputMonitoring:
             return nil
         }

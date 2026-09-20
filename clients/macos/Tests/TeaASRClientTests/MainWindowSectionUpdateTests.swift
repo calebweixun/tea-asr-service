@@ -53,6 +53,46 @@ final class MainWindowSectionUpdateTests: XCTestCase {
         XCTAssertTrue(controller.debugMountedSectionView === overviewView, "returning to a section must reuse its cached view, not rebuild it")
     }
 
+    /// The permission checklist is a group inside Diagnostics now, not a
+    /// sidebar destination: the sidebar has four entries and the permission
+    /// rows render on the Diagnostics page.
+    @MainActor
+    func testDiagnosticsSectionCarriesThePermissionRows() {
+        XCTAssertEqual(MainWindowController.Section.allCases.count, 4)
+        XCTAssertFalse(MainWindowController.Section.allCases.map(\.title).contains("權限"))
+
+        let controller = makeController()
+        controller.show(section: .diagnostics)
+        let texts = controller.debugLabelTexts()
+        XCTAssertTrue(texts.contains("權限"), "the diagnostics page must show the permission group heading")
+        XCTAssertTrue(
+            texts.contains(where: { $0.hasPrefix(PermissionKind.accessibility.title) }),
+            "the diagnostics page must show a row per permission"
+        )
+    }
+
+    /// A TCC change must refresh the permission rows through the section's
+    /// update closure, never by rebuilding the Diagnostics view tree.
+    @MainActor
+    func testPermissionChangeUpdatesDiagnosticsInPlace() {
+        let controller = makeController()
+        controller.show(section: .diagnostics)
+        let mounted = controller.debugMountedSectionView
+        controller.refresh()
+        XCTAssertTrue(controller.debugMountedSectionView === mounted, "a permission refresh must reuse the diagnostics view")
+    }
+
+    /// The sidebar is fixed furniture: one width, no drag, no collapse.
+    @MainActor
+    func testSidebarIsFixedWidthAndCannotCollapseOrBeDragged() {
+        let controller = makeController()
+        let item = controller.debugSidebarSplitItem
+        XCTAssertFalse(item.canCollapse)
+        XCTAssertFalse(item.isCollapsed)
+        XCTAssertEqual(item.minimumThickness, item.maximumThickness)
+        XCTAssertEqual(controller.debugDividerDragRect(), .zero, "the divider must expose no drag hit area")
+    }
+
     @MainActor
     private func makeController() -> MainWindowController {
         let suiteName = "MainWindowSectionUpdateTests-\(UUID().uuidString)"

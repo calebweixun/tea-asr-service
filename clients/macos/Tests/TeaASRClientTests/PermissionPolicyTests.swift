@@ -189,3 +189,37 @@ private final class FakePermissionPlatform: PermissionPlatform {
         true
     }
 }
+
+/// macOS renamed the Accessibility privacy category to 「裝置控制和資料取用」.
+/// The decision is made from the running OS version, so the pure form is what
+/// gets pinned here; the live `accessibilityTitle` would only ever assert what
+/// the host machine happens to be.
+final class SystemPermissionNamingTests: XCTestCase {
+    func testOlderSystemsKeepTheAccessibilityName() {
+        XCTAssertEqual(SystemPermissionNaming.accessibilityTitle(majorVersion: 15), "輔助使用")
+        XCTAssertEqual(SystemPermissionNaming.accessibilityTitle(majorVersion: 25), "輔助使用")
+    }
+
+    func testCurrentSystemsUseTheDeviceControlName() {
+        XCTAssertEqual(SystemPermissionNaming.accessibilityTitle(majorVersion: 26), "裝置控制和資料取用")
+        XCTAssertEqual(SystemPermissionNaming.accessibilityTitle(majorVersion: 27), "裝置控制和資料取用")
+    }
+
+    func testPermissionKindTitleFollowsTheRunningSystem() {
+        XCTAssertEqual(PermissionKind.accessibility.title, SystemPermissionNaming.accessibilityTitle)
+        XCTAssertEqual(
+            PermissionKind.accessibility.actionTitle,
+            "開啟\(SystemPermissionNaming.accessibilityTitle)設定"
+        )
+    }
+
+    /// Verified on macOS 27 by opening this URL: it still lands on the pane,
+    /// which is now titled 「裝置控制和資料取用」. The anchor did not move with
+    /// the name, so it must not be "fixed" to match the new wording.
+    func testAccessibilitySettingsAnchorIsUnchangedByTheRename() {
+        XCTAssertEqual(
+            PermissionKind.accessibility.settingsURL.absoluteString,
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        )
+    }
+}
