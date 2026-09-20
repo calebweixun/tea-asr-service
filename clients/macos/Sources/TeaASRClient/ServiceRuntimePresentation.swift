@@ -34,24 +34,31 @@ enum ServiceRuntimeControl {
         let statusText: String
     }
 
+    /// The button's title is always "重新啟動服務": there is no separate
+    /// start/stop pair any more, only one action that always ends with the
+    /// service running — stopping first when something this page manages is
+    /// already up, or simply starting when nothing is. Only whether that
+    /// action is currently possible, and why not, varies by state.
+    static let buttonTitle = "重新啟動服務"
+
     static func presentation(for state: State) -> Presentation {
         switch state {
         case .managedRunning:
             return Presentation(
-                buttonTitle: "停止服務",
+                buttonTitle: buttonTitle,
                 buttonEnabled: true,
                 statusText: "執行中（由此頁啟動）。"
             )
         case .reachableElsewhere:
             return Presentation(
-                buttonTitle: "啟動服務",
+                buttonTitle: buttonTitle,
                 buttonEnabled: false,
-                statusText: "服務已在執行，但不是由這個頁面啟動的，無法從這裡停止（也不會再啟動第二份）。"
+                statusText: "服務已在執行，但不是由這個頁面啟動的，無法從這裡重新啟動（也不會再啟動第二份）。"
             )
         case .stopped(let executableFound, let exitStatus):
             guard executableFound else {
                 return Presentation(
-                    buttonTitle: "啟動服務",
+                    buttonTitle: buttonTitle,
                     buttonEnabled: false,
                     statusText: "找不到執行檔，請先在下方指定路徑。"
                 )
@@ -62,7 +69,7 @@ enum ServiceRuntimeControl {
             } else {
                 statusText = "已停止。"
             }
-            return Presentation(buttonTitle: "啟動服務", buttonEnabled: true, statusText: statusText)
+            return Presentation(buttonTitle: buttonTitle, buttonEnabled: true, statusText: statusText)
         }
     }
 }

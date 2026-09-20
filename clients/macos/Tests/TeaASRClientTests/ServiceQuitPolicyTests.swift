@@ -8,46 +8,25 @@ import XCTest
 /// the app's exit untouched, because nothing here ever matches a process by
 /// name or by port.
 final class ServiceQuitPolicyTests: XCTestCase {
-    func testOnlyAManagedRunningProcessIsStoppedAndOnlyWhenTheUserAskedForIt() {
+    /// There is no setting to opt out any more: stopping on quit is
+    /// unconditional, and the only thing that gates it is whether this app
+    /// actually holds a live handle to the process in question.
+    func testOnlyAManagedRunningProcessIsStoppedUnconditionally() {
         XCTAssertEqual(
-            ServiceQuitPolicy.action(
-                stopOnQuit: true, hasManagedProcess: true, managedProcessIsRunning: true
-            ),
+            ServiceQuitPolicy.action(hasManagedProcess: true, managedProcessIsRunning: true),
             .stopManagedProcess
-        )
-        // The setting is off: the app's own process is left running too.
-        XCTAssertEqual(
-            ServiceQuitPolicy.action(
-                stopOnQuit: false, hasManagedProcess: true, managedProcessIsRunning: true
-            ),
-            .leaveRunning
         )
         // A service that is reachable but was not launched here has no
         // handle, so there is nothing this app is willing to signal.
         XCTAssertEqual(
-            ServiceQuitPolicy.action(
-                stopOnQuit: true, hasManagedProcess: false, managedProcessIsRunning: false
-            ),
+            ServiceQuitPolicy.action(hasManagedProcess: false, managedProcessIsRunning: false),
             .leaveRunning
         )
         // A handle whose process already exited is not signalled again.
         XCTAssertEqual(
-            ServiceQuitPolicy.action(
-                stopOnQuit: true, hasManagedProcess: true, managedProcessIsRunning: false
-            ),
+            ServiceQuitPolicy.action(hasManagedProcess: true, managedProcessIsRunning: false),
             .leaveRunning
         )
-    }
-
-    func testSettingDefaultsToOnAndRoundTrips() throws {
-        let suiteName = "TeaASRClientTests.StopServiceOnQuit.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let settings = Settings(defaults: defaults)
-        XCTAssertTrue(settings.stopServiceOnQuit, "safe to default on: it is scoped to our own process")
-        settings.stopServiceOnQuit = false
-        XCTAssertFalse(Settings(defaults: defaults).stopServiceOnQuit)
     }
 
     /// The end-to-end shape of the quit path with two real processes: one
@@ -68,7 +47,6 @@ final class ServiceQuitPolicyTests: XCTestCase {
 
         // What `applicationWillTerminate` does, with the same inputs.
         let ours = ServiceQuitPolicy.action(
-            stopOnQuit: true,
             hasManagedProcess: true,
             managedProcessIsRunning: managed.isRunning
         )
@@ -76,7 +54,6 @@ final class ServiceQuitPolicyTests: XCTestCase {
 
         // …and what it does about the process it has no handle for.
         let theirs = ServiceQuitPolicy.action(
-            stopOnQuit: true,
             hasManagedProcess: false,
             managedProcessIsRunning: false
         )
