@@ -77,6 +77,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private var nextTranscriptSequence = 0
     private let transcriptStartedAt = Date()
     private var autosaveStatus = "尚未寫入自動存檔"
+    private var shortcutStatus = "尚未註冊"
     private lazy var autosaveURL: URL = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmm"
@@ -265,6 +266,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     func setStatus(_ text: String) {
         sessionStatus = text
         if selectedSection == .operations || selectedSection == .overview {
+            renderDetail()
+        }
+    }
+
+    func setShortcutStatus(_ text: String) {
+        shortcutStatus = text
+        if selectedSection == .settings {
             renderDetail()
         }
     }
@@ -577,18 +585,41 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let port = NSTextField(string: String(settings.port))
         let token = NSSecureTextField(string: (try? settings.token()) ?? "")
         token.placeholderString = "輸入 bearer token（儲存到本機 token 檔）"
-        let hotKey = NSTextField(labelWithString: "⌥⌘D（固定）")
-        hotKey.textColor = .secondaryLabelColor
+        let hotKey = ShortcutRecorderField(shortcut: settings.shortcut)
+        hotKey.identifier = NSUserInterfaceItemIdentifier("shortcut")
+        hotKey.onValidationError = { [weak self] message in
+            self?.setShortcutStatus("快捷鍵無效：\(message)")
+        }
+        let interactionMode = NSPopUpButton()
+        interactionMode.identifier = NSUserInterfaceItemIdentifier("interactionMode")
+        for mode in DictationInteractionMode.allCases {
+            interactionMode.addItem(withTitle: mode.title)
+            interactionMode.item(at: interactionMode.numberOfItems - 1)?.representedObject = mode.rawValue
+        }
+        interactionMode.selectItem(
+            withTitle: settings.interactionMode.title
+        )
+        let feedback = NSButton(
+            checkboxWithTitle: "開始／停止時播放系統提示音",
+            target: self,
+            action: #selector(saveSettings(_:))
+        )
+        feedback.identifier = NSUserInterfaceItemIdentifier("feedback")
+        feedback.state = settings.startStopFeedback ? .on : .off
         let inputDevice = inputDevicePopup()
         let inputChannel = inputChannelPopup(deviceUID: settings.inputDeviceUID)
         host.controlSize = .large
         port.controlSize = .large
         token.controlSize = .large
+        hotKey.controlSize = .large
+        interactionMode.controlSize = .large
         inputDevice.controlSize = .large
         inputChannel.controlSize = .large
         host.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
         port.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
         token.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
+        hotKey.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
+        interactionMode.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
         inputDevice.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
         inputChannel.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
         host.identifier = NSUserInterfaceItemIdentifier("host")
@@ -604,12 +635,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         host.action = #selector(saveSettings(_:))
         port.action = #selector(saveSettings(_:))
         token.action = #selector(saveSettings(_:))
+        interactionMode.target = self
+        interactionMode.action = #selector(saveSettings(_:))
 
         let grid = NSGridView(views: [
             [NSTextField(labelWithString: "服務位址"), host],
             [NSTextField(labelWithString: "Port"), port],
             [NSTextField(labelWithString: "Token"), token],
             [NSTextField(labelWithString: "快捷鍵"), hotKey],
+            [NSTextField(labelWithString: "互動模式"), interactionMode],
         ])
         let audioGrid = NSGridView(views: [
             [NSTextField(labelWithString: "輸入裝置"), inputDevice],
@@ -638,10 +672,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         preview.state = settings.revisablePreview ? .on : .off
 
         let tokenHint = NSTextField(
-            wrappingLabelWithString: "Token 只寫入 ~/Library/Application Support/TEA ASR/token，不會放進偏好設定。全域快捷鍵目前固定為 ⌥⌘D。"
+            wrappingLabelWithString: "Token 只寫入 ~/Library/Application Support/TEA ASR/token，不會放進偏好設定。"
         )
         tokenHint.textColor = .secondaryLabelColor
         tokenHint.font = .systemFont(ofSize: 12)
+        let shortcutHint = NSTextField(wrappingLabelWithString: "\(shortcutStatus) · 按一下快捷鍵欄位即可重新錄製。")
+        shortcutHint.textColor = shortcutStatus.contains("無效") ? .systemRed : .secondaryLabelColor
+        shortcutHint.font = .systemFont(ofSize: 12)
         let save = actionButton(title: "儲存設定", action: #selector(saveSettings(_:)))
         let test = actionButton(title: "測試服務連線", action: #selector(testService(_:)))
         let buttons = NSStackView(views: [save, test])
@@ -655,7 +692,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             views: [
                 cardStack([grid, tokenHint], title: "服務連線", symbolName: "network"),
                 cardStack([audioGrid], title: "音訊輸入", symbolName: "waveform"),
-                cardStack([autoInsert, preview], title: "輸入行為", symbolName: "keyboard"),
+                cardStack([shortcutHint, feedback, autoInsert, preview], title: "輸入行為", symbolName: "keyboard"),
                 cardStack([buttons], symbolName: "checkmark.circle"),
             ]
         )
@@ -848,6 +885,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if let preview = controls.preview {
             settings.revisablePreview = preview.state == .on
         }
+        if let shortcut = controls.shortcut?.shortcut {
+            settings.shortcut = shortcut
+        }
+        if let interactionMode = controls.interactionMode,
+           let rawValue = interactionMode.selectedItem?.representedObject as? String,
+           let mode = DictationInteractionMode(rawValue: rawValue) {
+            settings.interactionMode = mode
+        }
+        if let feedback = controls.feedback {
+            settings.startStopFeedback = feedback.state == .on
+        }
         if let inputDevice = controls.inputDevice {
             settings.inputDeviceUID = inputDevice.selectedItem?.representedObject as? String
         }
@@ -919,7 +967,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private func controlsInSettingsView() -> (
         host: NSTextField?, port: NSTextField?, token: NSSecureTextField?,
         autoInsert: NSButton?, preview: NSButton?, inputDevice: NSPopUpButton?,
-        inputChannel: NSPopUpButton?
+        inputChannel: NSPopUpButton?, shortcut: ShortcutRecorderField?,
+        interactionMode: NSPopUpButton?, feedback: NSButton?
     ) {
         var fields: [String: NSControl] = [:]
         func visit(_ view: NSView) {
@@ -936,7 +985,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             fields["autoInsert"] as? NSButton,
             fields["preview"] as? NSButton,
             fields["inputDevice"] as? NSPopUpButton,
-            fields["inputChannel"] as? NSPopUpButton
+            fields["inputChannel"] as? NSPopUpButton,
+            fields["shortcut"] as? ShortcutRecorderField,
+            fields["interactionMode"] as? NSPopUpButton,
+            fields["feedback"] as? NSButton
         )
     }
 

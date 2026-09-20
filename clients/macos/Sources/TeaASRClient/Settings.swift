@@ -12,6 +12,10 @@ struct Settings {
         static let serviceExecutable = "serviceExecutablePath"
         static let inputDeviceUID = "audioInputDeviceUID"
         static let inputChannelPolicy = "audioInputChannelPolicy"
+        static let shortcutKeyCode = "dictationShortcutKeyCode"
+        static let shortcutModifiers = "dictationShortcutModifiers"
+        static let interactionMode = "dictationInteractionMode"
+        static let startStopFeedback = "dictationStartStopFeedback"
     }
 
     private let defaults: UserDefaults
@@ -92,6 +96,42 @@ struct Settings {
             inputDeviceUID = newValue.deviceUID
             inputChannelPolicy = newValue.channelPolicy
         }
+    }
+
+    /// User-configurable global shortcut.  Both values are stable app-owned
+    /// primitives rather than an NSEvent object, so the setting survives
+    /// relaunches and macOS representation changes.
+    var shortcut: GlobalShortcut {
+        get {
+            guard
+                defaults.object(forKey: Key.shortcutKeyCode) != nil,
+                defaults.object(forKey: Key.shortcutModifiers) != nil
+            else { return .default }
+            let keyCode = UInt32(defaults.integer(forKey: Key.shortcutKeyCode))
+            let modifiers = ShortcutModifiers(
+                rawValue: UInt32(defaults.integer(forKey: Key.shortcutModifiers))
+            )
+            return (try? GlobalShortcut(keyCode: keyCode, modifiers: modifiers)) ?? .default
+        }
+        nonmutating set {
+            defaults.set(Int(newValue.keyCode), forKey: Key.shortcutKeyCode)
+            defaults.set(Int(newValue.modifiers.rawValue), forKey: Key.shortcutModifiers)
+        }
+    }
+
+    var interactionMode: DictationInteractionMode {
+        get {
+            guard let raw = defaults.string(forKey: Key.interactionMode) else { return .toggle }
+            return DictationInteractionMode(rawValue: raw) ?? .toggle
+        }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Key.interactionMode) }
+    }
+
+    /// Conservative by default: a user may opt into native system beeps at
+    /// session boundaries, but no bundled sound asset is shipped.
+    var startStopFeedback: Bool {
+        get { defaults.object(forKey: Key.startStopFeedback) as? Bool ?? false }
+        nonmutating set { defaults.set(newValue, forKey: Key.startStopFeedback) }
     }
 
     var streamURL: URL {

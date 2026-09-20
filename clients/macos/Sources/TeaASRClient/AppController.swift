@@ -64,7 +64,14 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var mainWindow: MainWindowController?
     private var permissionCoordinator: PermissionCoordinator?
     private var hotKeyRef: EventHotKeyRef?
+    private var hotKeyEventHandler: EventHandlerRef?
+    private var globalKeyUpMonitor: Any?
+    private var localKeyUpMonitor: Any?
     private var hotKeyRegistered = false
+    private var interactionMachine = DictationInteractionStateMachine(mode: .toggle)
+    private let dictationOverlay = DictationOverlayController()
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var insertedDictationSegments = Set<String>()
     /// Wall clock of the current session's sample 0, so a session restarted after
     /// a timeline gap still lands on one continuous meeting timeline.
     private var sessionOrigin = Date()
@@ -74,14 +81,17 @@ final class AppController: NSObject, NSApplicationDelegate {
         buildMenu()
         let permissions = PermissionCoordinator()
         permissionCoordinator = permissions
+        permissions.updateInteractionRequirement(settings.interactionMode == .pushToTalk)
         let window = MainWindowController(settings: settings, appState: appState, permissions: permissions)
         permissions.updateAutoInsertRequirement(settings.autoInsert)
-        window.onStartDictation = { [weak self] in self?.toggleDictation() }
+        window.onStartDictation = { [weak self] in self?.beginDictationFromUI() }
         window.onStartMeeting = { [weak self] in self?.toggleMeeting() }
         window.onStopSession = { [weak self] in self?.stopSession() }
         window.onRefreshService = { [weak self] in self?.refreshServiceState() }
         window.onSettingsChanged = { [weak self] in
-            self?.permissionCoordinator?.updateAutoInsertRequirement(self?.settings.autoInsert ?? true)
+            guard let self else { return }
+            self.permissionCoordinator?.updateAutoInsertRequirement(self.settings.autoInsert)
+            self.applyInteractionSettings()
         }
         mainWindow = window
         wireClient()
@@ -89,7 +99,9 @@ final class AppController: NSObject, NSApplicationDelegate {
             self?.mainWindow?.refresh()
             self?.render()
         }
+        interactionMachine = DictationInteractionStateMachine(mode: settings.interactionMode)
         registerHotKey()
+        installWorkspaceObservers()
         refreshServiceState()
         healthTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -123,8 +135,20 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         accessibilityHintTask?.cancel()
+        workspaceObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
+        workspaceObservers.removeAll()
+        removeKeyUpMonitors()
+        if let hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+            self.hotKeyRef = nil
+        }
+        if let hotKeyEventHandler {
+            RemoveEventHandler(hotKeyEventHandler)
+            self.hotKeyEventHandler = nil
+        }
         capture.stop()
         client.cancel()
+        dictationOverlay.hide()
     }
 
     /// System Settings changes TCC while this process is suspended in the
@@ -134,6 +158,12 @@ final class AppController: NSObject, NSApplicationDelegate {
     func applicationDidBecomeActive(_ notification: Notification) {
         guard let permissions = permissionCoordinator else { return }
         permissions.refreshAfterApplicationActivation()
+        applyInteractionSettings()
+        if settings.interactionMode == .pushToTalk,
+           !permissions.state.inputMonitoring.isSatisfied,
+           mode == .dictation {
+            cancelInteraction(.permissionLost)
+        }
 
         accessibilityHintTask?.cancel()
         accessibilityHintTask = Task { @MainActor [weak self] in
@@ -142,8 +172,9 @@ final class AppController: NSObject, NSApplicationDelegate {
             } catch {
                 return
             }
-            guard !Task.isCancelled, let self,
-                  let permissions = self.permissionCoordinator,
+            guard !Task.isCancelled, let self else { return }
+            self.applyInteractionSettings()
+            guard let permissions = self.permissionCoordinator,
                   permissions.consumeAccessibilityRestartHint()
             else { return }
 
@@ -172,8 +203,6 @@ final class AppController: NSObject, NSApplicationDelegate {
 
         toggleEntry.action = #selector(toggleDictation)
         toggleEntry.target = self
-        toggleEntry.keyEquivalent = "d"
-        toggleEntry.keyEquivalentModifierMask = [.command, .option]
         menu.addItem(toggleEntry)
 
         meetingEntry.action = #selector(toggleMeeting)
@@ -250,8 +279,16 @@ final class AppController: NSObject, NSApplicationDelegate {
         statusItem.button?.image = Self.menuBarImage(state)
         statusEntry.title = appState.displayStatus.title
 
-        toggleEntry.title = (mode == .dictation ? "停止聽寫" : "開始聽寫")
-            + (hotKeyRegistered ? "" : "（⌥⌘D 被其他 app 占用）")
+        let dictationAction = mode == .dictation ? "停止聽寫" : "開始聽寫"
+        let interactionHint = settings.interactionMode == .pushToTalk
+            ? "按住 " + settings.shortcut.displayString
+            : settings.shortcut.displayString
+        toggleEntry.title = dictationAction + "（" + interactionHint + "）"
+        toggleEntry.keyEquivalent = settings.shortcut.menuKeyEquivalent
+        toggleEntry.keyEquivalentModifierMask = settings.shortcut.eventModifierFlags
+        if !hotKeyRegistered {
+            toggleEntry.title += " · " + shortcutStatusText()
+        }
         meetingEntry.title = mode == .meeting ? "停止會議記錄" : "開始會議記錄"
         serviceEntry.title = serviceRunning ? "服務執行中" : "啟動服務"
         serviceEntry.isEnabled = !serviceRunning
@@ -268,9 +305,20 @@ final class AppController: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     @objc private func toggleDictation() {
-        mode == .dictation
-            ? stopSession()
-            : start(mode: .dictation)
+        if settings.interactionMode == .pushToTalk {
+            mode == .dictation ? stopSession() : beginDictationFromUI()
+            return
+        }
+        handleShortcut(.shortcutDown(isRepeat: false))
+    }
+
+    private func beginDictationFromUI() {
+        guard mode == .idle else {
+            if mode == .dictation { stopSession() }
+            return
+        }
+        interactionMachine.beginManualSession()
+        start(mode: .dictation)
     }
 
     @objc private func toggleMeeting() {
@@ -366,10 +414,22 @@ final class AppController: NSObject, NSApplicationDelegate {
         AudioCapture.requestPermission { [weak self] granted in
             guard let self else { return }
             guard granted else {
+                if newMode == .dictation {
+                    self.interactionMachine.resetAfterStartFailure()
+                    self.dictationOverlay.showError("沒有麥克風權限")
+                }
                 self.alert(
                     "沒有麥克風權限",
                     "請到「系統設定 → 隱私權與安全性 → 麥克風」允許 TEA ASR，然後再試一次。"
                 )
+                return
+            }
+            // A PTT key can be released while the asynchronous microphone
+            // consent request is still in flight.  Do not start a session
+            // after that release; the state machine has already cancelled it.
+            if newMode == .dictation,
+               self.settings.interactionMode == .pushToTalk,
+               !self.interactionMachine.active {
                 return
             }
             self.reallyStart(mode: newMode)
@@ -389,6 +449,10 @@ final class AppController: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.client.stop()
+                self.interactionMachine.resetAfterStartFailure()
+                if self.mode == .dictation {
+                    self.dictationOverlay.showError(message)
+                }
                 self.mainWindow?.setStatus("錄音已中斷：\(message)")
                 self.alert("錄音已停止", message)
                 self.render()
@@ -397,8 +461,12 @@ final class AppController: NSObject, NSApplicationDelegate {
         do {
             try capture.start(configuration: settings.audioInputConfiguration)
         } catch {
+            interactionMachine.resetAfterStartFailure()
             mode = .idle
             appState.setMode(.idle)
+            if newMode == .dictation {
+                dictationOverlay.showError(error.localizedDescription)
+            }
             mainWindow?.setStatus("無法開始錄音：\(error.localizedDescription)")
             alert("無法開始錄音", error.localizedDescription)
             return
@@ -409,10 +477,14 @@ final class AppController: NSObject, NSApplicationDelegate {
             // dictation entry point before the socket can produce a final
             // prevents TEA ASR from becoming the paste target.
             mainWindow?.hideForDictation()
+            dictationOverlay.begin()
+            insertedDictationSegments.removeAll()
+            playFeedback(.started)
         }
-        // Dictation only ever inserts finals, so a preview there would cost
-        // inference nobody sees.
-        client.connect(wantsPreview: newMode == .meeting && settings.revisablePreview)
+        // Partials are rendered only in our own overlay; they never enter the
+        // target app.  This keeps dictation safe while still making the live
+        // state visible.
+        client.connect(wantsPreview: settings.revisablePreview)
         if newMode == .meeting {
             mainWindow?.show(section: .operations)
         }
@@ -420,6 +492,10 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func stopSession() {
+        if mode == .dictation {
+            dictationOverlay.stopRequested()
+            playFeedback(.stopped)
+        }
         capture.stop()
         client.stop()
         // Keep the active mode until ASRClient receives the server's
@@ -438,6 +514,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             self.appState.updateClientState(state)
             self.mainWindow?.setSessionState(state)
             self.render()
+            let wasDictation = self.mode == .dictation
             if case .idle = state, self.mode != .idle {
                 // This is the completion edge of a normal stop. It is also
                 // where a new session is allowed to begin, so the old mode is
@@ -446,12 +523,19 @@ final class AppController: NSObject, NSApplicationDelegate {
                 self.mode = .idle
                 self.appState.setMode(.idle)
                 self.mainWindow?.setStatus("已停止")
+                self.interactionMachine.resetAfterSessionEnd()
+                if wasDictation { self.dictationOverlay.stopped() }
                 self.render()
             } else if case .failed(let issue) = state {
                 self.capture.stop()
                 self.mode = .idle
                 self.appState.setMode(.idle)
                 self.mainWindow?.setStatus("錯誤：\(issue.message)")
+                self.interactionMachine.resetAfterSessionEnd()
+                if wasDictation {
+                    self.dictationOverlay.showError(issue.message)
+                    self.playFeedback(.failed)
+                }
                 self.render()
             }
         }
@@ -465,12 +549,16 @@ final class AppController: NSObject, NSApplicationDelegate {
             self.mainWindow?.appendGap(reason)
             guard self.mode != .idle else { return }
             // Keep recording: a closed lid should not silently end a meeting.
-            self.client.connect(wantsPreview: self.mode == .meeting && self.settings.revisablePreview)
+            self.client.connect(wantsPreview: self.settings.revisablePreview)
             self.render()
         }
         client.onPartial = { [weak self] item in
             guard let self else { return }
-            self.mainWindow?.showPartial(item.text, spokenAt: self.spokenAt(item.startSample))
+            if self.mode == .dictation {
+                self.dictationOverlay.showPartial(item.text)
+            } else {
+                self.mainWindow?.showPartial(item.text, spokenAt: self.spokenAt(item.startSample))
+            }
         }
         client.onFinal = { [weak self] item in
             guard let self else { return }
@@ -486,7 +574,11 @@ final class AppController: NSObject, NSApplicationDelegate {
                 // clipboard/insertion path remains independent of presentation
                 // so a dictation final is still inspectable when auto-insert is
                 // disabled or Accessibility permission is missing.
+                guard self.insertedDictationSegments.insert(processed.metadata.segmentID).inserted else {
+                    return
+                }
                 self.mainWindow?.appendFinal(processed)
+                self.dictationOverlay.showFinal(processed.cleanedText)
                 let insertionText = TranscriptOutputPolicy.insertionText(from: processed)
                 self.showLastText(TranscriptOutputPolicy.presentationText(from: processed))
                 guard !insertionText.isEmpty else { return }
@@ -535,26 +627,46 @@ final class AppController: NSObject, NSApplicationDelegate {
     // MARK: - Hot key
 
     private func registerHotKey() {
-        var eventType = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)
-        )
-        InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, _, userData in
-                guard let userData else { return noErr }
-                let controller = Unmanaged<AppController>.fromOpaque(userData).takeUnretainedValue()
-                DispatchQueue.main.async { controller.toggleDictation() }
-                return noErr
-            },
-            1,
-            &eventType,
-            Unmanaged.passUnretained(self).toOpaque(),
-            nil
-        )
+        if let hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+            self.hotKeyRef = nil
+        }
+
+        if hotKeyEventHandler == nil {
+            var eventType = EventTypeSpec(
+                eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)
+            )
+            InstallEventHandler(
+                GetApplicationEventTarget(),
+                { _, _, userData in
+                    guard let userData else { return noErr }
+                    let controller = Unmanaged<AppController>.fromOpaque(userData).takeUnretainedValue()
+                    DispatchQueue.main.async {
+                        controller.handleShortcut(.shortcutDown(isRepeat: false))
+                    }
+                    return noErr
+                },
+                1,
+                &eventType,
+                Unmanaged.passUnretained(self).toOpaque(),
+                &hotKeyEventHandler
+            )
+        }
+
+        guard settings.interactionMode != .pushToTalk
+            || permissionCoordinator?.state.inputMonitoring.isSatisfied == true
+        else {
+            hotKeyRegistered = false
+            removeKeyUpMonitors()
+            mainWindow?.setShortcutStatus("需要輸入監控權限；請到權限頁開啟")
+            return
+        }
+
+        let shortcut = settings.shortcut
         let id = EventHotKeyID(signature: OSType(0x54454153), id: 1)  // 'TEAS'
         let status = RegisterEventHotKey(
-            UInt32(kVK_ANSI_D),
-            UInt32(cmdKey | optionKey),
+            shortcut.keyCode,
+            shortcut.carbonModifierFlags,
             id,
             GetApplicationEventTarget(),
             0,
@@ -563,6 +675,114 @@ final class AppController: NSObject, NSApplicationDelegate {
         // Another app may already own the combination. Saying so beats letting
         // the user press it and wonder why nothing happens.
         hotKeyRegistered = status == noErr
+        if hotKeyRegistered, settings.interactionMode == .pushToTalk {
+            installKeyUpMonitors()
+        } else {
+            removeKeyUpMonitors()
+        }
+        mainWindow?.setShortcutStatus(shortcutStatusText())
+    }
+
+    private func shortcutStatusText() -> String {
+        if settings.interactionMode == .pushToTalk,
+           permissionCoordinator?.state.inputMonitoring.isSatisfied != true {
+            return "需要輸入監控權限"
+        }
+        return hotKeyRegistered ? "快捷鍵已啟用" : "快捷鍵被其他 app 占用或無法註冊"
+    }
+
+    private func installKeyUpMonitors() {
+        guard globalKeyUpMonitor == nil, localKeyUpMonitor == nil else { return }
+        globalKeyUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
+            guard let self else { return }
+            Task { @MainActor [weak self] in
+                self?.handleKeyUp(event)
+            }
+        }
+        localKeyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
+            guard let self else { return event }
+            self.handleKeyUp(event)
+            return event
+        }
+        if globalKeyUpMonitor == nil {
+            mainWindow?.setShortcutStatus("無法監聽按鍵放開；請確認輸入監控權限")
+        }
+    }
+
+    private func removeKeyUpMonitors() {
+        if let globalKeyUpMonitor {
+            NSEvent.removeMonitor(globalKeyUpMonitor)
+            self.globalKeyUpMonitor = nil
+        }
+        if let localKeyUpMonitor {
+            NSEvent.removeMonitor(localKeyUpMonitor)
+            self.localKeyUpMonitor = nil
+        }
+    }
+
+    private func handleKeyUp(_ event: NSEvent) {
+        guard settings.interactionMode == .pushToTalk,
+              UInt32(event.keyCode) == settings.shortcut.keyCode
+        else { return }
+        handleShortcut(.shortcutUp)
+    }
+
+    private func handleShortcut(_ event: DictationInteractionEvent) {
+        let commands = interactionMachine.handle(event)
+        for command in commands {
+            switch command {
+            case .start:
+                start(mode: .dictation)
+            case .stop:
+                stopSession()
+            }
+        }
+    }
+
+    private func applyInteractionSettings() {
+        if mode == .idle {
+            interactionMachine = DictationInteractionStateMachine(mode: settings.interactionMode)
+        }
+        permissionCoordinator?.updateInteractionRequirement(
+            settings.interactionMode == .pushToTalk
+        )
+        registerHotKey()
+        mainWindow?.setShortcutStatus(shortcutStatusText())
+        render()
+    }
+
+    private func installWorkspaceObservers() {
+        let center = NSWorkspace.shared.notificationCenter
+        workspaceObservers.append(
+            center.addObserver(
+                forName: NSWorkspace.sessionDidResignActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.cancelInteraction(.systemSleep) }
+            }
+        )
+        workspaceObservers.append(
+            center.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.applyInteractionSettings() }
+            }
+        )
+    }
+
+    private func cancelInteraction(_ event: DictationInteractionEvent) {
+        handleShortcut(event)
+    }
+
+    private func playFeedback(_ event: InteractionFeedbackEvent) {
+        guard InteractionFeedbackPolicy.shouldPlay(
+            enabled: settings.startStopFeedback,
+            event: event
+        ) else { return }
+        NSSound.beep()
     }
 
     private func alert(_ title: String, _ message: String) {
