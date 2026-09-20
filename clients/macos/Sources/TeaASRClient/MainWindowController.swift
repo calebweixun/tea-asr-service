@@ -16,6 +16,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let tint: NSColor
     }
 
+    /// A section's view hierarchy plus the closure that refreshes its labels
+    /// in place. Each section is built exactly once; status updates call
+    /// `update()` instead of tearing the view tree down, which is what keeps
+    /// scroll position, first responder (e.g. a settings text field being
+    /// edited, or the shortcut recorder), and hover/pressed button state
+    /// stable while the app is idly reporting status in the background.
+    private struct SectionRuntime {
+        let view: NSView
+        let update: () -> Void
+    }
+
     enum Section: Int, CaseIterable {
         case overview
         case operations
@@ -54,6 +65,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let detailView = NSView()
     private var sectionButtons: [NSButton] = []
     private var selectedSection: Section = .overview
+    private var sectionRuntimes: [Section: SectionRuntime] = [:]
 
     private enum TranscriptEntryKind {
         case finalText
@@ -159,7 +171,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         splitViewController.splitView.setPosition(210, ofDividerAt: 0)
         window?.contentViewController = splitViewController
 
-        renderDetail()
+        mountSelectedSection()
     }
 
     private func buildSidebar() {
@@ -253,7 +265,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if selectedSection == .permissions {
             permissions.refresh()
         } else {
-            renderDetail()
+            updateSection(selectedSection)
         }
     }
 
@@ -265,16 +277,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     func setStatus(_ text: String) {
         sessionStatus = text
-        if selectedSection == .operations || selectedSection == .overview {
-            renderDetail()
-        }
+        // Update every section that shows this text, not only the one the
+        // user currently has open, so switching sections never reveals stale
+        // content that was silently skipped while it was off-screen.
+        updateSection(.overview)
+        updateSection(.operations)
     }
 
     func setShortcutStatus(_ text: String) {
         shortcutStatus = text
-        if selectedSection == .settings {
-            renderDetail()
-        }
+        updateSection(.settings)
     }
 
     func setSessionState(_ state: ASRClient.State) {
@@ -283,23 +295,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     func setAudioDiagnostics(_ diagnostics: AudioDiagnostics) {
         audioDiagnostics = diagnostics
-        guard selectedSection == .overview || selectedSection == .operations || selectedSection == .diagnostics else {
-            return
-        }
-        // AudioCapture emits one snapshot per tap buffer. Keep this simple
-        // AppKit renderer, but cap full view rebuilds at two per second.
+        // AudioCapture emits one snapshot per tap buffer (can be well over
+        // 100/sec). Applying an update is now cheap — it assigns a string to
+        // an already-built label instead of tearing down and relaying out the
+        // whole detail pane — but formatting the summary strings that often
+        // is still wasted work no one can perceive, so keep the throttle.
         let now = Date()
         guard now.timeIntervalSince(lastAudioDiagnosticsRenderAt) >= 0.5 else { return }
         lastAudioDiagnosticsRenderAt = now
-        renderDetail()
+        updateSection(.overview)
+        updateSection(.operations)
+        updateSection(.diagnostics)
     }
 
     func showPartial(_ text: String, spokenAt: Date) {
         partialText = text
         partialSpokenAt = text.isEmpty ? nil : spokenAt
-        if selectedSection == .operations {
-            renderDetail()
-        }
+        updateSection(.operations)
     }
 
     func appendFinal(_ processed: ProcessedTranscript) {
@@ -316,9 +328,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             )
         )
         appState.updateLastText(processed.cleanedText)
-        if selectedSection == .operations || selectedSection == .overview {
-            renderDetail()
-        }
+        updateSection(.operations)
+        updateSection(.overview)
     }
 
     func appendGap(_ reason: String) {
@@ -334,9 +345,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             )
         )
         sessionStatus = "錄音有間隔：\(reason)"
-        if selectedSection == .operations || selectedSection == .diagnostics {
-            renderDetail()
-        }
+        updateSection(.operations)
+        updateSection(.diagnostics)
     }
 
     // MARK: - Navigation
@@ -359,148 +369,158 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             button.contentTintColor = selected ? .controlAccentColor : .labelColor
             button.font = .systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
         }
-        renderDetail()
+        mountSelectedSection()
     }
 
     private func refreshPermissionSection() {
         guard selectedSection == .permissions else { return }
-        renderDetail()
+        updateSection(.permissions)
     }
 
     // MARK: - Detail sections
 
-    private func renderDetail() {
-        detailView.subviews.forEach { $0.removeFromSuperview() }
-        let content: NSView
-        switch selectedSection {
-        case .overview:
-            content = overviewView()
-        case .operations:
-            content = operationsView()
-        case .permissions:
-            content = permissionsView()
-        case .settings:
-            content = settingsView()
-        case .diagnostics:
-            content = diagnosticsView()
+    /// Mounts the currently selected section's view, building it the first
+    /// time it is shown. This is the only place the detail pane's child
+    /// hierarchy is torn down, and even then only the previous section's
+    /// single root view is removed — never the views inside a section.
+    private func mountSelectedSection() {
+        let runtime = sectionRuntime(for: selectedSection)
+        if detailView.subviews.first !== runtime.view {
+            detailView.subviews.forEach { $0.removeFromSuperview() }
+            runtime.view.translatesAutoresizingMaskIntoConstraints = false
+            detailView.addSubview(runtime.view)
+            NSLayoutConstraint.activate([
+                runtime.view.leadingAnchor.constraint(equalTo: detailView.leadingAnchor, constant: 28),
+                runtime.view.trailingAnchor.constraint(equalTo: detailView.trailingAnchor, constant: -28),
+                runtime.view.topAnchor.constraint(equalTo: detailView.topAnchor, constant: 24),
+                runtime.view.bottomAnchor.constraint(equalTo: detailView.bottomAnchor, constant: -24),
+            ])
         }
-        content.translatesAutoresizingMaskIntoConstraints = false
-        detailView.addSubview(content)
-        NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: detailView.leadingAnchor, constant: 28),
-            content.trailingAnchor.constraint(equalTo: detailView.trailingAnchor, constant: -28),
-            content.topAnchor.constraint(equalTo: detailView.topAnchor, constant: 24),
-            content.bottomAnchor.constraint(equalTo: detailView.bottomAnchor, constant: -24),
-        ])
+        // Refresh unconditionally: state-change methods below update every
+        // section that displays that state, not only the visible one, so a
+        // section can go stale while it is not mounted and must catch up here.
+        runtime.update()
     }
 
-    private func overviewView() -> NSView {
-        let service = metricCard(
-            title: "服務",
-            value: serverSummary(),
-            symbolName: "server.rack",
-            tint: .systemBlue
-        )
-        let model = metricCard(
-            title: "模型",
-            value: modelSummary(),
-            symbolName: "cpu",
-            tint: .systemPurple
-        )
-        let runtime = cardStack(
-            [
-                valueRow("Session", "\(modeTitle()) · \(sessionStatus)"),
-                valueRow("輸入", audioSummary()),
-            ],
-            title: "執行狀態",
-            symbolName: "waveform"
-        )
-        let recent = recentTextCard()
+    private func sectionRuntime(for section: Section) -> SectionRuntime {
+        if let cached = sectionRuntimes[section] { return cached }
+        let runtime: SectionRuntime
+        switch section {
+        case .overview: runtime = buildOverviewSection()
+        case .operations: runtime = buildOperationsSection()
+        case .permissions: runtime = buildPermissionsSection()
+        case .settings: runtime = buildSettingsSection()
+        case .diagnostics: runtime = buildDiagnosticsSection()
+        }
+        sectionRuntimes[section] = runtime
+        return runtime
+    }
 
-        let startDictation = actionButton(
-            title: appState.mode == .dictation ? "停止聽寫" : "開始聽寫",
-            action: #selector(startDictation(_:))
-        )
-        let startMeeting = actionButton(
-            title: appState.mode == .meeting ? "停止會議記錄" : "開始會議記錄",
-            action: #selector(startMeeting(_:))
-        )
-        let permissionsButton = actionButton(
-            title: "檢查權限",
-            action: #selector(openPermissions(_:))
-        )
+    /// Refreshes an already-built section's labels in place. A section that
+    /// has never been mounted is skipped on purpose: `mountSelectedSection`
+    /// builds it pre-populated with current state the first time it appears,
+    /// so there is nothing stale to fix up before then.
+    private func updateSection(_ section: Section) {
+        sectionRuntimes[section]?.update()
+    }
+
+    private func buildOverviewSection() -> SectionRuntime {
+        let hero = buildStatusHero()
+        let service = buildMetricCard(title: "服務", symbolName: "server.rack", tint: .systemBlue)
+        let model = buildMetricCard(title: "模型", symbolName: "cpu", tint: .systemPurple)
+        let sessionRow = buildValueRow(title: "Session")
+        let audioRow = buildValueRow(title: "輸入")
+        let runtimeCard = cardStack([sessionRow.view, audioRow.view], title: "執行狀態", symbolName: "waveform")
+        let recent = buildRecentTextCard()
+
+        let startDictation = actionButton(title: "開始聽寫", action: #selector(startDictation(_:)))
+        let startMeeting = actionButton(title: "開始會議記錄", action: #selector(startMeeting(_:)))
+        let permissionsButton = actionButton(title: "檢查權限", action: #selector(openPermissions(_:)))
         let actions = NSStackView(views: [startDictation, startMeeting, permissionsButton])
         actions.orientation = .horizontal
         actions.spacing = 10
 
-        return sectionStack(
+        let view = sectionStack(
             title: "總覽",
             subtitle: "服務、模型與目前音訊狀態",
             symbolName: "rectangle.3.group",
             views: [
-                statusHeroView(),
-                metricPair([service, model]),
-                runtime,
-                recent,
+                hero.view,
+                metricPair([service.view, model.view]),
+                runtimeCard,
+                recent.view,
                 cardStack([actions], symbolName: "bolt.fill"),
             ]
         )
+
+        func update() {
+            hero.update()
+            service.update(serverSummary())
+            model.update(modelSummary())
+            sessionRow.update("\(modeTitle()) · \(sessionStatus)")
+            audioRow.update(audioSummary())
+            recent.update()
+            let dictationTitle = appState.mode == .dictation ? "停止聽寫" : "開始聽寫"
+            if startDictation.title != dictationTitle { startDictation.title = dictationTitle }
+            let meetingTitle = appState.mode == .meeting ? "停止會議記錄" : "開始會議記錄"
+            if startMeeting.title != meetingTitle { startMeeting.title = meetingTitle }
+        }
+        update()
+        return SectionRuntime(view: view, update: update)
     }
 
-    private func operationsView() -> NSView {
-        let startDictation = actionButton(
-            title: appState.mode == .dictation ? "停止聽寫" : "開始聽寫",
-            action: #selector(startDictation(_:))
-        )
-        let startMeeting = actionButton(
-            title: appState.mode == .meeting ? "停止會議記錄" : "開始會議記錄",
-            action: #selector(startMeeting(_:))
-        )
+    private func buildOperationsSection() -> SectionRuntime {
+        let startDictation = actionButton(title: "開始聽寫", action: #selector(startDictation(_:)))
+        let startMeeting = actionButton(title: "開始會議記錄", action: #selector(startMeeting(_:)))
         let stop = actionButton(title: "停止目前 session", action: #selector(stopSession(_:)))
-        stop.isEnabled = appState.mode != .idle
         let controls = NSStackView(views: [startDictation, startMeeting, stop])
         controls.orientation = .horizontal
         controls.spacing = 10
 
-        let status = valueRow("狀態", sessionStatus)
-        let audio = valueRow("音訊", audioSummary())
-        let transcript = makeTranscriptView()
+        let statusRow = buildValueRow(title: "狀態")
+        let audioRow = buildValueRow(title: "音訊")
+        let transcriptInfoRow = buildValueRow(title: "自動存檔")
+        let transcript = buildTranscriptView()
         let transcriptTitle = NSTextField(labelWithString: "最近文字／會議 transcript")
         transcriptTitle.font = .systemFont(ofSize: 14, weight: .semibold)
-        let transcriptInfo = valueRow("自動存檔", autosaveStatus)
         let export = actionButton(title: "匯出 Markdown…", action: #selector(exportMarkdown(_:)))
 
-        return sectionStack(
+        let view = sectionStack(
             title: "操作",
             subtitle: "開始、停止並即時查看辨識結果",
             symbolName: "mic.fill",
             views: [
                 cardStack([controls], title: "開始錄音", symbolName: "record.circle"),
-                cardStack([status, audio, transcriptInfo], title: "目前 session", symbolName: "waveform.path.ecg"),
-                cardStack([transcriptTitle, transcript], title: "即時逐字稿", symbolName: "text.quote"),
+                cardStack([statusRow.view, audioRow.view, transcriptInfoRow.view], title: "目前 session", symbolName: "waveform.path.ecg"),
+                cardStack([transcriptTitle, transcript.view], title: "即時逐字稿", symbolName: "text.quote"),
                 cardStack([export], symbolName: "square.and.arrow.up"),
             ]
         )
+
+        func update() {
+            let dictationTitle = appState.mode == .dictation ? "停止聽寫" : "開始聽寫"
+            if startDictation.title != dictationTitle { startDictation.title = dictationTitle }
+            let meetingTitle = appState.mode == .meeting ? "停止會議記錄" : "開始會議記錄"
+            if startMeeting.title != meetingTitle { startMeeting.title = meetingTitle }
+            stop.isEnabled = appState.mode != .idle
+            statusRow.update(sessionStatus)
+            audioRow.update(audioSummary())
+            transcriptInfoRow.update(autosaveStatus)
+            transcript.update()
+        }
+        update()
+        return SectionRuntime(view: view, update: update)
     }
 
-    private func permissionsView() -> NSView {
-        let state = permissions.state
-        let summary = NSTextField(
-            wrappingLabelWithString: state.requiredPermissionsGranted
-                ? "必要權限已具備。若要自動貼上，仍需允許輔助使用。"
-                : "請完成下列必要權限；完成後回到此視窗，狀態會自動更新。"
-        )
-        summary.textColor = state.requiredPermissionsGranted ? .systemGreen : .systemOrange
-
-        let rows = state.items.map { item in
-            permissionRow(item)
-        }
-        let permissionRows = NSStackView(views: rows)
+    private func buildPermissionsSection() -> SectionRuntime {
+        let summary = NSTextField(wrappingLabelWithString: "")
+        let rows = PermissionKind.allCases.map { buildPermissionRow(for: $0) }
+        let permissionRows = NSStackView(views: rows.map(\.view))
         permissionRows.orientation = .vertical
         permissionRows.alignment = .width
         permissionRows.spacing = 12
         let refresh = actionButton(title: "重新檢查權限", action: #selector(refreshPermissions(_:)))
-        return sectionStack(
+        let view = sectionStack(
             title: "權限",
             subtitle: "完成錄音與自動貼上需要的系統授權",
             symbolName: "lock.shield.fill",
@@ -510,41 +530,40 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                 cardStack([refresh], symbolName: "arrow.clockwise"),
             ]
         )
+
+        func update() {
+            let state = permissions.state
+            let summaryText = state.requiredPermissionsGranted
+                ? "必要權限已具備。若要自動貼上，仍需允許輔助使用。"
+                : "請完成下列必要權限；完成後回到此視窗，狀態會自動更新。"
+            if summary.stringValue != summaryText { summary.stringValue = summaryText }
+            summary.textColor = state.requiredPermissionsGranted ? .systemGreen : .systemOrange
+            for row in rows {
+                row.update(state.item(for: row.kind))
+            }
+        }
+        update()
+        return SectionRuntime(view: view, update: update)
     }
 
-    private func permissionRow(_ item: PermissionItemState) -> NSView {
-        let statusText: String
-        let color: NSColor
-        switch item.authorization {
-        case .authorized, .notRequired:
-            statusText = item.authorization == .notRequired ? "不需要" : "已允許"
-            color = .systemGreen
-        case .notDetermined:
-            statusText = "尚未決定"
-            color = .systemOrange
-        case .denied:
-            statusText = "未允許"
-            color = .systemRed
-        case .restricted:
-            statusText = "受系統限制"
-            color = .systemRed
-        }
-
-        let title = NSTextField(labelWithString: "\(item.title) · \(statusText)")
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
-        title.textColor = color
-        let statusIconName = item.isSatisfied ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
-        let statusIcon = NSImageView(
-            image: NSImage(systemSymbolName: statusIconName, accessibilityDescription: statusText)
-                ?? NSImage()
-        )
+    /// A permission row is structurally fixed (icon, title, explanation, and
+    /// an optional trailing action button). Only one button can ever be
+    /// meaningful per state, so it is built once and toggled with `isHidden`
+    /// — an NSStackView excludes hidden arranged subviews from layout,
+    /// including their spacing, so this reproduces the old
+    /// add-button-only-when-needed behaviour without touching the hierarchy.
+    private func buildPermissionRow(
+        for kind: PermissionKind
+    ) -> (view: NSView, kind: PermissionKind, update: (PermissionItemState) -> Void) {
+        let statusIcon = NSImageView(image: NSImage())
         statusIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
-        statusIcon.contentTintColor = color
+        let title = NSTextField(labelWithString: "")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
         let titleRow = NSStackView(views: [statusIcon, title])
         titleRow.orientation = .horizontal
         titleRow.alignment = .centerY
         titleRow.spacing = 6
-        let explanation = NSTextField(wrappingLabelWithString: item.explanation)
+        let explanation = NSTextField(wrappingLabelWithString: "")
         explanation.textColor = .secondaryLabelColor
         explanation.font = .systemFont(ofSize: 12)
 
@@ -553,34 +572,58 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         text.alignment = .leading
         text.spacing = 3
 
-        let row = NSStackView()
+        let action = NSButton(title: "", target: self, action: nil)
+        action.setContentHuggingPriority(.required, for: .horizontal)
+        action.isHidden = true
+
+        let row = NSStackView(views: [text, action])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 12
-        row.addArrangedSubview(text)
 
-        // A first-run permission gets its native prompt. Once macOS has made
-        // a decision, the only useful action is the System Settings pane.
-        // Render exactly one button per row so authorized/denied states do not
-        // expose two identical settings actions.
-        if let actionTitle = item.actionTitle {
-            let isNativePrompt = item.authorization == .notDetermined
-            let buttonTitle = isNativePrompt ? actionTitle : "開啟設定"
-            let action = NSButton(
-                title: buttonTitle,
-                target: self,
-                action: isNativePrompt
+        func update(_ item: PermissionItemState) {
+            let statusText: String
+            let color: NSColor
+            switch item.authorization {
+            case .authorized, .notRequired:
+                statusText = item.authorization == .notRequired ? "不需要" : "已允許"
+                color = .systemGreen
+            case .notDetermined:
+                statusText = "尚未決定"
+                color = .systemOrange
+            case .denied:
+                statusText = "未允許"
+                color = .systemRed
+            case .restricted:
+                statusText = "受系統限制"
+                color = .systemRed
+            }
+
+            let titleText = "\(item.title) · \(statusText)"
+            if title.stringValue != titleText { title.stringValue = titleText }
+            title.textColor = color
+            let statusIconName = item.isSatisfied ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+            statusIcon.image = NSImage(systemSymbolName: statusIconName, accessibilityDescription: statusText) ?? NSImage()
+            statusIcon.contentTintColor = color
+            if explanation.stringValue != item.explanation { explanation.stringValue = item.explanation }
+
+            if let actionTitle = item.actionTitle {
+                let isNativePrompt = item.authorization == .notDetermined
+                let buttonTitle = isNativePrompt ? actionTitle : "開啟設定"
+                if action.title != buttonTitle { action.title = buttonTitle }
+                action.action = isNativePrompt
                     ? #selector(permissionAction(_:))
                     : #selector(openPermissionSettings(_:))
-            )
-            action.tag = permissionTag(for: item.kind)
-            action.setContentHuggingPriority(.required, for: .horizontal)
-            row.addArrangedSubview(action)
+                action.tag = permissionTag(for: item.kind)
+                action.isHidden = false
+            } else {
+                action.isHidden = true
+            }
         }
-        return row
+        return (row, kind, update)
     }
 
-    private func settingsView() -> NSView {
+    private func buildSettingsSection() -> SectionRuntime {
         let host = NSTextField(string: settings.host)
         let port = NSTextField(string: String(settings.port))
         let token = NSSecureTextField(string: (try? settings.token()) ?? "")
@@ -676,8 +719,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         )
         tokenHint.textColor = .secondaryLabelColor
         tokenHint.font = .systemFont(ofSize: 12)
-        let shortcutHint = NSTextField(wrappingLabelWithString: "\(shortcutStatus) · 按一下快捷鍵欄位即可重新錄製。")
-        shortcutHint.textColor = shortcutStatus.contains("無效") ? .systemRed : .secondaryLabelColor
+        let shortcutHint = NSTextField(wrappingLabelWithString: "")
         shortcutHint.font = .systemFont(ofSize: 12)
         let save = actionButton(title: "儲存設定", action: #selector(saveSettings(_:)))
         let test = actionButton(title: "測試服務連線", action: #selector(testService(_:)))
@@ -685,7 +727,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         buttons.orientation = .horizontal
         buttons.spacing = 10
 
-        return sectionStack(
+        let view = sectionStack(
             title: "設定",
             subtitle: "服務連線、音訊輸入與輸入行為",
             symbolName: "gearshape.fill",
@@ -696,6 +738,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                 cardStack([buttons], symbolName: "checkmark.circle"),
             ]
         )
+
+        func update() {
+            let text = "\(shortcutStatus) · 按一下快捷鍵欄位即可重新錄製。"
+            if shortcutHint.stringValue != text { shortcutHint.stringValue = text }
+            shortcutHint.textColor = shortcutStatus.contains("無效") ? .systemRed : .secondaryLabelColor
+        }
+        update()
+        return SectionRuntime(view: view, update: update)
     }
 
     private func inputDevicePopup() -> NSPopUpButton {
@@ -754,23 +804,33 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    private func diagnosticsView() -> NSView {
-        let state = valueRow("App state", appState.displayStatus.title)
-        let client = valueRow("Client state", clientStateSummary())
-        let audio = valueRow("Audio", audioSummary())
-        let service = valueRow("Service probe", serverSummary())
-        let error = valueRow("最近錯誤", appState.serviceError?.localizedDescription ?? "無")
+    private func buildDiagnosticsSection() -> SectionRuntime {
+        let stateRow = buildValueRow(title: "App state")
+        let clientRow = buildValueRow(title: "Client state")
+        let audioRow = buildValueRow(title: "Audio")
+        let serviceRow = buildValueRow(title: "Service probe")
+        let errorRow = buildValueRow(title: "最近錯誤")
         let refresh = actionButton(title: "重新檢查服務", action: #selector(testService(_:)))
-        return sectionStack(
+        let view = sectionStack(
             title: "診斷",
             subtitle: "確認麥克風 frame、RMS、服務與 WebSocket 狀態",
             symbolName: "stethoscope",
             views: [
-                cardStack([state, client], title: "應用程式", symbolName: "app.badge"),
-                cardStack([audio, service, error], title: "連線與音訊", symbolName: "waveform.and.magnifyingglass"),
+                cardStack([stateRow.view, clientRow.view], title: "應用程式", symbolName: "app.badge"),
+                cardStack([audioRow.view, serviceRow.view, errorRow.view], title: "連線與音訊", symbolName: "waveform.and.magnifyingglass"),
                 cardStack([refresh], symbolName: "arrow.clockwise"),
             ]
         )
+
+        func update() {
+            stateRow.update(appState.displayStatus.title)
+            clientRow.update(clientStateSummary())
+            audioRow.update(audioSummary())
+            serviceRow.update(serverSummary())
+            errorRow.update(appState.serviceError?.localizedDescription ?? "無")
+        }
+        update()
+        return SectionRuntime(view: view, update: update)
     }
 
     // MARK: - Actions
@@ -837,7 +897,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         guard applySettingsFromForm() else { return }
         onSettingsChanged?()
         onRefreshService?()
-        renderDetail()
+        updateSection(.settings)
     }
 
     @objc private func testService(_ sender: Any?) {
@@ -852,7 +912,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
         onSettingsChanged?()
         onRefreshService?()
-        renderDetail()
+        updateSection(.settings)
+        updateSection(.diagnostics)
     }
 
     @discardableResult
@@ -1048,41 +1109,72 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         return stack
     }
 
-    private func statusHeroView() -> NSView {
-        let presentation = statusPresentation()
-        let icon = NSImageView(
-            image: NSImage(systemSymbolName: presentation.symbolName, accessibilityDescription: presentation.title)
-                ?? NSImage()
-        )
+    /// Builds the hero status card once. Its icon, title, detail text, mode
+    /// badge and border tint all change with `statusPresentation()`, so
+    /// `update()` recomputes and reassigns them directly instead of the
+    /// caller rebuilding the card.
+    private func buildStatusHero() -> (view: NSView, update: () -> Void) {
+        let icon = NSImageView(image: NSImage())
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 25, weight: .semibold)
-        icon.contentTintColor = presentation.tint
         icon.wantsLayer = true
         icon.layer?.cornerRadius = 15
-        icon.layer?.backgroundColor = presentation.tint.withAlphaComponent(0.14).cgColor
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.widthAnchor.constraint(equalToConstant: 54).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 54).isActive = true
 
-        let title = NSTextField(labelWithString: presentation.title)
+        let title = NSTextField(labelWithString: "")
         title.font = .systemFont(ofSize: 18, weight: .semibold)
-        let detail = NSTextField(wrappingLabelWithString: presentation.detail)
-        detail.font = .systemFont(ofSize: 12)
-        detail.textColor = .secondaryLabelColor
-        detail.maximumNumberOfLines = 2
+        let detail = stableLabel(font: .systemFont(ofSize: 12), maxLines: 2, color: .secondaryLabelColor)
 
         let text = NSStackView(views: [title, detail])
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 4
 
-        let badge = statusBadge(title: modeTitle(), tint: presentation.tint)
+        let badgeLabel = NSTextField(labelWithString: "")
+        badgeLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+        badgeLabel.alignment = .center
+        badgeLabel.lineBreakMode = .byTruncatingTail
+        let badge = NSVisualEffectView()
+        badge.material = .selection
+        badge.state = .active
+        badge.wantsLayer = true
+        badge.layer?.cornerRadius = 8
+        badge.layer?.borderWidth = 1
+        badge.addSubview(badgeLabel)
+        badgeLabel.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            badgeLabel.leadingAnchor.constraint(equalTo: badge.leadingAnchor, constant: 9),
+            badgeLabel.trailingAnchor.constraint(equalTo: badge.trailingAnchor, constant: -9),
+            badgeLabel.topAnchor.constraint(equalTo: badge.topAnchor, constant: 4),
+            badgeLabel.bottomAnchor.constraint(equalTo: badge.bottomAnchor, constant: -4),
+        ])
+        badge.setContentHuggingPriority(.required, for: .horizontal)
+
         let row = NSStackView(views: [icon, text, badge])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 12
         row.setCustomSpacing(8, after: text)
-        return cardStack([row], material: .underWindowBackground, accent: presentation.tint)
+
+        let card = cardStack([row], material: .underWindowBackground)
+
+        func update() {
+            let presentation = statusPresentation()
+            icon.image = NSImage(systemSymbolName: presentation.symbolName, accessibilityDescription: presentation.title) ?? NSImage()
+            icon.contentTintColor = presentation.tint
+            icon.layer?.backgroundColor = presentation.tint.withAlphaComponent(0.14).cgColor
+            if title.stringValue != presentation.title { title.stringValue = presentation.title }
+            if detail.stringValue != presentation.detail { detail.stringValue = presentation.detail }
+            let mode = modeTitle()
+            if badgeLabel.stringValue != mode { badgeLabel.stringValue = mode }
+            badgeLabel.textColor = presentation.tint
+            badge.layer?.borderColor = presentation.tint.withAlphaComponent(0.25).cgColor
+            card.layer?.borderColor = presentation.tint.withAlphaComponent(0.26).cgColor
+        }
+        update()
+        return (card, update)
     }
 
     private func statusPresentation() -> StatusPresentation {
@@ -1124,31 +1216,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    private func statusBadge(title: String, tint: NSColor) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = tint
-        label.alignment = .center
-        label.lineBreakMode = .byTruncatingTail
-        let badge = NSVisualEffectView()
-        badge.material = .selection
-        badge.state = .active
-        badge.wantsLayer = true
-        badge.layer?.cornerRadius = 8
-        badge.layer?.borderWidth = 1
-        badge.layer?.borderColor = tint.withAlphaComponent(0.25).cgColor
-        badge.addSubview(label)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: badge.leadingAnchor, constant: 9),
-            label.trailingAnchor.constraint(equalTo: badge.trailingAnchor, constant: -9),
-            label.topAnchor.constraint(equalTo: badge.topAnchor, constant: 4),
-            label.bottomAnchor.constraint(equalTo: badge.bottomAnchor, constant: -4),
-        ])
-        badge.setContentHuggingPriority(.required, for: .horizontal)
-        return badge
-    }
-
     private func metricPair(_ cards: [NSView]) -> NSView {
         let pair = NSStackView(views: cards)
         pair.orientation = .horizontal
@@ -1158,7 +1225,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         return pair
     }
 
-    private func metricCard(title: String, value: String, symbolName: String, tint: NSColor) -> NSView {
+    /// A metric card's value label uses `stableLabel`, which reserves a fixed
+    /// two-line height up front. That is what keeps the two overview metric
+    /// cards equal height across updates without an explicit height
+    /// constraint between them: neither card's content can grow past the
+    /// space it already reserved.
+    private func buildMetricCard(
+        title: String,
+        symbolName: String,
+        tint: NSColor
+    ) -> (view: NSView, update: (String) -> Void) {
         let icon = NSImageView(
             image: NSImage(systemSymbolName: symbolName, accessibilityDescription: title) ?? NSImage()
         )
@@ -1168,24 +1244,28 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 11, weight: .semibold)
         label.textColor = .secondaryLabelColor
-        let valueLabel = NSTextField(wrappingLabelWithString: value)
-        valueLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        let valueLabel = stableLabel(font: .systemFont(ofSize: 13, weight: .medium), maxLines: 2)
         let heading = NSStackView(views: [icon, label])
         heading.orientation = .horizontal
         heading.alignment = .centerY
         heading.spacing = 7
-        return cardStack([heading, valueLabel], material: .contentBackground, accent: tint)
+        let view = cardStack([heading, valueLabel], material: .contentBackground, accent: tint)
+        return (view, { text in
+            guard valueLabel.stringValue != text else { return }
+            valueLabel.stringValue = text
+        })
     }
 
-    private func recentTextCard() -> NSView {
-        let text = appState.lastText ?? "尚無定稿文字"
-        let label = NSTextField(wrappingLabelWithString: text)
-        label.font = .systemFont(ofSize: 14)
-        label.maximumNumberOfLines = 3
-        if appState.lastText == nil {
-            label.textColor = .secondaryLabelColor
+    private func buildRecentTextCard() -> (view: NSView, update: () -> Void) {
+        let label = stableLabel(font: .systemFont(ofSize: 14), maxLines: 3)
+        let view = cardStack([label], title: "最近文字", symbolName: "text.quote")
+        func update() {
+            let text = appState.lastText ?? "尚無定稿文字"
+            if label.stringValue != text { label.stringValue = text }
+            label.textColor = appState.lastText == nil ? .secondaryLabelColor : .labelColor
         }
-        return cardStack([label], title: "最近文字", symbolName: "text.quote")
+        update()
+        return (view, update)
     }
 
     private func cardStack(
@@ -1241,18 +1321,37 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         return card
     }
 
-    private func valueRow(_ title: String, _ value: String) -> NSView {
+    /// A label whose height is pinned to `maxLines` up front (rather than a
+    /// minimum), so a status string going from one line to two — or back —
+    /// never shifts the cards below it. Longer text truncates with an
+    /// ellipsis instead of growing the layout.
+    private func stableLabel(font: NSFont, maxLines: Int, color: NSColor? = nil) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: "")
+        label.font = font
+        label.maximumNumberOfLines = maxLines
+        label.lineBreakMode = .byTruncatingTail
+        if let color {
+            label.textColor = color
+        }
+        let lineHeight = (font.ascender - font.descender + font.leading).rounded(.up)
+        label.heightAnchor.constraint(equalToConstant: lineHeight * CGFloat(maxLines)).isActive = true
+        return label
+    }
+
+    private func buildValueRow(title: String) -> (view: NSView, update: (String) -> Void) {
         let key = NSTextField(labelWithString: title)
         key.font = .systemFont(ofSize: 12, weight: .semibold)
         key.textColor = .secondaryLabelColor
         key.widthAnchor.constraint(equalToConstant: 100).isActive = true
-        let value = NSTextField(wrappingLabelWithString: value)
-        value.font = .systemFont(ofSize: 13)
+        let value = stableLabel(font: .systemFont(ofSize: 13), maxLines: 2)
         let row = NSStackView(views: [key, value])
         row.orientation = .horizontal
         row.alignment = .firstBaseline
         row.spacing = 12
-        return row
+        return (row, { text in
+            guard value.stringValue != text else { return }
+            value.stringValue = text
+        })
     }
 
     private func actionButton(title: String, action: Selector) -> NSButton {
@@ -1264,15 +1363,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         return button
     }
 
-    private func separator() -> NSView {
-        let line = NSBox()
-        line.boxType = .separator
-        line.translatesAutoresizingMaskIntoConstraints = false
-        line.widthAnchor.constraint(greaterThanOrEqualToConstant: 500).isActive = true
-        return line
-    }
-
-    private func makeTranscriptView() -> NSScrollView {
+    /// Builds the live transcript view once. `update()` only replaces the
+    /// text-view string, and preserves the reader's scroll position unless
+    /// they were already pinned to the bottom — matching the usual
+    /// live-log convention of auto-following new lines only when the reader
+    /// has not scrolled away to look at earlier text.
+    private func buildTranscriptView() -> (view: NSScrollView, update: () -> Void) {
         let textView = NSTextView()
         textView.isEditable = false
         textView.isRichText = false
@@ -1280,14 +1376,35 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         textView.textColor = .labelColor
         textView.backgroundColor = .clear
         textView.textContainerInset = NSSize(width: 10, height: 10)
-        textView.string = transcriptString()
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         scroll.documentView = textView
         scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-        return scroll
+
+        func update() {
+            let text = transcriptString()
+            guard textView.string != text else { return }
+            let wasAtBottom = isScrolledToBottom(scroll)
+            textView.string = text
+            if wasAtBottom {
+                scrollToBottom(scroll)
+            }
+        }
+        update()
+        return (scroll, update)
+    }
+
+    private func isScrolledToBottom(_ scrollView: NSScrollView, tolerance: CGFloat = 24) -> Bool {
+        guard let documentView = scrollView.documentView else { return true }
+        let visibleMaxY = scrollView.contentView.bounds.maxY
+        return documentView.frame.height - visibleMaxY <= tolerance
+    }
+
+    private func scrollToBottom(_ scrollView: NSScrollView) {
+        guard let documentView = scrollView.documentView else { return }
+        documentView.scrollToVisible(NSRect(x: 0, y: max(0, documentView.frame.height - 1), width: 1, height: 1))
     }
 
     private func transcriptString() -> String {
@@ -1380,3 +1497,28 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         alert.runModal()
     }
 }
+
+#if DEBUG
+extension MainWindowController {
+    /// Test-only introspection of the build-once/update-in-place refactor:
+    /// the section view currently mounted in the detail pane, so a test can
+    /// assert its identity is stable (`===`) across status updates instead
+    /// of being torn down and recreated. Kept behind `DEBUG` so it never
+    /// ships as part of the app's runtime surface.
+    var debugMountedSectionView: NSView? { detailView.subviews.first }
+
+    /// Every `NSTextField.stringValue` currently under the detail pane, for
+    /// asserting that an update actually reached the label it targeted.
+    func debugLabelTexts() -> [String] {
+        var texts: [String] = []
+        func visit(_ view: NSView) {
+            if let field = view as? NSTextField {
+                texts.append(field.stringValue)
+            }
+            view.subviews.forEach(visit)
+        }
+        detailView.subviews.forEach(visit)
+        return texts
+    }
+}
+#endif
