@@ -1,5 +1,43 @@
 import AppKit
 import Carbon.HIToolbox
+import ServiceManagement
+
+/// Whether this *app* (as opposed to the local service) opens automatically
+/// at login, via `SMAppService.mainApp` — the macOS 13+ login-item registry,
+/// not a hand-installed LaunchAgent plist. Kept behind a protocol so the
+/// menu item's toggle can be tested without touching the real login-item
+/// registry.
+protocol LoginItemService {
+    var isRegistered: Bool { get }
+    func register() throws
+    func unregister() throws
+}
+
+/// Production implementation, backed by `SMAppService.mainApp`.
+struct AppLoginItemService: LoginItemService {
+    var isRegistered: Bool { SMAppService.mainApp.status == .enabled }
+    func register() throws { try SMAppService.mainApp.register() }
+    func unregister() throws { try SMAppService.mainApp.unregister() }
+}
+
+/// Toggles a `LoginItemService`: always the opposite of its current state,
+/// regardless of *why* it is currently off (never registered, or disabled by
+/// the user from System Settings' Login Items pane).
+enum LoginItemToggle {
+    @discardableResult
+    static func toggle(_ service: LoginItemService) -> Result<Void, Error> {
+        do {
+            if service.isRegistered {
+                try service.unregister()
+            } else {
+                try service.register()
+            }
+            return .success(())
+        } catch {
+            return .failure(error)
+        }
+    }
+}
 
 /// Chooses the section shown when macOS launches or re-opens the app.
 ///
@@ -64,15 +102,10 @@ final class AppController: NSObject, NSApplicationDelegate {
     private let meetingEntry = NSMenuItem()
     private let autoInsertEntry = NSMenuItem()
     private let previewEntry = NSMenuItem()
-    private let lastTextEntry = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private var warnedAboutAccessibility = false
     private let serviceEntry = NSMenuItem()
-    private let autoStartEntry = NSMenuItem()
-    private var serviceRunning = false
-    /// Last known answer from `ServiceControl.agentInstalled`, refreshed off
-    /// the main thread. `nil` means "not probed yet".
-    private var autoStartInstalled: Bool?
-    private var autoStartProbeInFlight = false
+    private let loginItemEntry = NSMenuItem()
+    private let loginItem: LoginItemService = AppLoginItemService()
     private var healthTimer: Timer?
     private var accessibilityHintTask: Task<Void, Never>?
 
@@ -176,23 +209,24 @@ final class AppController: NSObject, NSApplicationDelegate {
         capture.stop()
         client.cancel()
         dictationOverlay.hide()
-        stopManagedServiceIfRequested()
+        stopManagedService()
     }
 
-    /// Honours `stopServiceOnQuit`, and only ever for the exact `Process`
-    /// this app launched from the Settings page and still holds a handle to.
-    /// A LaunchAgent, a terminal-launched service, and even this app's own
-    /// menu-bar `啟動服務` (which keeps no handle) are all invisible here and
-    /// are therefore left running — nothing is ever matched by process name.
+    /// This app is the service's main runtime, so stopping it on quit is
+    /// unconditional — there is no setting to turn it off. That is only ever
+    /// safe for the exact `Process` this app launched from the Settings page
+    /// and still holds a handle to. A LaunchAgent, a terminal-launched
+    /// service, and even this app's own menu-bar `重新啟動服務` (which keeps
+    /// no handle) are all invisible here and are therefore left running —
+    /// nothing is ever matched by process name.
     ///
     /// Only reachable from `applicationWillTerminate`: a `SIGKILL`
     /// (Force Quit, `kill -9`) or a crash skips it entirely and leaves the
-    /// service up. That is stated in the setting's own help text rather than
-    /// papered over.
-    private func stopManagedServiceIfRequested() {
+    /// service up. That is stated in the Settings page's own help text
+    /// rather than papered over.
+    private func stopManagedService() {
         let managed = mainWindow?.managedServiceProcess
         let action = ServiceQuitPolicy.action(
-            stopOnQuit: settings.stopServiceOnQuit,
             hasManagedProcess: managed != nil,
             managedProcessIsRunning: managed?.isRunning == true
         )
@@ -256,9 +290,6 @@ final class AppController: NSObject, NSApplicationDelegate {
 
         statusEntry.isEnabled = false
         menu.addItem(statusEntry)
-        lastTextEntry.isEnabled = false
-        lastTextEntry.isHidden = true
-        menu.addItem(lastTextEntry)
         menu.addItem(.separator())
 
         toggleEntry.action = #selector(toggleDictation)
@@ -282,27 +313,30 @@ final class AppController: NSObject, NSApplicationDelegate {
         menu.addItem(previewEntry)
 
         menu.addItem(.separator())
-        serviceEntry.action = #selector(toggleService)
+        serviceEntry.action = #selector(restartService)
         serviceEntry.target = self
-        serviceEntry.title = "啟動服務"
+        serviceEntry.title = "重新啟動服務"
         menu.addItem(serviceEntry)
 
-        autoStartEntry.title = "登入時自動啟動服務"
-        autoStartEntry.action = #selector(toggleAutoStart)
-        autoStartEntry.target = self
-        menu.addItem(autoStartEntry)
+        // The app itself, not the service: `SMAppService.mainApp` is a
+        // macOS 13+ login item, unrelated to the service's own LaunchAgent
+        // (which the Settings page's "本機服務" group now controls — see
+        // `MainWindowController`'s `serviceLoginItem` checkbox). This app is
+        // the service's main runtime, so having *it* open at login is the
+        // thing that actually matters from the menu bar.
+        loginItemEntry.title = "登入時自動開啟程式"
+        loginItemEntry.action = #selector(toggleLoginItem)
+        loginItemEntry.target = self
+        menu.addItem(loginItemEntry)
 
         menu.addItem(.separator())
+        // 主畫面／設定合併成一個入口：這個視窗本身有側邊欄可以切到設定頁，
+        // 不需要選單列另開一個項目重複這件事。
         let mainWindowEntry = NSMenuItem(
             title: "主畫面…", action: #selector(showMainWindow), keyEquivalent: "0"
         )
         mainWindowEntry.target = self
         menu.addItem(mainWindowEntry)
-        let settingsEntry = NSMenuItem(
-            title: "設定…", action: #selector(showPreferences), keyEquivalent: ","
-        )
-        settingsEntry.target = self
-        menu.addItem(settingsEntry)
 
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "結束", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -350,20 +384,15 @@ final class AppController: NSObject, NSApplicationDelegate {
             toggleEntry.title += " · " + shortcutStatusText()
         }
         meetingEntry.title = mode == .meeting ? "停止會議記錄" : "開始會議記錄"
-        serviceEntry.title = serviceRunning ? "服務執行中" : "啟動服務"
-        serviceEntry.isEnabled = !serviceRunning
-        // Read a cached answer only. `ServiceControl.agentInstalled` spawns
-        // `tea-asr service status` and blocks on `waitUntilExit()`; doing that
-        // here ran a Python CLI synchronously on the main thread inside every
-        // render — including the one `appState.setMode(.dictation)` triggers
-        // on the dictation start path, right before the overlay would have
-        // been shown.
-        if executable() != nil {
-            autoStartEntry.state = (autoStartInstalled ?? false) ? .on : .off
-            autoStartEntry.isEnabled = true
-        } else {
-            autoStartEntry.isEnabled = false
-        }
+        // Mirrors the Settings page's own restart button exactly (same
+        // `canRestartManagedService`/`restartManagedService()`), so this
+        // item is never enabled for a service reachable elsewhere that this
+        // app never launched.
+        serviceEntry.isEnabled = mainWindow?.canRestartManagedService ?? false
+        // `SMAppService.mainApp.status` is a local system-service query, not
+        // a subprocess spawn, so reading it on every render (unlike the old
+        // `ServiceControl.agentInstalled` probe it replaces here) is cheap.
+        loginItemEntry.state = loginItem.isRegistered ? .on : .off
         autoInsertEntry.state = settings.autoInsert ? .on : .off
         previewEntry.state = settings.revisablePreview ? .on : .off
     }
@@ -401,88 +430,27 @@ final class AppController: NSObject, NSApplicationDelegate {
         serviceProbe.refresh(host: settings.host, port: settings.port, token: token) { [weak self] result in
             guard let self else { return }
             self.appState.updateService(result)
-            self.serviceRunning = self.appState.serviceReachable == true
             self.render()
         }
-        refreshAutoStartState()
     }
 
-    /// Re-probes the LaunchAgent state without blocking the main thread, and
-    /// re-renders only when the answer actually changed (so this can be
-    /// driven from the health timer without causing a render loop).
-    private func refreshAutoStartState() {
-        guard !autoStartProbeInFlight, let binary = executable() else { return }
-        autoStartProbeInFlight = true
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let installed = ServiceControl.agentInstalled(executable: binary)
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.autoStartProbeInFlight = false
-                guard self.autoStartInstalled != installed else { return }
-                self.autoStartInstalled = installed
-                self.render()
-            }
-        }
+    /// Delegates to the exact same restart implementation the Settings
+    /// page's own button uses (`MainWindowController.restartManagedService`)
+    /// so there is one place that ever stops or starts the service process,
+    /// not two copies of the same safety reasoning.
+    @objc private func restartService() {
+        mainWindow?.restartManagedService()
+        render()
     }
 
-    private func executableSearch() -> ServiceControl.ExecutableSearch {
-        ServiceControl.search(configured: settings.serviceExecutable)
-    }
-
-    private func executable() -> URL? {
-        executableSearch().executable
-    }
-
-    @objc private func toggleService() {
-        guard let binary = executable() else {
-            let searched = executableSearch().searchedPaths
-            alert(
-                "找不到服務執行檔",
-                ServiceControl.ControlError.executableNotFound(searched: searched).localizedDescription
-            )
-            return
-        }
-        if serviceRunning {
-            alert(
-                "請從啟動服務的終端機停止",
-                "服務是獨立的程序，可能由 LaunchAgent 或你自己的終端機啟動。"
-                    + "要停止請在終端機執行：pkill -f 'tea-asr serve'"
-            )
-            return
-        }
-        do {
-            try ServiceControl.start(executable: binary)
-            statusEntry.title = "服務啟動中，模型載入需要幾秒…"
-        } catch {
-            alert("無法啟動服務", error.localizedDescription)
-        }
-    }
-
-    @objc private func toggleAutoStart() {
-        guard let binary = executable() else {
-            let searched = executableSearch().searchedPaths
-            alert(
-                "找不到服務執行檔",
-                ServiceControl.ControlError.executableNotFound(searched: searched).localizedDescription
-            )
-            return
-        }
-        let installed = ServiceControl.agentInstalled(executable: binary)
-        do {
-            let output = try ServiceControl.run(
-                executable: binary, arguments: ["service", installed ? "uninstall" : "install"]
-            )
-            alert(installed ? "已取消登入時自動啟動" : "已設定登入時自動啟動", output)
-            autoStartInstalled = !installed
-        } catch {
+    /// Toggles whether this app itself opens at login. Never touches the
+    /// service's own LaunchAgent (see the Settings page's "本機服務" group)
+    /// and never needs the `tea-asr` executable to exist at all.
+    @objc private func toggleLoginItem() {
+        if case .failure(let error) = LoginItemToggle.toggle(loginItem) {
             alert("設定失敗", error.localizedDescription)
         }
         render()
-        refreshAutoStartState()
-    }
-
-    @objc private func showPreferences() {
-        mainWindow?.show(section: .settings)
     }
 
     @objc private func showMainWindow() {
@@ -786,13 +754,12 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Show the last final in the menu so the user can tell recognition from
-    /// insertion problems without any extra permission.
+    /// Records the last final so the main window's overview can show it (see
+    /// `AppState.lastText`/`MainWindowController`). No longer mirrored into
+    /// the menu bar itself — the status-bar menu stays a control surface,
+    /// not a second place to read transcript content.
     private func showLastText(_ text: String) {
         appState.updateLastText(text)
-        let trimmed = text.count > 48 ? String(text.prefix(48)) + "…" : text
-        lastTextEntry.title = "最近一句：\(trimmed)"
-        lastTextEntry.isHidden = trimmed.isEmpty
     }
 
     private func warnAboutAccessibilityOnce() {

@@ -250,11 +250,13 @@ enum ServiceControl {
 
 /// Whether quitting the app should also stop the service.
 ///
-/// The only process this can ever act on is one this app launched and still
-/// holds a live `ManagedProcess` handle for. A service started by a
-/// LaunchAgent, from a developer's terminal, or by the menu bar's own
-/// fire-and-forget `start(executable:)` (which keeps no handle) has no handle
-/// here, so it is left alone no matter what the setting says — this app never
+/// This app *is* the service's main runtime, so stopping it on quit is
+/// unconditional — there is no setting to opt out of. The safety boundary is
+/// what this can ever act on, not whether it fires: only a process this app
+/// launched and still holds a live `ManagedProcess` handle for. A service
+/// started by a LaunchAgent, from a developer's terminal, or by the menu
+/// bar's own fire-and-forget `start(executable:)` (which keeps no handle) has
+/// no handle here, so it is left alone unconditionally too — this app never
 /// looks for something that merely *resembles* `tea-asr serve`.
 enum ServiceQuitPolicy {
     enum Action: Equatable {
@@ -263,15 +265,13 @@ enum ServiceQuitPolicy {
     }
 
     /// - Parameters:
-    ///   - stopOnQuit: the user's `stopServiceOnQuit` setting.
     ///   - hasManagedProcess: this app holds a handle to a service process.
     ///   - managedProcessIsRunning: that process has not already exited.
     static func action(
-        stopOnQuit: Bool,
         hasManagedProcess: Bool,
         managedProcessIsRunning: Bool
     ) -> Action {
-        guard stopOnQuit, hasManagedProcess, managedProcessIsRunning else {
+        guard hasManagedProcess, managedProcessIsRunning else {
             return .leaveRunning
         }
         return .stopManagedProcess

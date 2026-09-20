@@ -176,6 +176,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private var managedService: ManagedProcess?
     private var modelPrepareProcess: ManagedProcess?
 
+    /// Cached answer from `ServiceControl.agentInstalled`, refreshed off the
+    /// main thread by `refreshServiceLoginItemState()`. `nil` means "not
+    /// probed yet" — the same tri-state `AppController`'s old menu-bar
+    /// auto-start item used, and for the same reason.
+    private var serviceLoginItemInstalled: Bool?
+    private var serviceLoginItemProbeInFlight = false
+
     // MARK: - 日誌頁狀態
     //
     // The level defaults to `.warning` (warning + error), not `.debug`: the
@@ -1018,34 +1025,46 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         // Start/stop control. The status line is the one place this app can
         // honestly say what it knows: whether *it* started the process that
         // is running, not merely whether something is answering on the port.
+        // The button's own semantics are "restart" rather than plain start:
+        // this app is the service's main runtime, so quitting it always
+        // stops whatever it launched (see `ServiceQuitPolicy`), and there is
+        // no separate opt-out setting for that any more — the one control
+        // this page keeps is the one that gets the service running again.
         let serviceControlStatus = stableLabel(font: .systemFont(ofSize: 12), maxLines: nil, color: .secondaryLabelColor)
-        let serviceControlButton = actionButton(title: "啟動服務", action: #selector(toggleManagedService(_:)))
+        let serviceControlButton = actionButton(title: "重新啟動服務", action: #selector(toggleManagedService(_:)))
         serviceControlButton.identifier = NSUserInterfaceItemIdentifier("serviceControlButton")
-        // Scoped on purpose: this only ever stops the process *this app*
-        // launched from the button above and still holds a handle to. A
-        // LaunchAgent or a terminal-launched service is never touched, which
-        // is why this can default to on without breaking a deliberately
-        // resident service (see `ServiceQuitPolicy`).
-        let stopServiceOnQuit = NSButton(
-            checkboxWithTitle: "結束 TEA ASR 時一併停止本 app 啟動的服務",
-            target: self,
-            action: #selector(saveSettings(_:))
-        )
-        stopServiceOnQuit.identifier = NSUserInterfaceItemIdentifier("stopServiceOnQuit")
-        stopServiceOnQuit.state = settings.stopServiceOnQuit ? .on : .off
-        let stopServiceOnQuitNote = stableLabel(
-            font: .systemFont(ofSize: 12),
-            maxLines: nil,
-            color: .secondaryLabelColor
-        )
-        stopServiceOnQuitNote.stringValue =
-            "只對這個 app 啟動的服務行程有效。由 LaunchAgent 或你自己在終端機啟動的服務不會被動到。"
+        // TEA ASR is the service's main runtime: there is no setting to opt
+        // out of stopping it on quit any more (see `ServiceQuitPolicy`), so
+        // this note explains the unconditional behaviour and its one honest
+        // limit, rather than a checkbox that used to control it.
+        let quitBehaviorNote = stableLabel(font: .systemFont(ofSize: 12), maxLines: nil, color: .secondaryLabelColor)
+        quitBehaviorNote.stringValue =
+            "結束 TEA ASR 時，一定會一併停止本 app 啟動的服務。"
+            + "只對這個 app 啟動的服務行程有效——由 LaunchAgent 或你自己在終端機啟動的服務不會被動到。"
             + "強制結束（Force Quit）或當機時也無法停止服務。"
         let serviceControlGrid = settingsGrid([
             [settingsLabel("執行狀態"), serviceControlStatus],
             [NSGridCell.emptyContentView, buttonRow([serviceControlButton])],
-            [NSGridCell.emptyContentView, stopServiceOnQuit],
-            [NSGridCell.emptyContentView, stopServiceOnQuitNote],
+            [NSGridCell.emptyContentView, quitBehaviorNote],
+        ])
+
+        // Login-time autostart for the *service* (a LaunchAgent installed by
+        // `tea-asr service install`) — distinct from the app's own "登入時
+        // 自動開啟程式" in the menu bar, which uses `SMAppService.mainApp` to
+        // open this app itself at login. This checkbox acts immediately, the
+        // same way `serviceControlButton` does, rather than waiting for
+        // "儲存設定": it is a direct reflection of `launchctl` state, not a
+        // persisted preference.
+        let serviceLoginItem = NSButton(
+            checkboxWithTitle: "登入時自動啟動服務（LaunchAgent）",
+            target: self,
+            action: #selector(toggleServiceLoginItem(_:))
+        )
+        serviceLoginItem.identifier = NSUserInterfaceItemIdentifier("serviceLoginItem")
+        let serviceLoginItemStatus = stableLabel(font: .systemFont(ofSize: 12), maxLines: nil, color: .secondaryLabelColor)
+        let serviceLoginItemGrid = settingsGrid([
+            [settingsLabel("登入時啟動"), serviceLoginItem],
+            [NSGridCell.emptyContentView, serviceLoginItemStatus],
         ])
 
         // Model info + the one model action this build actually has: asking
@@ -1130,7 +1149,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         let view = sectionStack(views: [
             group(title: "服務連線", views: [grid]),
-            group(title: "本機服務", views: [executableGrid, serviceControlGrid, modelGrid]),
+            group(title: "本機服務", views: [executableGrid, serviceControlGrid, serviceLoginItemGrid, modelGrid]),
             group(title: "音訊輸入", views: [audioGrid]),
             group(title: "輸入行為", views: [shortcutHint, behaviourGrid]),
             buttonGrid,
@@ -1157,6 +1176,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             if serviceControlStatus.stringValue != presentation.statusText {
                 serviceControlStatus.stringValue = presentation.statusText
             }
+
+            let loginItemExecutableFound = ServiceControl.search(configured: settings.serviceExecutable).executable != nil
+            serviceLoginItem.isEnabled = loginItemExecutableFound
+            serviceLoginItem.state = (serviceLoginItemInstalled ?? false) ? .on : .off
+            let loginItemText = serviceLoginItemStatusText(
+                executableFound: loginItemExecutableFound,
+                installed: serviceLoginItemInstalled
+            )
+            if serviceLoginItemStatus.stringValue != loginItemText { serviceLoginItemStatus.stringValue = loginItemText }
+            // Never a synchronous `agentInstalled` call from here: `update()`
+            // runs after every unrelated action on this page (restart,
+            // model-prepare, save…), not only when the page is first shown,
+            // so probing off the main thread is what keeps those actions
+            // from paying for a `tea-asr service status` spawn every time.
+            refreshServiceLoginItemState()
 
             let modelText = modelInfoText()
             if modelValue.stringValue != modelText { modelValue.stringValue = modelText }
@@ -1219,16 +1253,48 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             + "請在上方指定路徑（通常是專案的 .venv/bin/tea-asr），或先安裝到 PATH 上。"
     }
 
-    /// The Settings page's own start/stop control. Stopping only ever calls
-    /// `terminate()` on `managedService` — the exact `Process` this method
-    /// itself launched — never anything found by matching a name or a port,
-    /// which is what keeps it safe to offer at all (see `ManagedProcess`).
+    /// The Settings page's own start/stop control, wired to
+    /// `restartManagedService()` below.
     @objc private func toggleManagedService(_ sender: Any?) {
+        restartManagedService()
+    }
+
+    /// Whether `restartManagedService()` would actually do something right
+    /// now. Mirrors the Settings page button's own enabled state so the menu
+    /// bar's "重新啟動服務" item can stay in lockstep with it without
+    /// duplicating the reachable-elsewhere / executable-missing reasoning.
+    var canRestartManagedService: Bool {
+        ServiceRuntimeControl.presentation(for: serviceRuntimeState()).buttonEnabled
+    }
+
+    /// Restarts the local service this window controls: if a process it
+    /// holds a handle to is currently running, that exact `Process` is
+    /// stopped first (bounded wait for the port to actually free up) and a
+    /// fresh one is launched; if nothing this window holds is running, a
+    /// fresh one is simply started. Never touches a process this window has
+    /// no handle for — a service reachable elsewhere is left alone, exactly
+    /// as the disabled button on the Settings page already implies (see
+    /// `ManagedProcess`, `ServiceRuntimeControl`).
+    func restartManagedService() {
+        switch serviceRuntimeState() {
+        case .reachableElsewhere:
+            presentAlert(
+                "無法重新啟動服務",
+                ServiceRuntimeControl.presentation(for: .reachableElsewhere).statusText
+            )
+            return
+        case .managedRunning, .stopped:
+            break
+        }
         if let managed = managedService, managed.isRunning {
             managed.terminate()
-            updateSection(.settings)
-            updateSection(.logs)
-            return
+            // Bounded wait so a restart does not race the old process for
+            // the port; never an unbounded block on a child that refuses to
+            // exit (same reasoning as `AppController.stopManagedService`).
+            let deadline = Date().addingTimeInterval(2.0)
+            while managed.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.02)
+            }
         }
         let search = ServiceControl.search(configured: settings.serviceExecutable)
         guard let binary = search.executable else {
@@ -1236,6 +1302,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                 "找不到服務執行檔",
                 ServiceControl.ControlError.executableNotFound(searched: search.searchedPaths).localizedDescription
             )
+            updateSection(.settings)
+            updateSection(.logs)
             return
         }
         do {
@@ -1256,9 +1324,79 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     /// The service process this window launched, if any, so the app's quit
-    /// path can honour `stopServiceOnQuit` without ever discovering a process
+    /// path can stop it unconditionally without ever discovering a process
     /// by name. `nil` means this app launched nothing it can stop.
     var managedServiceProcess: ManagedProcess? { managedService }
+
+    /// Re-probes the service's LaunchAgent state off the main thread, and
+    /// re-renders only when the answer actually changed — the exact same
+    /// shape as `AppController`'s old auto-start probe, kept for the same
+    /// reason: `update()` above runs after every unrelated action on this
+    /// page, so a synchronous `tea-asr service status` spawn there would
+    /// make every one of those actions pay for a subprocess round trip.
+    private func refreshServiceLoginItemState() {
+        guard !serviceLoginItemProbeInFlight,
+              let binary = ServiceControl.search(configured: settings.serviceExecutable).executable
+        else { return }
+        serviceLoginItemProbeInFlight = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let installed = ServiceControl.agentInstalled(executable: binary)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.serviceLoginItemProbeInFlight = false
+                guard self.serviceLoginItemInstalled != installed else { return }
+                self.serviceLoginItemInstalled = installed
+                self.updateSection(.settings)
+            }
+        }
+    }
+
+    private func serviceLoginItemStatusText(executableFound: Bool, installed: Bool?) -> String {
+        guard executableFound else {
+            return "找不到執行檔，請先在上方指定路徑。"
+        }
+        guard let installed else {
+            return "確認中…"
+        }
+        return installed
+            ? "已設定：登入時透過 LaunchAgent 啟動服務。"
+            : "尚未設定。"
+    }
+
+    /// Installs/uninstalls the service's LaunchAgent immediately, the same
+    /// way `restartManagedService()` acts immediately rather than waiting
+    /// for "儲存設定" — this checkbox is a direct reflection of `launchctl`
+    /// state, not a persisted preference. Reading the current state and
+    /// acting on it both happen synchronously here, deliberately: this is a
+    /// single explicit user action, not the passive per-`update()` probe
+    /// above, so paying for one subprocess round trip at click time is the
+    /// same trade the old menu-bar `toggleAutoStart` made. The result is
+    /// also applied optimistically to `serviceLoginItemInstalled` so the
+    /// checkbox does not have to wait for the next background probe to
+    /// catch up. On failure the checkbox is reset to the state that is
+    /// still actually true on disk.
+    @objc private func toggleServiceLoginItem(_ sender: NSButton) {
+        guard let binary = ServiceControl.search(configured: settings.serviceExecutable).executable else {
+            sender.state = .off
+            presentAlert(
+                "找不到服務執行檔",
+                ServiceControl.ControlError.executableNotFound(
+                    searched: ServiceControl.search(configured: settings.serviceExecutable).searchedPaths
+                ).localizedDescription
+            )
+            return
+        }
+        let installed = ServiceControl.agentInstalled(executable: binary)
+        do {
+            try ServiceControl.run(executable: binary, arguments: ["service", installed ? "uninstall" : "install"])
+        } catch {
+            sender.state = installed ? .on : .off
+            presentAlert("設定失敗", error.localizedDescription)
+            return
+        }
+        serviceLoginItemInstalled = !installed
+        updateSection(.settings)
+    }
 
     /// Triggers the one model action that already exists server-side:
     /// `tea-asr model-prepare`. This is not a model *switch* — the CLI takes
@@ -1922,9 +2060,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if let spokenSymbols = controls.spokenSymbols {
             settings.spokenSymbols = spokenSymbols.state == .on
         }
-        if let stopServiceOnQuit = controls.stopServiceOnQuit {
-            settings.stopServiceOnQuit = stopServiceOnQuit.state == .on
-        }
         return true
     }
 
@@ -1992,8 +2127,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         inputChannel: NSPopUpButton?, shortcut: ShortcutButton?,
         interactionMode: NSPopUpButton?, feedback: NSButton?,
         serviceExecutable: NSTextField?, stripTrailingPunctuation: NSButton?,
-        spokenSymbols: NSButton?,
-        stopServiceOnQuit: NSButton?
+        spokenSymbols: NSButton?
     ) {
         var fields: [String: NSControl] = [:]
         func visit(_ view: NSView) {
@@ -2021,8 +2155,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             // distinct identifier is what actually keeps them apart.
             fields["serviceExecutable"] as? NSTextField,
             fields["stripTrailingPunctuation"] as? NSButton,
-            fields["spokenSymbols"] as? NSButton,
-            fields["stopServiceOnQuit"] as? NSButton
+            fields["spokenSymbols"] as? NSButton
         )
     }
 
@@ -2577,6 +2710,16 @@ extension MainWindowController {
     var debugModelPrepareProcess: ManagedProcess? {
         get { modelPrepareProcess }
         set { modelPrepareProcess = newValue }
+    }
+
+    /// Lets a test seed the service login-item's cached probe result
+    /// directly, the same way `debugManagedService` seeds a fake process
+    /// handle — the real probe runs off the main thread (see
+    /// `refreshServiceLoginItemState()`), so a synchronous test would
+    /// otherwise race it.
+    var debugServiceLoginItemInstalled: Bool? {
+        get { serviceLoginItemInstalled }
+        set { serviceLoginItemInstalled = newValue }
     }
 }
 #endif

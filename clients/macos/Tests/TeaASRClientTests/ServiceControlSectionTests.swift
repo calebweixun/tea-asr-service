@@ -30,7 +30,7 @@ final class ServiceControlSectionTests: XCTestCase {
     // MARK: - Settings page: button state reflects the real process state
 
     @MainActor
-    func testButtonShowsStartAndIsEnabledWhenNothingIsRunningAndTheExecutableIsFound() throws {
+    func testButtonShowsRestartAndIsEnabledWhenNothingIsRunningAndTheExecutableIsFound() throws {
         let executable = try makeExecutableScript(body: "#!/bin/sh\nexit 0\n")
         let controller = makeController(serviceExecutable: executable.path)
         controller.show(section: .settings)
@@ -42,7 +42,7 @@ final class ServiceControlSectionTests: XCTestCase {
             XCTFail("找不到服務控制按鈕")
             return
         }
-        XCTAssertEqual(button.title, "啟動服務")
+        XCTAssertEqual(button.title, "重新啟動服務")
         XCTAssertTrue(button.isEnabled)
     }
 
@@ -66,7 +66,7 @@ final class ServiceControlSectionTests: XCTestCase {
     }
 
     @MainActor
-    func testButtonShowsStopWhenThisControllerHasALiveManagedProcess() throws {
+    func testButtonShowsRestartWhenThisControllerHasALiveManagedProcess() throws {
         let script = try makeExecutableScript(body: "#!/bin/sh\nsleep 5\n")
         let controller = makeController(serviceExecutable: script.path)
         let process = Process()
@@ -84,7 +84,7 @@ final class ServiceControlSectionTests: XCTestCase {
             XCTFail("找不到服務控制按鈕")
             return
         }
-        XCTAssertEqual(button.title, "停止服務")
+        XCTAssertEqual(button.title, "重新啟動服務")
         XCTAssertTrue(button.isEnabled)
     }
 
@@ -111,10 +111,42 @@ final class ServiceControlSectionTests: XCTestCase {
         )
     }
 
+    /// `canRestartManagedService` is what the menu bar's "重新啟動服務" item
+    /// reads to decide its own enabled state, so it must agree with the
+    /// Settings page button above about the one case that would otherwise
+    /// try to restart a process this app never launched. `restartManagedService()`
+    /// itself is not invoked here: on this branch it shows a blocking
+    /// `NSAlert`, so — like every other disabled-button case in this file —
+    /// only the state that keeps the button (and now the menu item) disabled
+    /// is asserted.
+    @MainActor
+    func testCanRestartMirrorsTheDisabledButtonWhenServiceIsReachableButNotManaged() throws {
+        let executable = try makeExecutableScript(body: "#!/bin/sh\nexit 0\n")
+        let appState = AppState()
+        appState.updateService(.success(Self.fakeSnapshot()))
+        let controller = makeController(serviceExecutable: executable.path, appState: appState)
+        controller.show(section: .settings)
+
+        XCTAssertFalse(controller.canRestartManagedService)
+    }
+
+    @MainActor
+    func testCanRestartIsTrueAsSoonAsThisControllerHasALiveManagedProcess() throws {
+        let script = try makeExecutableScript(body: "#!/bin/sh\nsleep 5\n")
+        let controller = makeController(serviceExecutable: script.path)
+        let process = Process()
+        process.executableURL = script
+        try process.run()
+        defer { process.terminate() }
+        controller.debugManagedService = ManagedProcess(process: process, outputCapacity: 100)
+
+        XCTAssertTrue(controller.canRestartManagedService)
+    }
+
     // MARK: - Clicking the button actually starts/stops the exact process
 
     @MainActor
-    func testClickingStartLaunchesTheConfiguredExecutableAndTheButtonBecomesStop() throws {
+    func testClickingRestartLaunchesTheConfiguredExecutableWhenNothingWasRunning() throws {
         let script = try makeExecutableScript(body: "#!/bin/sh\nsleep 5\n")
         let controller = makeController(serviceExecutable: script.path)
         controller.show(section: .settings)
@@ -132,11 +164,11 @@ final class ServiceControlSectionTests: XCTestCase {
 
         XCTAssertNotNil(controller.debugManagedService)
         XCTAssertTrue(controller.debugManagedService?.isRunning ?? false)
-        XCTAssertEqual(button.title, "停止服務")
+        XCTAssertEqual(button.title, "重新啟動服務")
     }
 
     @MainActor
-    func testClickingStopTerminatesOnlyTheProcessThisControllerLaunched() throws {
+    func testClickingRestartTerminatesTheOldProcessAndLaunchesAFreshOne() throws {
         let script = try makeExecutableScript(body: "#!/bin/sh\nsleep 5\n")
         let controller = makeController(serviceExecutable: script.path)
         let process = Process()
@@ -145,6 +177,7 @@ final class ServiceControlSectionTests: XCTestCase {
         let managed = ManagedProcess(process: process, outputCapacity: 100)
         controller.debugManagedService = managed
         controller.show(section: .settings)
+        defer { controller.debugManagedService?.terminate() }
 
         guard
             let mounted = controller.debugMountedSectionView,
@@ -154,11 +187,135 @@ final class ServiceControlSectionTests: XCTestCase {
             XCTFail("找不到服務控制按鈕")
             return
         }
-        XCTAssertEqual(button.title, "停止服務")
+        XCTAssertEqual(button.title, "重新啟動服務")
         _ = target.perform(action, with: button)
 
         process.waitUntilExit()
-        XCTAssertFalse(managed.isRunning, "stop must terminate the exact tracked process")
+        XCTAssertFalse(managed.isRunning, "restart must terminate the exact old tracked process")
+        XCTAssertTrue(
+            controller.debugManagedService?.isRunning ?? false,
+            "restart must end with a freshly launched process running"
+        )
+        XCTAssertFalse(
+            controller.debugManagedService === managed,
+            "the fresh process must be a new handle, not the terminated one"
+        )
+    }
+
+    // MARK: - Service login item (LaunchAgent), moved here from the menu bar
+
+    /// The real probe (`refreshServiceLoginItemState()`) runs off the main
+    /// thread precisely so `update()` never spawns `tea-asr service status`
+    /// synchronously (see that method's own doc comment) — so this test
+    /// seeds the cached result directly via `debugServiceLoginItemInstalled`
+    /// rather than racing the background probe.
+    @MainActor
+    func testServiceLoginItemCheckboxIsOffWhenNoAgentIsInstalled() throws {
+        let executable = try makeExecutableScript(body: "#!/bin/sh\nexit 0\n")
+        let controller = makeController(serviceExecutable: executable.path)
+        controller.debugServiceLoginItemInstalled = false
+        controller.show(section: .settings)
+
+        guard
+            let mounted = controller.debugMountedSectionView,
+            let checkbox: NSButton = findView(identifier: "serviceLoginItem", in: mounted)
+        else {
+            XCTFail("找不到登入時自動啟動服務的勾選框")
+            return
+        }
+        XCTAssertEqual(checkbox.state, .off)
+        XCTAssertTrue(checkbox.isEnabled)
+        XCTAssertTrue(controller.debugLabelTexts().contains(where: { $0.contains("尚未設定") }))
+    }
+
+    @MainActor
+    func testServiceLoginItemCheckboxIsOnWhenAgentIsAlreadyInstalled() throws {
+        let executable = try makeExecutableScript(body: "#!/bin/sh\nexit 0\n")
+        let controller = makeController(serviceExecutable: executable.path)
+        controller.debugServiceLoginItemInstalled = true
+        controller.show(section: .settings)
+
+        guard
+            let mounted = controller.debugMountedSectionView,
+            let checkbox: NSButton = findView(identifier: "serviceLoginItem", in: mounted)
+        else {
+            XCTFail("找不到登入時自動啟動服務的勾選框")
+            return
+        }
+        XCTAssertEqual(checkbox.state, .on)
+        XCTAssertTrue(controller.debugLabelTexts().contains(where: { $0.contains("已設定") }))
+    }
+
+    @MainActor
+    func testServiceLoginItemCheckboxIsDisabledWhenTheExecutableCannotBeFound() {
+        let controller = makeController(serviceExecutable: "/definitely/not/a/real/path/tea-asr")
+        controller.show(section: .settings)
+
+        guard
+            let mounted = controller.debugMountedSectionView,
+            let checkbox: NSButton = findView(identifier: "serviceLoginItem", in: mounted)
+        else {
+            XCTFail("找不到登入時自動啟動服務的勾選框")
+            return
+        }
+        XCTAssertFalse(checkbox.isEnabled)
+        XCTAssertTrue(controller.debugLabelTexts().contains(where: { $0.contains("找不到執行檔") }))
+    }
+
+    @MainActor
+    func testClickingServiceLoginItemInstallsThenUninstallsTheLaunchAgent() throws {
+        let executable = try makeServiceAgentScript()
+        let controller = makeController(serviceExecutable: executable.path)
+        controller.show(section: .settings)
+
+        guard
+            let mounted = controller.debugMountedSectionView,
+            let checkbox: NSButton = findView(identifier: "serviceLoginItem", in: mounted),
+            let target = checkbox.target, let action = checkbox.action
+        else {
+            XCTFail("找不到登入時自動啟動服務的勾選框")
+            return
+        }
+
+        _ = target.perform(action, with: checkbox)
+        XCTAssertEqual(checkbox.state, .on, "clicking while uninstalled must install the LaunchAgent")
+        XCTAssertTrue(controller.debugLabelTexts().contains(where: { $0.contains("已設定") }))
+
+        _ = target.perform(action, with: checkbox)
+        XCTAssertEqual(checkbox.state, .off, "clicking again while installed must uninstall it")
+        XCTAssertTrue(controller.debugLabelTexts().contains(where: { $0.contains("尚未設定") }))
+    }
+
+    /// A fake `tea-asr` whose `service status/install/uninstall` behave like
+    /// the real CLI (`agent_installed` in the JSON status, a flag file
+    /// standing in for the real LaunchAgent plist) without touching
+    /// `launchctl` or any real login-item state.
+    private func makeServiceAgentScript() throws -> URL {
+        let flag = tempDirectory.appendingPathComponent("agent-installed").path
+        let script = """
+        #!/bin/sh
+        case "$1 $2" in
+          "service status")
+            if [ -f "\(flag)" ]; then
+              echo '{"agent_installed": true}'
+            else
+              echo '{"agent_installed": false}'
+            fi
+            ;;
+          "service install")
+            touch "\(flag)"
+            echo installed
+            ;;
+          "service uninstall")
+            rm -f "\(flag)"
+            echo uninstalled
+            ;;
+          *)
+            exit 1
+            ;;
+        esac
+        """
+        return try makeExecutableScript(body: script)
     }
 
     // MARK: - Model info row

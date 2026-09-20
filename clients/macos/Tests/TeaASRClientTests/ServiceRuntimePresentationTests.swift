@@ -6,24 +6,24 @@ import XCTest
 /// (`ServiceOutputPresentation`). Neither type touches `Process` or AppKit,
 /// so every state combination is asserted directly here.
 final class ServiceRuntimeControlTests: XCTestCase {
-    func testManagedRunningShowsStopAndIsAlwaysEnabled() {
+    func testManagedRunningShowsRestartAndIsAlwaysEnabled() {
         let presentation = ServiceRuntimeControl.presentation(for: .managedRunning)
-        XCTAssertEqual(presentation.buttonTitle, "停止服務")
+        XCTAssertEqual(presentation.buttonTitle, "重新啟動服務")
         XCTAssertTrue(presentation.buttonEnabled)
     }
 
     func testReachableElsewhereDisablesTheButtonAndExplainsWhy() {
         let presentation = ServiceRuntimeControl.presentation(for: .reachableElsewhere)
-        XCTAssertEqual(presentation.buttonTitle, "啟動服務")
+        XCTAssertEqual(presentation.buttonTitle, "重新啟動服務")
         XCTAssertFalse(presentation.buttonEnabled, "must never offer to start a duplicate or stop an untracked process")
         XCTAssertTrue(presentation.statusText.contains("不是由這個頁面啟動"))
     }
 
-    func testStoppedWithExecutableFoundShowsStartEnabled() {
+    func testStoppedWithExecutableFoundShowsRestartEnabled() {
         let presentation = ServiceRuntimeControl.presentation(
             for: .stopped(executableFound: true, exitStatus: nil)
         )
-        XCTAssertEqual(presentation.buttonTitle, "啟動服務")
+        XCTAssertEqual(presentation.buttonTitle, "重新啟動服務")
         XCTAssertTrue(presentation.buttonEnabled)
         XCTAssertEqual(presentation.statusText, "已停止。")
     }
