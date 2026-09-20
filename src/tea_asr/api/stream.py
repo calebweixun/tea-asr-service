@@ -6,6 +6,7 @@ import json
 import logging
 import struct
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -16,6 +17,7 @@ from tea_asr.api.events import EventWriter
 from tea_asr.config import ServiceConfig
 from tea_asr.errors import ApiError
 from tea_asr.logs import event as log_event
+from tea_asr.rate_limit import AuthRateLimiter
 from tea_asr.segmenter import ContinuousSegmenter, SegmentClosed, SegmenterConfig, SpeechStarted
 from tea_asr.vad import SileroVad
 from tea_asr.wire import (
@@ -968,11 +970,18 @@ def _first_error(exc: ValidationError) -> str:
     return f"{location}: {first['msg']}"
 
 
+_BEARER_PREFIX = "Bearer "
+
+
 async def run_stream(
     websocket: WebSocket,
     scheduler: StreamScheduler,
     *,
-    auth_token: str,
+    auth_token: str | None = None,
+    token_matches: Callable[[str], bool] | None = None,
+    origin_allowed: Callable[[str], bool] | None = None,
+    rate_limiter: AuthRateLimiter | None = None,
+    insecure_lan: bool = False,
     config: ServiceConfig,
     model_state: str,
     vad: SileroVad | None = None,
@@ -980,11 +989,48 @@ async def run_stream(
     continuous_admission: ContinuousSessionAdmission | None = None,
     connection_admission: ContinuousSessionAdmission | None = None,
 ) -> None:
-    if websocket.headers.get("authorization") != f"Bearer {auth_token}":
+    """Authenticate and admit one `/v1/stream` connection.
+
+    Either `auth_token` (a fixed string, exact `Bearer <token>` match — the
+    legacy shape, still used directly by a couple of low-level tests) or
+    `token_matches` (a predicate, W9's `TokenAuthenticator`-backed check) must
+    be given; `tea_asr.api.app.create_app` always passes `token_matches`.
+    `origin_allowed` defaults to the historic loopback-only exact match
+    (`ALLOWED_WS_ORIGINS`) when omitted, so callers that do not opt into LAN
+    mode see unchanged behaviour.
+    """
+
+    def _token_matches(presented: str) -> bool:
+        if token_matches is not None:
+            return token_matches(presented)
+        return auth_token is not None and presented == auth_token
+
+    def _origin_allowed(origin: str) -> bool:
+        if origin_allowed is not None:
+            return origin_allowed(origin)
+        return origin in ALLOWED_WS_ORIGINS
+
+    client_key = websocket.client.host if websocket.client is not None else "unknown"
+    if rate_limiter is not None and rate_limiter.is_blocked(client_key):
+        await websocket.close(code=1013, reason="rate_limited")
+        return
+
+    authorization = websocket.headers.get("authorization")
+    presented = (
+        authorization[len(_BEARER_PREFIX) :]
+        if authorization is not None and authorization.startswith(_BEARER_PREFIX)
+        else None
+    )
+    if presented is None or not _token_matches(presented):
+        if rate_limiter is not None:
+            rate_limiter.record_failure(client_key)
         await websocket.close(code=1008, reason="unauthenticated")
         return
+    if rate_limiter is not None:
+        rate_limiter.record_success(client_key)
+
     origin = websocket.headers.get("origin")
-    if origin and origin not in ALLOWED_WS_ORIGINS:
+    if origin and not _origin_allowed(origin):
         await websocket.close(code=1008, reason="forbidden_origin")
         return
 
@@ -999,7 +1045,21 @@ async def run_stream(
         await websocket.close(code=close_error.ws_close_code or 1013, reason="session_limit")
         return
 
-    await websocket.accept()
+    accept_headers = (
+        [
+            (b"x-tea-asr-security", b"unencrypted-lan-mode"),
+            (
+                b"x-tea-asr-security-notice",
+                (
+                    b"unencrypted; bearer token sent in cleartext; "
+                    b"LAN/Tailscale use only, do not expose publicly"
+                ),
+            ),
+        ]
+        if insecure_lan
+        else None
+    )
+    await websocket.accept(headers=accept_headers)
     session = StreamSession(
         websocket,
         scheduler,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ipaddress
+from collections.abc import Callable
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -20,6 +23,94 @@ INITIAL_FLOW_WINDOW_SAMPLES = 80_000
 #: different case, handled at each call site.
 ALLOWED_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 ALLOWED_WS_ORIGINS = frozenset(f"http://{host}" for host in ALLOWED_LOCAL_HOSTS)
+
+#: W9: address space trusted enough to accept as a Host/Origin *only when the
+#: operator has explicitly opted into LAN mode* (`ServiceConfig.allow_lan`).
+#: RFC1918 private ranges plus Tailscale's CGNAT allocation (100.64.0.0/10)
+#: and its IPv6 ULA range, so "LAN or Tailscale" (docs/06-handoff.md's LAN
+#: row) is the actual boundary, not "any Host header a browser can be made to
+#: send" — a public IP or attacker-controlled DNS name must still be
+#: rejected in LAN mode, or the DNS-rebinding guard this allowlist exists for
+#: would be worthless the moment LAN mode is on.
+_TRUSTED_LAN_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "100.64.0.0/10",  # Tailscale/CGNAT
+        "fd00::/8",  # ULA, covers Tailscale's IPv6 range
+        "::1/128",
+    )
+)
+
+
+def is_trusted_lan_address(host: str) -> bool:
+    """True if `host` (no port, no brackets) parses as a private/Tailscale IP.
+
+    A hostname (e.g. a Tailscale MagicDNS name) never matches here; those are
+    only trusted when the operator lists them explicitly in
+    `ServiceConfig.extra_allowed_hosts`, since this service does no DNS
+    resolution or verification of its own to decide whether a *name* really
+    points somewhere trustworthy.
+    """
+
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(addr in network for network in _TRUSTED_LAN_NETWORKS)
+
+
+def make_host_allowlist(
+    *, allow_lan: bool, extra_hosts: frozenset[str] = frozenset()
+) -> Callable[[str], bool]:
+    """Build the HTTP `Host` predicate for `HostValidationMiddleware`.
+
+    Default (``allow_lan=False``) behaviour is byte-for-byte the historic
+    exact-match check against `ALLOWED_LOCAL_HOSTS`, so opting out of LAN
+    mode never changes what loopback-only deployments accept. Only when the
+    operator has opted in does the predicate additionally accept a trusted
+    LAN/Tailscale IP or one of their explicitly configured extra hostnames.
+    """
+
+    extra = frozenset(host.lower() for host in extra_hosts)
+
+    def is_allowed(host: str) -> bool:
+        if host in ALLOWED_LOCAL_HOSTS:
+            return True
+        if not allow_lan:
+            return False
+        return host.lower() in extra or is_trusted_lan_address(host)
+
+    return is_allowed
+
+
+def make_origin_allowlist(
+    *, allow_lan: bool, extra_hosts: frozenset[str] = frozenset()
+) -> Callable[[str], bool]:
+    """Build the WS `Origin` predicate for `run_stream`.
+
+    Same shape as `make_host_allowlist`: the default path is an exact match
+    against `ALLOWED_WS_ORIGINS` (unchanged from before W9), and LAN mode
+    only widens it by parsing the Origin's hostname and applying the same
+    trusted-LAN/extra-hosts check, restricted to plain `http://` — W9
+    deliberately ships without TLS (docs/06-handoff.md), so an `https://`
+    Origin claiming to be this service would be lying about the transport.
+    """
+
+    def is_allowed(origin: str) -> bool:
+        if origin in ALLOWED_WS_ORIGINS:
+            return True
+        if not allow_lan:
+            return False
+        parsed = urlsplit(origin)
+        if parsed.scheme != "http" or not parsed.hostname:
+            return False
+        return make_host_allowlist(allow_lan=True, extra_hosts=extra_hosts)(parsed.hostname)
+
+    return is_allowed
 
 TimestampQuality = Literal["segment"]
 Boundary = Literal["manual", "silence", "max_duration", "stop"]

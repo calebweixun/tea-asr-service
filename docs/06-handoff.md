@@ -144,7 +144,7 @@ server repo只放reference clients与protocol測試；正式Swift app／OBS plug
 | 翻譯 | 來源／目標語言、使用者是否接受雲端、獨立provider／保留原稿 |
 | Forced alignment | 後端相容性、額外模型memory與對齊品質 |
 | Diarization | 多人會議需求、額外模型與重疊發話處理，不以來源軌代替 |
-| LAN | 明確需求、TLS／授權／rate limit；不得只改bind至0.0.0.0 |
+| LAN | 明確需求、TLS／授權／rate limit；不得只改bind至0.0.0.0。**W9已實作，決策記錄：** 明確需求＝macOS client／OBS外掛／其他本機轉錄工具，皆使用者自有裝置；**刻意不做TLS**——使用者在被告知取捨後決定，加密與身分交給WireGuard／Tailscale隧道層，應用層不重複做憑證管理，這是明確取捨而非疏漏，連線與token因此仍是明文，僅限受信任LAN／Tailscale、不得暴露公開網路；授權＝token rotation／revocation（不做expiration／per-token scope，理由見docs/04-api.md）；rate limit＝每來源位址認證失敗次數視窗；bind＝`allow_lan`預設False，未明確opt-in時非本機host一律拒絕啟動，不是只改host；Host／Origin allowlist在LAN模式下限縮為私有網段＋Tailscale CGNAT＋明確列出的額外主機名，不是任意Host都收；細節見docs/04-api.md「W9｜LAN／Tailscale 模式」。 |
 | Swift／Rust後端 | P0/P2 profiling指出可量化收益與指定checkpoint品質一致性 |
 | 使用者免Python安裝 | clean-Mac package驗證、簽章公證、Metal資產、更新回滾 |
 

@@ -8,11 +8,12 @@ import time
 import urllib.error
 import urllib.request
 import wave
+from dataclasses import replace
 from pathlib import Path
 
 from huggingface_hub.errors import LocalEntryNotFoundError
 
-from .config import AppPaths, ServiceConfig
+from .config import AppPaths, ServiceConfig, revoke_token, rotate_token, validate_bind_or_raise
 from .logs import setup_logging
 from .model_manager import locate_prepared_model, prepare_model
 from .model_spec import TEA_ASR_1_1_MLX_4BIT
@@ -40,14 +41,31 @@ def _parser() -> argparse.ArgumentParser:
     serve = commands.add_parser("serve", help="啟動本機服務")
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", default=None, type=int)
+    serve.add_argument(
+        "--allow-lan",
+        action="store_true",
+        default=None,
+        help="明確開放非本機 Host 監聽（未加 TLS，僅限受信任的 LAN／Tailscale）",
+    )
 
     service = commands.add_parser("service", help="管理登入時自動啟動的 LaunchAgent")
     actions = service.add_subparsers(dest="action", required=True)
     install = actions.add_parser("install", help="建立並載入 LaunchAgent")
     install.add_argument("--host", default=None)
     install.add_argument("--port", default=None, type=int)
+    install.add_argument(
+        "--allow-lan",
+        action="store_true",
+        default=None,
+        help="明確開放非本機 Host 監聽（未加 TLS，僅限受信任的 LAN／Tailscale）",
+    )
     actions.add_parser("uninstall", help="卸載並移除 LaunchAgent")
     actions.add_parser("status", help="顯示 LaunchAgent 與執行中實例的狀態")
+
+    token = commands.add_parser("token", help="管理 bearer token")
+    token_actions = token.add_subparsers(dest="action", required=True)
+    token_actions.add_parser("rotate", help="產生新 token，立即讓舊 token 失效")
+    token_actions.add_parser("revoke", help="停用目前 token，直到下一次 rotate")
 
     status = commands.add_parser("status", help="查詢執行中服務的狀態")
     status.add_argument("--url", default=DEFAULT_BASE_URL)
@@ -199,6 +217,18 @@ def main() -> int:
         )
         print(json.dumps(body, ensure_ascii=False, indent=2))
         return 1 if "error" in body else 0
+    if args.command == "token":
+        paths = AppPaths.macos_default()
+        if args.action == "rotate":
+            rotate_token(paths)
+            print("已產生新 token；舊 token 立即失效，執行中的服務會在下一次請求套用。")
+            return 0
+        if args.action == "revoke":
+            revoke_token(paths)
+            print("已停用 token；所有請求都會被拒絕，直到執行 tea-asr token rotate。")
+            return 0
+        return 2
+
     if args.command == "service":
         paths = AppPaths.macos_default()
         settings = ServiceConfig.load(paths)
@@ -211,9 +241,21 @@ def main() -> int:
             return 0
         host = args.host or settings.host
         port = args.port or settings.port
+        allow_lan = settings.allow_lan or bool(args.allow_lan)
+        try:
+            validate_bind_or_raise(host, allow_lan=allow_lan)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         target = install_agent(paths, host=host, port=port)
         print(f"已安裝並載入：{target}")
         print("登入時會自動啟動；要移除請執行 tea-asr service uninstall。")
+        if allow_lan:
+            print(
+                "警告：此 LaunchAgent 會以 LAN 模式監聽（未加 TLS，token 明文傳輸），"
+                "僅應在受信任的 LAN／Tailscale 網路使用。",
+                file=sys.stderr,
+            )
         return 0
 
     if args.command == "serve":
@@ -225,6 +267,13 @@ def main() -> int:
         settings = ServiceConfig.load(paths)
         host = args.host or settings.host
         port = args.port or settings.port
+        if args.allow_lan:
+            settings = replace(settings, allow_lan=True)
+        try:
+            validate_bind_or_raise(host, allow_lan=settings.allow_lan)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         try:
             model_path = locate_prepared_model(TEA_ASR_1_1_MLX_4BIT)
         except (LocalEntryNotFoundError, OSError) as exc:
@@ -246,6 +295,16 @@ def main() -> int:
             return 3
         log_file = setup_logging(paths)
         print(f"log：{log_file}")
+        if settings.allow_lan:
+            # docs/06-handoff.md's LAN row: opting in is the user's explicit
+            # decision to trade TLS for tunnel-layer encryption (Tailscale/
+            # WireGuard); this is the loudest place to remind them of what
+            # that trade means every time the process actually starts.
+            print(
+                "警告：LAN 模式已啟用——連線未加密，token 以明文傳輸；"
+                "僅應在受信任的網路（LAN／Tailscale）使用，不得暴露於公開網路。",
+                file=sys.stderr,
+            )
         try:
             uvicorn.run(
                 create_app(model_path, config=settings),

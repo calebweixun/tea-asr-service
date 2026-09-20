@@ -22,6 +22,13 @@ ERROR_HTTP_STATUS: dict[str, int] = {
     "conflict": 409,
     "timeline_gap": 409,
     "internal_error": 500,
+    #: W9: too many failed auth attempts from one source in the tracking
+    #: window (`tea_asr.rate_limit.AuthRateLimiter`). Distinct from
+    #: `unauthenticated` so a client (and an operator reading logs) can tell
+    #: "your token is wrong" apart from "you are being throttled" — both
+    #: matter once the service can be reached from more than one process on
+    #: the same machine (LAN mode).
+    "rate_limited": 429,
 }
 
 #: Close codes for session-level failures. Anything not listed keeps the
@@ -47,6 +54,11 @@ ERROR_WS_CLOSE: dict[str, int] = {
     # registered; 4000-4999 is reserved for private/application use by
     # RFC 6455 §7.4.2) instead of joining that pile-up.
     "concurrent_session_limit": 4029,
+    #: Shares 1013 with `queue_full`/`session_limit`/`slow_client` for the
+    #: same reason those do (see the comment above): it is a connection-level
+    #: throttle, not a session-level failure, and the private-use range is
+    #: already the home for that category.
+    "rate_limited": 1013,
 }
 
 RETRYABLE_CODES = frozenset(
@@ -58,6 +70,7 @@ RETRYABLE_CODES = frozenset(
         "inference_failed",
         "inference_timeout",
         "timeline_gap",
+        "rate_limited",
     }
 )
 
