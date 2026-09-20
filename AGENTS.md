@@ -39,6 +39,40 @@ agy --model gemini-3.8-flash-high --mode accept-edits -p="<派工內容>"
 - 選誰：需要推理的（診斷 bug、架構取捨、需求有歧義）給 luna max；模式已知的機械修改（改名、套用既有慣例、批次調整）給 gemini flash。
 - 驗收一律由派工方自己重跑 build／test／截圖確認，不直接採信實作方的回報。
 
+### 派工一律在獨立 worktree + 分支上進行
+
+**檔案清單只是請求，worktree 才是隔離。** 2026-09-20 實際踩到兩次：一個 agent 改了派工單明文禁止的檔案並回報全數 PASS；另一個在上游還原檔案後又寫回去，等於跟上游搶同一份工作區，最後只能終止它。兩次都是因為所有 agent 共用 `main` 的工作區。
+
+標準流程：
+
+```bash
+# 1. 開 worktree 與分支
+git worktree add ../tea-asr-wt/<task> -b agent/<task>
+
+# 2. 派工，cwd 指向那個 worktree
+cd ../tea-asr-wt/<task> && codex exec -m gpt-5.6-luna -c model_reasoning_effort=max -s workspace-write - < task.md
+cd ../tea-asr-wt/<task> && agy --model gemini-3.8-flash-high --mode accept-edits -p="$(cat task.md)"
+
+# 3. 驗收：上游自己在該 worktree 重跑
+cd ../tea-asr-wt/<task> && swift build && swift test
+
+# 4. 合併與清理
+git -C . merge --no-ff agent/<task>
+git worktree remove ../tea-asr-wt/<task>
+git branch -d agent/<task>
+```
+
+Claude 自己的 subagent 用 Agent 工具的 `isolation: "worktree"` 即可，不必手動開。
+
+這樣換來的好處：agent 之間不可能互相覆蓋；衝突從「靜默競爭」變成「合併衝突」，看得見也審得了；每一路的 diff 天然乾淨，`git diff main...agent/<task>` 就是它的全部產出；出事直接砍分支，不必一個檔案一個檔案還原。
+
+要注意的代價與限制：
+
+- **`.build/` 每個 worktree 各一份**，第一次建置要重跑（Swift 約 25 秒），可接受。
+- **GUI 驗證仍然無法併行**。`./scripts/build-app.sh` 產出的 `TEA ASR.app` 與實際啟動的行程是全機唯一的，同時只有一路能做「build → 完全結束 → 重開 → 截圖」。所以需要看畫面的工作要排隊，不要同時派兩個。
+- **派工單的檔案清單還是要寫**，但用途變成「界定審查範圍與意圖」，不再是安全機制。agent 越界時看 diff 就知道，不會傷到別人。
+- **合併順序要自己排**。同時改 `MainWindowController.swift` 的兩路仍會在合併時衝突，只是衝突是可見且可審的。真的會重疊的工作，還是排隊比較省事。
+
 ### 各 agent 的實際能力與使用感受（2026-09-20 實戰記錄）
 
 | Agent | 實測感受 | 適合 | 不適合 |
@@ -66,7 +100,7 @@ codex 的沙箱會擋掉一整類操作，而且**失敗的樣子像是「這台
 
 ### 派工的教訓
 
-1. **檔案清單要列死**。併行時在派工單寫明「允許修改」與「嚴禁修改」，否則會互相覆蓋。即使列了 agent 仍可能越界——收工一定要 `git status` 逐檔核對。
+1. **先開 worktree，再談檔案清單**。清單界定意圖與審查範圍，隔離靠 worktree。收工仍要 `git diff main...agent/<task>` 逐檔核對。
 2. **越界產出不要因為「測試綠」就照單全收**，也不要無腦還原。逐檔審閱，合理就收下並在 commit message 寫清楚來歷。
 3. **把推測與實證分開要求**。驗收條件裡明確寫「查不出來就誠實說查不到，列出已排除的可能」，agent 就真的會照做；不寫，它會給一個聽起來合理的原因。
 4. **不要讓 agent 自己宣告視覺驗收**。派工單直接寫「這個環境無法驗證視覺結果，不准聲稱已驗收」，並要求它產出「需要使用者用眼睛確認」清單。
