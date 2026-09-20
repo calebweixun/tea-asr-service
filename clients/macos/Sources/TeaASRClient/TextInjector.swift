@@ -135,9 +135,17 @@ enum TextInjector {
         else { return nil }
         let focusedElement = focusedElementValue as! AXUIElement
 
-        let identifier = UInt64(
-            UInt(bitPattern: Unmanaged.passUnretained(focusedElement as AnyObject).toOpaque())
-        )
+        // AXUIElementCopyAttributeValue hands back a fresh CFTypeRef wrapper
+        // on every call, even when it refers to the exact same accessibility
+        // object the previous call returned. The wrapper's own pointer
+        // address is therefore useless for "is this still the same field?"
+        // and made the focus check fail on essentially every normal
+        // dictation, silently diverting every final to the clipboard.
+        // AXUIElement defines CFEqual/CFHash over the underlying remote
+        // accessibility object (pid + element token), not the wrapper, so
+        // CFHash is stable across repeated lookups of the same field and is
+        // what the equality check must be built on instead.
+        let identifier = UInt64(CFHash(focusedElement))
         return TextInsertionTarget(
             processIdentifier: processIdentifier,
             focusedElementIdentifier: identifier,
