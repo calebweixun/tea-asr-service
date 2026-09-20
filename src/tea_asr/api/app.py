@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Protocol
@@ -22,14 +23,14 @@ from tea_asr.api.stream import (
     private_use_warnings,
     run_stream,
 )
-from tea_asr.config import ServiceConfig, load_or_create_token
+from tea_asr.config import ServiceConfig, TokenAuthenticator
 from tea_asr.errors import ApiError
 from tea_asr.logs import event
 from tea_asr.model_spec import TEA_ASR_1_1_MLX_4BIT
+from tea_asr.rate_limit import AuthRateLimiter
 from tea_asr.scheduler import Scheduler
 from tea_asr.vad import VAD_SHA256, SileroVad, locate_vad
 from tea_asr.wire import (
-    ALLOWED_LOCAL_HOSTS,
     MAX_UTTERANCE_PCM_BYTES,
     Capabilities,
     CapabilityFeatures,
@@ -39,8 +40,21 @@ from tea_asr.wire import (
     Segment,
     StatusResponse,
     TranscriptionResponse,
+    make_host_allowlist,
+    make_origin_allowlist,
 )
 from tea_asr.worker.supervisor import WorkerSupervisor
+
+#: W9: the plain-text warning shown whenever `ServiceConfig.allow_lan` is on.
+#: Repeated in three places on purpose (startup log, HTTP response header,
+#: WS accept header) — see docs/06-handoff.md's LAN row and docs/04-api.md
+#: for why this service ships without TLS and what that means for the
+#: operator: encryption and peer identity are delegated to the LAN/Tailscale
+#: transport, not provided by this application.
+INSECURE_LAN_WARNING = (
+    "TEA ASR 目前以 LAN 模式監聽：連線未加密，token 以明文傳輸；"
+    "僅應在受信任的網路（LAN／Tailscale）使用，不得暴露於公開網路。"
+)
 
 
 class HostValidationMiddleware:
@@ -60,21 +74,61 @@ class HostValidationMiddleware:
     off-allowlist host either.
     """
 
-    def __init__(self, app: ASGIApp, allowed_hosts: frozenset[str]) -> None:
+    def __init__(self, app: ASGIApp, is_allowed: Callable[[str], bool]) -> None:
         self._app = app
-        self._allowed_hosts = allowed_hosts
+        self._is_allowed = is_allowed
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
         host = Headers(scope=scope).get("host", "").split(":")[0]
-        if host and host not in self._allowed_hosts:
+        if host and not self._is_allowed(host):
             error = ApiError("forbidden_origin", f"Host 不在允許清單：{host}")
             response = JSONResponse(status_code=error.http_status, content=error.envelope())
             await response(scope, receive, send)
             return
         await self._app(scope, receive, send)
+
+
+class InsecureLanWarningMiddleware:
+    """Stamp every HTTP response with the "this is unencrypted" warning.
+
+    Only active when `ServiceConfig.allow_lan` is on. Deliberately a plain
+    response header rather than a body field: `/v1/status` and every other
+    JSON route return a fixed Pydantic model whose schema is checked against
+    `docs/api/openapi.json` (`tests/integration/test_schema_export.py`), so
+    adding a body field would mean growing that generated contract for a
+    warning that has nothing to do with the wire protocol. A header is
+    visible with `curl -i` or any HTTP client without touching that schema.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        async def send_with_warning(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append((b"x-tea-asr-security", b"unencrypted-lan-mode"))
+                headers.append(
+                    (
+                        b"x-tea-asr-security-notice",
+                        (
+                            b"unencrypted; bearer token sent in cleartext; "
+                            b"LAN/Tailscale use only, do not expose publicly"
+                        ),
+                    )
+                )
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self._app(scope, receive, send_with_warning)
+
 
 #: Sentinel so a caller can say "no VAD" (tests) instead of "load the default".
 _AUTO_VAD: Any = object()
@@ -153,9 +207,30 @@ def create_app(
     supervisor: InferenceSupervisor | None = None,
     config: ServiceConfig | None = None,
     vad_model: Any = _AUTO_VAD,
+    token_authenticator: TokenAuthenticator | None = None,
+    rate_limiter: AuthRateLimiter | None = None,
 ) -> FastAPI:
-    auth_token = token or load_or_create_token()
+    # A fixed `token` string (tests, `export-schemas`) is checked with a
+    # constant-time comparison and never touches the filesystem. Otherwise a
+    # `TokenAuthenticator` follows the token file, so `tea-asr token
+    # rotate`/`revoke` (see `tea_asr.config`) take effect on this already
+    # running process without a restart.
+    if token is not None:
+        _fixed_token = token
+
+        def token_matches(presented: str) -> bool:
+            return secrets.compare_digest(presented, _fixed_token)
+    else:
+        authenticator = token_authenticator or TokenAuthenticator()
+        token_matches = authenticator.matches
+    limiter = rate_limiter or AuthRateLimiter()
     settings = config or ServiceConfig.from_env()
+    host_allowed = make_host_allowlist(
+        allow_lan=settings.allow_lan, extra_hosts=frozenset(settings.extra_allowed_hosts)
+    )
+    origin_allowed = make_origin_allowlist(
+        allow_lan=settings.allow_lan, extra_hosts=frozenset(settings.extra_allowed_hosts)
+    )
     worker = supervisor or WorkerSupervisor(model_path)
     scheduler = Scheduler(worker)
     vad = _load_vad() if vad_model is _AUTO_VAD else vad_model
@@ -241,6 +316,17 @@ def create_app(
             pass
         watcher = asyncio.create_task(idle_watcher())
         sleep_watcher = asyncio.create_task(detect_sleep(after_wake))
+        if settings.allow_lan:
+            # Loud on purpose: this is the one moment guaranteed to reach
+            # whoever's tailing the log before anything else happens, and the
+            # decision to skip TLS (docs/06-handoff.md) only stays informed
+            # consent if the operator is told every time it takes effect.
+            event(
+                logger,
+                "service.insecure_lan_bind",
+                warning=INSECURE_LAN_WARNING,
+                extra_allowed_hosts=list(settings.extra_allowed_hosts),
+            )
         event(logger, "service.started", model_state=worker.state, continuous=vad is not None)
         yield
         sleep_watcher.cancel()
@@ -258,14 +344,33 @@ def create_app(
         lifespan=lifespan,
         responses={"default": {"model": ErrorEnvelope}},
     )
-    app.add_middleware(HostValidationMiddleware, allowed_hosts=ALLOWED_LOCAL_HOSTS)
+    if settings.allow_lan:
+        app.add_middleware(InsecureLanWarningMiddleware)
+    app.add_middleware(HostValidationMiddleware, is_allowed=host_allowed)
 
     def _envelope(error: ApiError, request_id: str | None = None) -> JSONResponse:
         return JSONResponse(status_code=error.http_status, content=error.envelope(request_id))
 
-    async def authorize(authorization: str | None = Header(default=None)) -> None:
-        if authorization != f"Bearer {auth_token}":
+    def _client_key(request: Request) -> str:
+        return request.client.host if request.client is not None else "unknown"
+
+    _BEARER_PREFIX = "Bearer "
+
+    async def authorize(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> None:
+        key = _client_key(request)
+        if limiter.is_blocked(key):
+            raise ApiError("rate_limited", "認證失敗次數過多，請稍後再試。")
+        valid = (
+            authorization is not None
+            and authorization.startswith(_BEARER_PREFIX)
+            and token_matches(authorization[len(_BEARER_PREFIX) :])
+        )
+        if not valid:
+            limiter.record_failure(key)
             raise ApiError("unauthenticated", "缺少或不正確的 bearer token。")
+        limiter.record_success(key)
 
     @app.exception_handler(ApiError)
     async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
@@ -346,7 +451,10 @@ def create_app(
             await run_stream(
                 websocket,
                 scheduler,
-                auth_token=auth_token,
+                token_matches=token_matches,
+                origin_allowed=origin_allowed,
+                rate_limiter=limiter,
+                insecure_lan=settings.allow_lan,
                 config=settings,
                 model_state=model_state,
                 vad=vad,

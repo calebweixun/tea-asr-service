@@ -20,7 +20,17 @@
 - **flow.control 節奏**：只在流控窗口實際往前推進時送出，不是固定週期輪詢（`src/tea_asr/api/stream.py::_handle_frame`）。
 - **WS 心跳**：server 每15秒送 WS-layer ping，30秒未收到 pong 判定斷線（`uvicorn.run(..., ws_ping_interval=15, ws_ping_timeout=30)`，`src/tea_asr/cli.py`）。
 - **v0.2 端點**：`/v1/jobs*` 未實作，一律404，不回假 202（`tests/integration/test_schema_export.py::test_v0_2_endpoints_are_absent_not_faked`）。
-- **錯誤碼全集**：`unauthenticated`、`forbidden_origin`、`invalid_audio`、`unsupported_option`、`protocol_error`、`conflict`、`payload_too_large`、`queue_full`、`session_limit`、`concurrent_session_limit`、`model_loading`、`model_unavailable`、`model_incompatible`、`inference_failed`、`inference_timeout`、`timeline_gap`、`internal_error`、`storage_full`（v0.2）；HTTP 狀態碼與 WS close code 對照見下方錯誤表，唯一真相來源是 `src/tea_asr/errors.py`。
+- **錯誤碼全集**：`unauthenticated`、`forbidden_origin`、`rate_limited`（W9）、`invalid_audio`、`unsupported_option`、`protocol_error`、`conflict`、`payload_too_large`、`queue_full`、`session_limit`、`concurrent_session_limit`、`model_loading`、`model_unavailable`、`model_incompatible`、`inference_failed`、`inference_timeout`、`timeline_gap`、`internal_error`、`storage_full`（v0.2）；HTTP 狀態碼與 WS close code 對照見下方錯誤表，唯一真相來源是 `src/tea_asr/errors.py`。
+
+## W9｜LAN／Tailscale 模式（opt-in，非預設）
+
+**這是使用者在被告知取捨後的明確決定，不是疏漏：** LAN 模式不做 TLS。加密與身分驗證交給 WireGuard／Tailscale 等隧道層負責；應用層不重複做憑證管理。因此 LAN 模式下連線仍是明文，bearer token 以明文傳輸——這只能在受信任的 LAN／Tailscale 網路下使用，絕不能暴露於公開網路或不受信任的網路。
+
+- **預設值不變**：`ServiceConfig.allow_lan` 預設 `False`，服務只 bind `127.0.0.1`。任何要監聽非本機位址的操作都必須明確 opt-in：`config.toml` 的 `[service] allow_lan = true`、環境變數 `TEA_ASR_ALLOW_LAN=1`，或 `tea-asr serve --allow-lan` / `tea-asr service install --allow-lan`。`ServiceConfig.validate_bind_or_raise(host, allow_lan=...)` 是唯一的檢查點，`tea-asr serve`／`tea-asr service install` 在真正 bind／安裝 LaunchAgent 之前都會呼叫；host 非本機且未 opt-in 一律拋 `RuntimeError`，不會靜默監聽（`src/tea_asr/config.py`）。
+- **Host／Origin allowlist 在 LAN 模式下的擴充**：預設（`allow_lan=False`）行為與 W1 完全相同，只接受 `127.0.0.1`／`localhost`（Host）與 `http://127.0.0.1`／`http://localhost`（Origin，不含 port）。開啟 `allow_lan` 後才擴大成：RFC1918 私有網段（`10/8`、`172.16/12`、`192.168/16`）、Tailscale 的 CGNAT 網段（`100.64.0.0/10`）與其 IPv6 ULA 範圍、`127/8`／`::1`，以及 `ServiceConfig.extra_allowed_hosts` 明確列出的主機名（例如 Tailscale MagicDNS 名稱，逗號分隔於 `TEA_ASR_EXTRA_ALLOWED_HOSTS` 或設定檔陣列）。公開 IP 與其他任意網域即使在 LAN 模式下仍會被拒絕（`forbidden_origin`）；LAN 模式下的 Origin 只接受 `http://`，不接受 `https://`（本服務不做 TLS，宣稱 https 的 Origin 沒有意義）。實作見 `src/tea_asr/wire.py::make_host_allowlist`／`make_origin_allowlist`。
+- **認證失敗的 rate limit**：每個來源位址（HTTP 用 `request.client.host`，WS 用 `websocket.client.host`）在滑動視窗內（預設 60 秒內 10 次失敗）超過失敗次數上限後，之後的請求一律回 `rate_limited`（HTTP 429／WS close 1013），即使之後才送出正確 token 也一樣，直到視窗過期或該來源曾經認證成功（成功會清空該來源的失敗計數）。這是防止 token 被暴力猜測的最低限度保護，獨立於 LAN 模式開關（loopback 模式下也生效）。實作見 `src/tea_asr/rate_limit.py::AuthRateLimiter`。
+- **不加密警告**：`allow_lan=true` 生效時，啟動 log 會送出 `service.insecure_lan_bind` 事件；每個 HTTP 回應（含 `/v1/status`）會附加 `X-TEA-ASR-Security: unencrypted-lan-mode` 與 `X-TEA-ASR-Security-Notice` 標頭；WS `accept()` 的握手回應也附加同樣的標頭。這是標頭而非回應 body 欄位，因為 body 走的是 `docs/api/openapi.json` 凍結的 Pydantic schema，用標頭可以在不擴充 wire 契約的前提下讓警告在任何 HTTP client（`curl -i` 等）上都看得到。`tea-asr serve`／`tea-asr service install` 在 `allow_lan` 生效時也會在啟動時印出同樣的警告文字到 stderr。
+- **Token rotation／revocation**：`tea-asr token rotate` 產生新 token 並立即讓舊 token 失效（無寬限期）；`tea-asr token revoke` 讓 token 檔案清空、所有請求都被拒絕直到下一次 rotate。執行中的服務透過 `TokenAuthenticator`（追蹤 token 檔案 mtime，變動才重新讀取）偵測變化，不需要重啟即可套用。`create_app(token=...)` 這個明確傳入固定字串的路徑（測試、`export-schemas`）維持舊行為，不會追蹤檔案。**不做 expiration／per-token scope**：這是單一使用者的本機服務、所有路由共用同一把 bearer token，沒有多租戶場景需要切分 scope；固定到期時間只會在使用者沒做錯任何事的情況下讓 client 忽然斷線，卻攔不到任何攻擊者——rotation／revocation 已經涵蓋「token 外洩」與「我現在要切斷這個 client」兩種真實需求。
 
 ## 共通規則
 
