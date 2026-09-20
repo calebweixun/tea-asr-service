@@ -776,15 +776,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let title = NSTextField(labelWithString: "")
         title.font = .systemFont(ofSize: 13)
         title.textColor = .labelColor
-        let titleRow = NSStackView(views: [statusIcon, title])
+        // "Why this permission" is explanatory copy, not the status itself —
+        // the status (已允許/未允許/…) stays on `title` below, always
+        // visible; only the "why" moves behind a click. `explanation` is
+        // initialised with the kind's current text so the button is never
+        // momentarily empty before the first `update()` call.
+        let explanationInfo = InfoButton(explanation: kind.explanation)
+        let titleRow = NSStackView(views: [statusIcon, title, explanationInfo])
         titleRow.orientation = .horizontal
         titleRow.alignment = .centerY
         titleRow.spacing = Metrics.hair + 2
-        let explanation = NSTextField(wrappingLabelWithString: "")
-        explanation.textColor = .secondaryLabelColor
-        explanation.font = .systemFont(ofSize: 12)
 
-        let text = NSStackView(views: [titleRow, explanation])
+        let text = NSStackView(views: [titleRow])
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = Metrics.hair
@@ -835,7 +838,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             let statusIconName = item.isSatisfied ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
             statusIcon.image = NSImage(systemSymbolName: statusIconName, accessibilityDescription: statusText) ?? NSImage()
             statusIcon.contentTintColor = severityColor(color)
-            if explanation.stringValue != item.explanation { explanation.stringValue = item.explanation }
+            explanationInfo.explanation = item.explanation
 
             if let actionTitle = item.actionTitle {
                 let isNativePrompt = item.authorization == .notDetermined
@@ -863,6 +866,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         hotKey.onRequestEdit = { [weak self] in
             self?.editShortcut()
         }
+        let serviceExecutable = NSTextField(string: settings.serviceExecutable)
+        serviceExecutable.identifier = NSUserInterfaceItemIdentifier("serviceExecutable")
+        serviceExecutable.placeholderString = "留空以自動尋找（PATH、專案 .venv/bin/tea-asr…）"
+        let chooseExecutable = actionButton(title: "選擇檔案…", action: #selector(chooseServiceExecutable(_:)))
         let interactionMode = NSPopUpButton()
         interactionMode.identifier = NSUserInterfaceItemIdentifier("interactionMode")
         for mode in DictationInteractionMode.allCases {
@@ -881,7 +888,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         feedback.state = settings.startStopFeedback ? .on : .off
         let inputDevice = inputDevicePopup()
         let inputChannel = inputChannelPopup(deviceUID: settings.inputDeviceUID)
-        for field in [host, port, token, hotKey] as [NSControl] {
+        for field in [host, port, token, hotKey, serviceExecutable] as [NSControl] {
             // An exact width, not a floor: a bordered NSTextField has no
             // intrinsic width to hug, so a floor alone lets it absorb all the
             // slack in the grid's control column and run to the pane's edge —
@@ -911,8 +918,44 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         host.action = #selector(saveSettings(_:))
         port.action = #selector(saveSettings(_:))
         token.action = #selector(saveSettings(_:))
+        serviceExecutable.target = self
+        serviceExecutable.action = #selector(saveSettings(_:))
         interactionMode.target = self
         interactionMode.action = #selector(saveSettings(_:))
+
+        // Explanatory (not warning) copy that used to sit as standing labels
+        // under the connection grid. The wording is untouched — see the
+        // classification in the task report — only the presentation moved
+        // into a click-to-reveal disclosure next to the field it explains.
+        let addressAndLanExplanation = "這個 app 本身就是服務所在的電腦，服務位址預設是本機（127.0.0.1）。"
+            + "只有在要連到另一台主機上執行的服務時才需要修改。"
+            + "\n\n"
+            + "尚未開放外部（區網）連入：TLS 加密、身分授權與流量限制都還沒有實作，"
+            + "貿然開放會讓區網內任何裝置未經驗證就能存取語音與逐字稿，因此這個版本只能連本機。"
+        let hostInfo = InfoButton(explanation: addressAndLanExplanation)
+        let hostRow = NSStackView(views: [host, hostInfo])
+        hostRow.orientation = .horizontal
+        hostRow.alignment = .centerY
+        hostRow.spacing = Metrics.hair + 2
+
+        let tokenExplanation = "Token 只寫入 ~/Library/Application Support/TEA ASR/token，不會放進偏好設定。"
+        let tokenInfo = InfoButton(explanation: tokenExplanation)
+        let tokenRow = NSStackView(views: [token, tokenInfo])
+        tokenRow.orientation = .horizontal
+        tokenRow.alignment = .centerY
+        tokenRow.spacing = Metrics.hair + 2
+
+        let shortcutTipExplanation = "按一下快捷鍵按鈕即可修改。"
+        let shortcutInfo = InfoButton(explanation: shortcutTipExplanation)
+        let hotKeyRow = NSStackView(views: [hotKey, shortcutInfo])
+        hotKeyRow.orientation = .horizontal
+        hotKeyRow.alignment = .centerY
+        hotKeyRow.spacing = Metrics.hair + 2
+
+        let executableRow = NSStackView(views: [serviceExecutable, chooseExecutable])
+        executableRow.orientation = .horizontal
+        executableRow.alignment = .centerY
+        executableRow.spacing = Metrics.row
 
         // Read-only: reflects the address/port already saved in `settings` and
         // whatever the last service probe found, both already available on
@@ -920,11 +963,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let connectionSummary = stableLabel(font: .systemFont(ofSize: 13), maxLines: 2, color: .secondaryLabelColor)
         let grid = settingsGrid([
             [settingsLabel("連線狀態"), connectionSummary],
-            [settingsLabel("服務位址（本機）"), host],
+            [settingsLabel("服務位址（本機）"), hostRow],
             [settingsLabel("Port"), port],
-            [settingsLabel("Token"), token],
-            [settingsLabel("快捷鍵"), hotKey],
+            [settingsLabel("Token"), tokenRow],
+            [settingsLabel("快捷鍵"), hotKeyRow],
             [settingsLabel("互動模式"), interactionMode],
+        ])
+        // Diagnostic, not decorative: unlike the info buttons above, this
+        // must stay a plain always-visible label. "找不到 tea-asr 執行檔" is
+        // exactly the kind of actionable failure reason the app used to have
+        // nowhere to show — hiding it behind a click would recreate the same
+        // problem this page exists to fix.
+        let executableStatus = stableLabel(font: .systemFont(ofSize: 12), maxLines: nil, color: .secondaryLabelColor)
+        let executableGrid = settingsGrid([
+            [settingsLabel("服務執行檔"), executableRow],
+            [NSGridCell.emptyContentView, executableStatus],
         ])
         let audioGrid = settingsGrid([
             [settingsLabel("輸入裝置"), inputDevice],
@@ -947,23 +1000,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         preview.identifier = NSUserInterfaceItemIdentifier("preview")
         preview.state = settings.revisablePreview ? .on : .off
 
-        let addressHint = NSTextField(
-            wrappingLabelWithString: "這個 app 本身就是服務所在的電腦，服務位址預設是本機（127.0.0.1）。"
-                + "只有在要連到另一台主機上執行的服務時才需要修改。"
-        )
-        addressHint.textColor = .secondaryLabelColor
-        addressHint.font = .systemFont(ofSize: 12)
-        let lanHint = NSTextField(
-            wrappingLabelWithString: "尚未開放外部（區網）連入：TLS 加密、身分授權與流量限制都還沒有實作，"
-                + "貿然開放會讓區網內任何裝置未經驗證就能存取語音與逐字稿，因此這個版本只能連本機。"
-        )
-        lanHint.textColor = .secondaryLabelColor
-        lanHint.font = .systemFont(ofSize: 12)
-        let tokenHint = NSTextField(
-            wrappingLabelWithString: "Token 只寫入 ~/Library/Application Support/TEA ASR/token，不會放進偏好設定。"
-        )
-        tokenHint.textColor = .secondaryLabelColor
-        tokenHint.font = .systemFont(ofSize: 12)
+        // Dynamic status only now — see `shortcutInfo` above for the static
+        // "按一下快捷鍵按鈕即可修改" usage tip that used to be appended here.
+        // This label must stay a plain, always-visible line: it can turn red
+        // to report a shortcut conflict/registration failure, which is a
+        // warning the user needs at a glance, not explanatory copy.
         let shortcutHint = NSTextField(wrappingLabelWithString: "")
         shortcutHint.font = .systemFont(ofSize: 12)
         let save = actionButton(title: "儲存設定", action: #selector(saveSettings(_:)))
@@ -981,7 +1022,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let buttonGrid = settingsGrid([[NSGridCell.emptyContentView, buttons]])
 
         let view = sectionStack(views: [
-            group(title: "服務連線", views: [grid, addressHint, tokenHint, lanHint]),
+            group(title: "服務連線", views: [grid]),
+            group(title: "本機服務", views: [executableGrid]),
             group(title: "音訊輸入", views: [audioGrid]),
             group(title: "輸入行為", views: [shortcutHint, behaviourGrid]),
             buttonGrid,
@@ -989,8 +1031,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         func update() {
             hotKey.shortcut = settings.shortcut
-            let text = "\(shortcutStatus) · 按一下快捷鍵按鈕即可修改。"
-            if shortcutHint.stringValue != text { shortcutHint.stringValue = text }
+            if shortcutHint.stringValue != shortcutStatus { shortcutHint.stringValue = shortcutStatus }
             shortcutHint.textColor = shortcutStatus.contains("無效")
                 || shortcutStatus.contains("無法")
                 || shortcutStatus.contains("占用")
@@ -998,9 +1039,44 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                 : .secondaryLabelColor
             let summary = connectionSummaryText()
             if connectionSummary.stringValue != summary { connectionSummary.stringValue = summary }
+            let executableText = executableStatusText()
+            if executableStatus.stringValue != executableText { executableStatus.stringValue = executableText }
         }
         update()
         return SectionRuntime(view: view, update: update)
+    }
+
+    /// Explains, in plain always-visible text, where `tea-asr` was found (or
+    /// every location that was tried and came up empty). This is the "why"
+    /// this app used to have nowhere to show: a service that never started
+    /// because the executable could not be located rendered identically to
+    /// any other "無法連線" — offline for an unrelated reason, wrong
+    /// host/port, service still starting up.
+    private func executableStatusText() -> String {
+        let search = ServiceControl.search(configured: settings.serviceExecutable)
+        if let url = search.executable {
+            return "已找到：\(url.path)"
+        }
+        guard !search.searchedPaths.isEmpty else {
+            return "找不到 tea-asr 執行檔，也沒有可自動搜尋的位置。請手動指定路徑。"
+        }
+        let locations = search.searchedPaths.map { "• \($0)" }.joined(separator: "\n")
+        return "找不到 tea-asr 執行檔。已找過以下位置：\n\(locations)\n\n"
+            + "請在上方指定路徑（通常是專案的 .venv/bin/tea-asr），或先安裝到 PATH 上。"
+    }
+
+    @objc private func chooseServiceExecutable(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.title = "選擇 tea-asr 執行檔"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+            guard let field = self.controlsInSettingsView().serviceExecutable else { return }
+            field.stringValue = url.path
+            self.saveSettings(nil)
+        }
     }
 
     /// One shared grid geometry for every settings row: a right-aligned label
@@ -1538,6 +1614,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
            let rawValue = inputChannel.selectedItem?.representedObject as? String {
             settings.inputChannelPolicy = AudioChannelPolicy(rawValue: rawValue)
         }
+        if let serviceExecutable = controls.serviceExecutable {
+            settings.serviceExecutable = serviceExecutable.stringValue
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         return true
     }
 
@@ -1603,7 +1683,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         host: NSTextField?, port: NSTextField?, token: NSSecureTextField?,
         autoInsert: NSButton?, preview: NSButton?, inputDevice: NSPopUpButton?,
         inputChannel: NSPopUpButton?, shortcut: ShortcutButton?,
-        interactionMode: NSPopUpButton?, feedback: NSButton?
+        interactionMode: NSPopUpButton?, feedback: NSButton?,
+        serviceExecutable: NSTextField?
     ) {
         var fields: [String: NSControl] = [:]
         func visit(_ view: NSView) {
@@ -1623,7 +1704,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             fields["inputChannel"] as? NSPopUpButton,
             fields["shortcut"] as? ShortcutButton,
             fields["interactionMode"] as? NSPopUpButton,
-            fields["feedback"] as? NSButton
+            fields["feedback"] as? NSButton,
+            // `serviceExecutable` is an `NSTextField`, same as `host`/`port`,
+            // but `fields["host"] as? NSTextField` above would just as
+            // happily match it if it shared a key — the dictionary lookup
+            // here is keyed on the identifier string, not the type, so a
+            // distinct identifier is what actually keeps them apart.
+            fields["serviceExecutable"] as? NSTextField
         )
     }
 

@@ -364,13 +364,21 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func executableSearch() -> ServiceControl.ExecutableSearch {
+        ServiceControl.search(configured: settings.serviceExecutable)
+    }
+
     private func executable() -> URL? {
-        ServiceControl.resolveExecutable(configured: settings.serviceExecutable)
+        executableSearch().executable
     }
 
     @objc private func toggleService() {
         guard let binary = executable() else {
-            alert("找不到服務執行檔", ServiceControl.ControlError.executableNotFound.localizedDescription)
+            let searched = executableSearch().searchedPaths
+            alert(
+                "找不到服務執行檔",
+                ServiceControl.ControlError.executableNotFound(searched: searched).localizedDescription
+            )
             return
         }
         if serviceRunning {
@@ -391,7 +399,11 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     @objc private func toggleAutoStart() {
         guard let binary = executable() else {
-            alert("找不到服務執行檔", ServiceControl.ControlError.executableNotFound.localizedDescription)
+            let searched = executableSearch().searchedPaths
+            alert(
+                "找不到服務執行檔",
+                ServiceControl.ControlError.executableNotFound(searched: searched).localizedDescription
+            )
             return
         }
         let installed = ServiceControl.agentInstalled(executable: binary)
