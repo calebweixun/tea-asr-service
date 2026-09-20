@@ -163,6 +163,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private var autosaveStatus = "尚未寫入自動存檔"
     private var shortcutStatus = "尚未註冊"
 
+    // MARK: - 本機服務控制（設定頁）
+    //
+    // Only ever set by `toggleManagedService`/`runModelPrepare` below, and
+    // only ever holding a `Process` this controller itself launched — see
+    // `ManagedProcess`'s own doc comment for why that is what makes `stop`
+    // safe to offer at all. `nil` means "this app has not started a service
+    // this run", which is also the trigger for the Logs page's "服務不是由
+    // 這個 app 啟動" notice — a service can be reachable and healthy while
+    // this stays `nil` if it was started by the menu bar, a LaunchAgent, or
+    // a developer's own terminal.
+    private var managedService: ManagedProcess?
+    private var modelPrepareProcess: ManagedProcess?
+
     // MARK: - 日誌頁狀態
     //
     // The level defaults to `.warning` (warning + error), not `.debug`: the
@@ -179,6 +192,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// the text view itself lives inside the section's own view tree and is
     /// otherwise addressed only through `update()`.
     private var logsTextView: NSTextView?
+    /// Which of the Logs page's two tabs is showing: the structured
+    /// `/v1/logs` feed, or the managed service process's own stdout/stderr.
+    private var logsTab: LogsTab = .structured
+    /// Same reasoning as `logsTextView` above, for the "服務輸出" tab.
+    private var logsServiceOutputTextView: NSTextView?
+
+    private enum LogsTab: Int {
+        case structured
+        case serviceOutput
+    }
     private lazy var autosaveURL: URL = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmm"
@@ -979,6 +1002,40 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             [settingsLabel("服務執行檔"), executableRow],
             [NSGridCell.emptyContentView, executableStatus],
         ])
+
+        // Start/stop control. The status line is the one place this app can
+        // honestly say what it knows: whether *it* started the process that
+        // is running, not merely whether something is answering on the port.
+        let serviceControlStatus = stableLabel(font: .systemFont(ofSize: 12), maxLines: nil, color: .secondaryLabelColor)
+        let serviceControlButton = actionButton(title: "啟動服務", action: #selector(toggleManagedService(_:)))
+        serviceControlButton.identifier = NSUserInterfaceItemIdentifier("serviceControlButton")
+        let serviceControlGrid = settingsGrid([
+            [settingsLabel("執行狀態"), serviceControlStatus],
+            [NSGridCell.emptyContentView, buttonRow([serviceControlButton])],
+        ])
+
+        // Model info + the one model action this build actually has: asking
+        // the server to (re-)run its own `model-prepare`. There is no
+        // variant switch here — see the info button's explanation — because
+        // neither the CLI nor the API currently accept one.
+        let modelValue = stableLabel(font: .systemFont(ofSize: 12), maxLines: nil, color: .secondaryLabelColor)
+        let modelExplanation = "目前只有一個固定模型（tea-asr model-prepare 沒有指定模型的參數），"
+            + "所以這裡還做不到在原版與 MLX 版之間切換——那需要 server 端先提供模型目錄／切換的 API。"
+            + "這個按鈕做得到的，是觸發既有的 tea-asr model-prepare，重新準備／驗證目前這個固定模型。"
+        let modelInfo = InfoButton(explanation: modelExplanation)
+        let modelValueRow = NSStackView(views: [modelValue, modelInfo])
+        modelValueRow.orientation = .horizontal
+        modelValueRow.alignment = .centerY
+        modelValueRow.spacing = Metrics.hair + 2
+        let modelPrepareButton = actionButton(title: "重新準備模型", action: #selector(runModelPrepare(_:)))
+        modelPrepareButton.identifier = NSUserInterfaceItemIdentifier("modelPrepareButton")
+        let modelPrepareStatus = stableLabel(font: .systemFont(ofSize: 12), maxLines: nil, color: .secondaryLabelColor)
+        let modelGrid = settingsGrid([
+            [settingsLabel("目前模型"), modelValueRow],
+            [NSGridCell.emptyContentView, buttonRow([modelPrepareButton])],
+            [NSGridCell.emptyContentView, modelPrepareStatus],
+        ])
+
         let audioGrid = settingsGrid([
             [settingsLabel("輸入裝置"), inputDevice],
             [settingsLabel("聲道"), inputChannel],
@@ -1023,7 +1080,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         let view = sectionStack(views: [
             group(title: "服務連線", views: [grid]),
-            group(title: "本機服務", views: [executableGrid]),
+            group(title: "本機服務", views: [executableGrid, serviceControlGrid, modelGrid]),
             group(title: "音訊輸入", views: [audioGrid]),
             group(title: "輸入行為", views: [shortcutHint, behaviourGrid]),
             buttonGrid,
@@ -1041,9 +1098,56 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             if connectionSummary.stringValue != summary { connectionSummary.stringValue = summary }
             let executableText = executableStatusText()
             if executableStatus.stringValue != executableText { executableStatus.stringValue = executableText }
+
+            let presentation = ServiceRuntimeControl.presentation(for: serviceRuntimeState())
+            if serviceControlButton.title != presentation.buttonTitle {
+                serviceControlButton.title = presentation.buttonTitle
+            }
+            serviceControlButton.isEnabled = presentation.buttonEnabled
+            if serviceControlStatus.stringValue != presentation.statusText {
+                serviceControlStatus.stringValue = presentation.statusText
+            }
+
+            let modelText = modelInfoText()
+            if modelValue.stringValue != modelText { modelValue.stringValue = modelText }
+            let prepareText = modelPrepareStatusText()
+            if modelPrepareStatus.stringValue != prepareText { modelPrepareStatus.stringValue = prepareText }
+            modelPrepareButton.isEnabled = modelPrepareProcess?.isRunning != true
         }
         update()
         return SectionRuntime(view: view, update: update)
+    }
+
+    /// The pure inputs to `ServiceRuntimeControl.state`, gathered from the
+    /// three places that actually know them: the executable search, this
+    /// controller's own `managedService` handle, and the last health probe
+    /// result already tracked on `appState`.
+    private func serviceRuntimeState() -> ServiceRuntimeControl.State {
+        ServiceRuntimeControl.state(
+            managedRunning: managedService?.isRunning == true,
+            reachableElsewhere: managedService?.isRunning != true && appState.serviceReachable == true,
+            executableFound: ServiceControl.search(configured: settings.serviceExecutable).executable != nil,
+            exitStatus: managedService?.exitStatus
+        )
+    }
+
+    private func modelInfoText() -> String {
+        guard let status = appState.serviceSnapshot?.status else {
+            return "尚未取得（服務未連線）"
+        }
+        return "\(status.model) · revision \(status.modelRevision)"
+    }
+
+    private func modelPrepareStatusText() -> String {
+        guard let managed = modelPrepareProcess else { return "尚未執行過 model-prepare。" }
+        let snapshot = managed.output.snapshot()
+        let tail = snapshot.lines.suffix(5).joined(separator: "\n")
+        if managed.isRunning {
+            return tail.isEmpty ? "執行中…" : "執行中…\n\(tail)"
+        }
+        let status = managed.exitStatus ?? managed.process.terminationStatus
+        let outcome = status == 0 ? "已完成。" : "失敗（結束碼 \(status)）。"
+        return tail.isEmpty ? outcome : "\(outcome)\n\(tail)"
     }
 
     /// Explains, in plain always-visible text, where `tea-asr` was found (or
@@ -1063,6 +1167,69 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let locations = search.searchedPaths.map { "• \($0)" }.joined(separator: "\n")
         return "找不到 tea-asr 執行檔。已找過以下位置：\n\(locations)\n\n"
             + "請在上方指定路徑（通常是專案的 .venv/bin/tea-asr），或先安裝到 PATH 上。"
+    }
+
+    /// The Settings page's own start/stop control. Stopping only ever calls
+    /// `terminate()` on `managedService` — the exact `Process` this method
+    /// itself launched — never anything found by matching a name or a port,
+    /// which is what keeps it safe to offer at all (see `ManagedProcess`).
+    @objc private func toggleManagedService(_ sender: Any?) {
+        if let managed = managedService, managed.isRunning {
+            managed.terminate()
+            updateSection(.settings)
+            updateSection(.logs)
+            return
+        }
+        let search = ServiceControl.search(configured: settings.serviceExecutable)
+        guard let binary = search.executable else {
+            presentAlert(
+                "找不到服務執行檔",
+                ServiceControl.ControlError.executableNotFound(searched: search.searchedPaths).localizedDescription
+            )
+            return
+        }
+        do {
+            let managed = try ServiceControl.launchService(executable: binary)
+            managed.onExit = { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.updateSection(.settings)
+                    self?.updateSection(.logs)
+                }
+            }
+            managedService = managed
+            onRefreshService?()
+        } catch {
+            presentAlert("無法啟動服務", error.localizedDescription)
+        }
+        updateSection(.settings)
+        updateSection(.logs)
+    }
+
+    /// Triggers the one model action that already exists server-side:
+    /// `tea-asr model-prepare`. This is not a model *switch* — the CLI takes
+    /// no model argument today — only a re-run of preparing/verifying the
+    /// single fixed model, which is exactly what `modelExplanation` above
+    /// tells the user.
+    @objc private func runModelPrepare(_ sender: Any?) {
+        guard modelPrepareProcess?.isRunning != true else { return }
+        let search = ServiceControl.search(configured: settings.serviceExecutable)
+        guard let binary = search.executable else {
+            presentAlert(
+                "找不到服務執行檔",
+                ServiceControl.ControlError.executableNotFound(searched: search.searchedPaths).localizedDescription
+            )
+            return
+        }
+        do {
+            let managed = try ServiceControl.launchModelPrepare(executable: binary)
+            managed.onExit = { [weak self] _ in
+                DispatchQueue.main.async { self?.updateSection(.settings) }
+            }
+            modelPrepareProcess = managed
+        } catch {
+            presentAlert("無法執行 model-prepare", error.localizedDescription)
+        }
+        updateSection(.settings)
     }
 
     @objc private func chooseServiceExecutable(_ sender: Any?) {
@@ -1284,11 +1451,55 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
         logsTextView = textView
 
+        // Second tab: the managed service process's own stdout/stderr,
+        // separate from the structured `/v1/logs` feed above — see
+        // `ServiceOutputPresentation`'s doc comment for why the two must
+        // never be merged into one view.
+        let tabControl = NSSegmentedControl(
+            labels: ["結構化日誌", "服務輸出"],
+            trackingMode: .selectOne,
+            target: self,
+            action: #selector(logsTabChanged(_:))
+        )
+        tabControl.identifier = NSUserInterfaceItemIdentifier("logsTab")
+        tabControl.selectedSegment = logsTab.rawValue
+        tabControl.setContentHuggingPriority(.required, for: .horizontal)
+
+        let structuredView = group(views: [controlsRow, statusLabel, scroll])
+
+        let serviceOutputStatus = stableLabel(font: .systemFont(ofSize: 12), maxLines: nil, color: .secondaryLabelColor)
+        let serviceOutputTextView = NSTextView()
+        serviceOutputTextView.isEditable = false
+        serviceOutputTextView.isSelectable = true
+        serviceOutputTextView.isRichText = false
+        serviceOutputTextView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        serviceOutputTextView.drawsBackground = false
+        serviceOutputTextView.textContainerInset = NSSize(width: Metrics.tight, height: Metrics.tight)
+        serviceOutputTextView.minSize = NSSize(width: 0, height: 0)
+        serviceOutputTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        serviceOutputTextView.isVerticallyResizable = true
+        serviceOutputTextView.isHorizontallyResizable = false
+        serviceOutputTextView.autoresizingMask = [.width]
+        serviceOutputTextView.textContainer?.widthTracksTextView = true
+        let serviceOutputScroll = NSScrollView()
+        serviceOutputScroll.hasVerticalScroller = true
+        serviceOutputScroll.drawsBackground = true
+        serviceOutputScroll.backgroundColor = .textBackgroundColor
+        serviceOutputScroll.borderType = .bezelBorder
+        serviceOutputScroll.documentView = serviceOutputTextView
+        serviceOutputScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 320).isActive = true
+        logsServiceOutputTextView = serviceOutputTextView
+        let serviceOutputView = group(views: [serviceOutputStatus, serviceOutputScroll])
+
         let view = sectionStack(views: [
-            group(title: "日誌", views: [controlsRow, statusLabel, scroll]),
+            group(title: "日誌", views: [tabControl, structuredView, serviceOutputView]),
         ])
 
         func update() {
+            tabControl.selectedSegment = logsTab.rawValue
+            structuredView.isHidden = logsTab != .structured
+            serviceOutputView.isHidden = logsTab != .serviceOutput
+
             if let item = levelPopup.itemArray.first(where: {
                 ($0.representedObject as? String) == logsSelectedLevel.rawValue
             }) {
@@ -1306,9 +1517,34 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                     scrollToBottom(scroll)
                 }
             }
+
+            let managed = managedService
+            let statusText = ServiceOutputPresentation.statusText(
+                isManaged: managed != nil,
+                isRunning: managed?.isRunning == true,
+                reachableElsewhere: appState.serviceReachable == true
+            )
+            if serviceOutputStatus.stringValue != statusText { serviceOutputStatus.stringValue = statusText }
+            let snapshot = managed?.output.snapshot()
+            let bodyText = ServiceOutputPresentation.body(
+                lines: snapshot?.lines ?? [],
+                droppedLines: snapshot?.droppedLines ?? 0
+            )
+            if serviceOutputTextView.string != bodyText {
+                let wasAtBottom = isScrolledToBottom(serviceOutputScroll)
+                serviceOutputTextView.string = bodyText
+                if wasAtBottom {
+                    scrollToBottom(serviceOutputScroll)
+                }
+            }
         }
         update()
         return SectionRuntime(view: view, update: update)
+    }
+
+    @objc private func logsTabChanged(_ sender: NSSegmentedControl) {
+        logsTab = LogsTab(rawValue: sender.selectedSegment) ?? .structured
+        updateSection(.logs)
     }
 
     // MARK: - Actions
@@ -2246,5 +2482,25 @@ extension MainWindowController {
     /// lives in an `NSTextView` rather than an `NSTextField` (so it never
     /// shows up in `debugLabelTexts()`).
     var debugLogsRenderedText: String? { logsTextView?.string }
+
+    /// The Logs page's "服務輸出" tab content, same reasoning as
+    /// `debugLogsRenderedText` above.
+    var debugServiceOutputText: String? { logsServiceOutputTextView?.string }
+
+    /// Lets a test simulate "this app already has a service process handle"
+    /// without going through `toggleManagedService` (which needs a real,
+    /// resolvable executable path). Tests construct a real `ManagedProcess`
+    /// around a short-lived helper process (e.g. `/bin/sh -c 'sleep 1'`) so
+    /// `isRunning`/`terminate()` behave exactly as they would in production.
+    var debugManagedService: ManagedProcess? {
+        get { managedService }
+        set { managedService = newValue }
+    }
+
+    /// Same idea as `debugManagedService`, for the model-prepare action.
+    var debugModelPrepareProcess: ManagedProcess? {
+        get { modelPrepareProcess }
+        set { modelPrepareProcess = newValue }
+    }
 }
 #endif
