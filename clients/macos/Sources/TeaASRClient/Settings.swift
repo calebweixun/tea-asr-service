@@ -10,9 +10,15 @@ struct Settings {
         static let autoInsert = "autoInsertOnFinal"
         static let revisablePreview = "requestRevisablePreview"
         static let serviceExecutable = "serviceExecutablePath"
+        static let inputDeviceUID = "audioInputDeviceUID"
+        static let inputChannelPolicy = "audioInputChannelPolicy"
     }
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
 
     var host: String {
         get { defaults.string(forKey: Key.host) ?? "127.0.0.1" }
@@ -48,6 +54,44 @@ struct Settings {
     var serviceExecutable: String {
         get { defaults.string(forKey: Key.serviceExecutable) ?? "" }
         nonmutating set { defaults.set(newValue, forKey: Key.serviceExecutable) }
+    }
+
+    /// Stable CoreAudio device UID. `nil` means System Default; volatile
+    /// AudioDeviceID values are intentionally never persisted.
+    var inputDeviceUID: String? {
+        get {
+            guard let value = defaults.string(forKey: Key.inputDeviceUID), !value.isEmpty else {
+                return nil
+            }
+            return value
+        }
+        nonmutating set {
+            if let newValue, !newValue.isEmpty {
+                defaults.set(newValue, forKey: Key.inputDeviceUID)
+            } else {
+                defaults.removeObject(forKey: Key.inputDeviceUID)
+            }
+        }
+    }
+
+    /// Persisted channel policy. The default mixes all source channels down
+    /// to mono, which preserves the previous behavior for every device.
+    var inputChannelPolicy: AudioChannelPolicy {
+        get { AudioChannelPolicy(rawValue: defaults.string(forKey: Key.inputChannelPolicy)) }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Key.inputChannelPolicy) }
+    }
+
+    var audioInputConfiguration: AudioInputConfiguration {
+        get {
+            AudioInputConfiguration(
+                deviceUID: inputDeviceUID,
+                channelPolicy: inputChannelPolicy
+            )
+        }
+        nonmutating set {
+            inputDeviceUID = newValue.deviceUID
+            inputChannelPolicy = newValue.channelPolicy
+        }
     }
 
     var streamURL: URL {

@@ -385,8 +385,17 @@ final class AppController: NSObject, NSApplicationDelegate {
                 self?.mainWindow?.setAudioDiagnostics(diagnostics)
             }
         }
+        capture.onError = { [weak self] message in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.client.stop()
+                self.mainWindow?.setStatus("錄音已中斷：\(message)")
+                self.alert("錄音已停止", message)
+                self.render()
+            }
+        }
         do {
-            try capture.start()
+            try capture.start(configuration: settings.audioInputConfiguration)
         } catch {
             mode = .idle
             appState.setMode(.idle)

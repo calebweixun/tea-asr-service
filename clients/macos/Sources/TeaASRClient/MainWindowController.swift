@@ -579,18 +579,28 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         token.placeholderString = "輸入 bearer token（儲存到本機 token 檔）"
         let hotKey = NSTextField(labelWithString: "⌥⌘D（固定）")
         hotKey.textColor = .secondaryLabelColor
+        let inputDevice = inputDevicePopup()
+        let inputChannel = inputChannelPopup(deviceUID: settings.inputDeviceUID)
         host.controlSize = .large
         port.controlSize = .large
         token.controlSize = .large
+        inputDevice.controlSize = .large
+        inputChannel.controlSize = .large
         host.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
         port.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
         token.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
+        inputDevice.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
+        inputChannel.widthAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
         host.identifier = NSUserInterfaceItemIdentifier("host")
         port.identifier = NSUserInterfaceItemIdentifier("port")
         token.identifier = NSUserInterfaceItemIdentifier("token")
+        inputDevice.identifier = NSUserInterfaceItemIdentifier("inputDevice")
+        inputChannel.identifier = NSUserInterfaceItemIdentifier("inputChannel")
         host.target = self
         port.target = self
         token.target = self
+        inputDevice.target = self
+        inputDevice.action = #selector(audioDeviceSelectionChanged(_:))
         host.action = #selector(saveSettings(_:))
         port.action = #selector(saveSettings(_:))
         token.action = #selector(saveSettings(_:))
@@ -601,9 +611,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             [NSTextField(labelWithString: "Token"), token],
             [NSTextField(labelWithString: "快捷鍵"), hotKey],
         ])
+        let audioGrid = NSGridView(views: [
+            [NSTextField(labelWithString: "輸入裝置"), inputDevice],
+            [NSTextField(labelWithString: "聲道"), inputChannel],
+        ])
         grid.column(at: 0).xPlacement = .trailing
         grid.columnSpacing = 12
         grid.rowSpacing = 12
+        audioGrid.column(at: 0).xPlacement = .trailing
+        audioGrid.columnSpacing = 12
+        audioGrid.rowSpacing = 12
 
         let autoInsert = NSButton(
             checkboxWithTitle: "定稿後自動貼進前景 app",
@@ -633,14 +650,71 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         return sectionStack(
             title: "設定",
-            subtitle: "服務連線、token 與輸入行為",
+            subtitle: "服務連線、音訊輸入與輸入行為",
             symbolName: "gearshape.fill",
             views: [
                 cardStack([grid, tokenHint], title: "服務連線", symbolName: "network"),
+                cardStack([audioGrid], title: "音訊輸入", symbolName: "waveform"),
                 cardStack([autoInsert, preview], title: "輸入行為", symbolName: "keyboard"),
                 cardStack([buttons], symbolName: "checkmark.circle"),
             ]
         )
+    }
+
+    private func inputDevicePopup() -> NSPopUpButton {
+        let popup = NSPopUpButton()
+        let available = AudioInputDeviceCatalog.enumerate()
+        let storedOption = AudioInputSettingsOptions.deviceOption(
+            storedUID: settings.inputDeviceUID,
+            available: available
+        )
+        let options = [AudioInputDeviceOption.systemDefault]
+            + available.map(AudioInputDeviceOption.available)
+            + (storedOption.isEnabled ? [] : [storedOption])
+        for option in options {
+            popup.addItem(withTitle: option.title)
+            let item = popup.item(at: popup.numberOfItems - 1)
+            item?.representedObject = option.uid ?? AudioInputDevice.systemDefaultUID
+            item?.isEnabled = option.isEnabled
+        }
+        let selectedUID = storedOption.uid ?? AudioInputDevice.systemDefaultUID
+        if let item = popup.itemArray.last(where: { ($0.representedObject as? String) == selectedUID }) {
+            popup.select(item)
+        } else {
+            popup.selectItem(at: 0)
+        }
+        return popup
+    }
+
+    private func inputChannelPopup(deviceUID: String?) -> NSPopUpButton {
+        let popup = NSPopUpButton()
+        populateInputChannelPopup(popup, deviceUID: deviceUID)
+        return popup
+    }
+
+    private func populateInputChannelPopup(_ popup: NSPopUpButton, deviceUID: String?) {
+        popup.removeAllItems()
+        let device: AudioInputDevice?
+        if let deviceUID, !deviceUID.isEmpty {
+            device = AudioInputDeviceCatalog.enumerate().first(where: { $0.uid == deviceUID })
+        } else {
+            device = AudioInputDeviceCatalog.defaultRecord()?.descriptor
+        }
+        let options = AudioInputSettingsOptions.channelOptions(
+            storedPolicy: settings.inputChannelPolicy,
+            availableChannels: device?.inputChannels
+        )
+        for option in options {
+            popup.addItem(withTitle: option.title)
+            let item = popup.item(at: popup.numberOfItems - 1)
+            item?.representedObject = option.policy.rawValue
+            item?.isEnabled = option.isEnabled
+        }
+
+        let rawValue = settings.inputChannelPolicy.rawValue
+        if let item = popup.itemArray.last(where: { ($0.representedObject as? String) == rawValue }) {
+            popup.select(item)
+        }
     }
 
     private func diagnosticsView() -> NSView {
@@ -698,6 +772,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func openPermissionSettings(_ sender: NSButton) {
         _ = permissions.openSettings(for: permissionKind(for: sender))
+    }
+
+    @objc private func audioDeviceSelectionChanged(_ sender: NSPopUpButton) {
+        guard let channelPopup = controlsInSettingsView().inputChannel else { return }
+        let uid = sender.selectedItem?.representedObject as? String
+        populateInputChannelPopup(channelPopup, deviceUID: uid)
     }
 
     private func permissionTag(for kind: PermissionKind) -> Int {
@@ -768,6 +848,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if let preview = controls.preview {
             settings.revisablePreview = preview.state == .on
         }
+        if let inputDevice = controls.inputDevice {
+            settings.inputDeviceUID = inputDevice.selectedItem?.representedObject as? String
+        }
+        if let inputChannel = controls.inputChannel,
+           let rawValue = inputChannel.selectedItem?.representedObject as? String {
+            settings.inputChannelPolicy = AudioChannelPolicy(rawValue: rawValue)
+        }
         return true
     }
 
@@ -831,7 +918,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     private func controlsInSettingsView() -> (
         host: NSTextField?, port: NSTextField?, token: NSSecureTextField?,
-        autoInsert: NSButton?, preview: NSButton?
+        autoInsert: NSButton?, preview: NSButton?, inputDevice: NSPopUpButton?,
+        inputChannel: NSPopUpButton?
     ) {
         var fields: [String: NSControl] = [:]
         func visit(_ view: NSView) {
@@ -846,7 +934,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             fields["port"] as? NSTextField,
             fields["token"] as? NSSecureTextField,
             fields["autoInsert"] as? NSButton,
-            fields["preview"] as? NSButton
+            fields["preview"] as? NSButton,
+            fields["inputDevice"] as? NSPopUpButton,
+            fields["inputChannel"] as? NSPopUpButton
         )
     }
 
