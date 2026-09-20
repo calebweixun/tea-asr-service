@@ -38,6 +38,42 @@ agy --model gemini-3.8-flash-high --mode accept-edits -p="<派工內容>"
 - **實作交給 `gpt-5.6-luna`（codex，max reasoning）或 `gemini-3.8-flash`（agy）。**
 - 選誰：需要推理的（診斷 bug、架構取捨、需求有歧義）給 luna max；模式已知的機械修改（改名、套用既有慣例、批次調整）給 gemini flash。
 - 驗收一律由派工方自己重跑 build／test／截圖確認，不直接採信實作方的回報。
+
+### 各 agent 的實際能力與使用感受（2026-09-20 實戰記錄）
+
+| Agent | 實測感受 | 適合 | 不適合 |
+|---|---|---|---|
+| `gpt-5.6-luna`（codex, max） | 診斷能力強，會自己讀第三方開源碼找證據、寫 spike 驗假設。誠實度高：查不到會明說「未證實」而不編造。但**容易越界**，會順手做沒要求的事 | 根因診斷、架構取捨、需求有歧義的實作 | 需要 GUI／螢幕／真實硬體的驗證 |
+| `gemini-3.8-flash`（agy） | 樣本還少。headless 權限設定繁瑣（見下） | 模式已知的機械修改 | 需要長鏈推理的診斷 |
+
+### 沙箱是最大的驗證盲區
+
+codex 的沙箱會擋掉一整類操作，而且**失敗的樣子像是「這台機器沒有」而不是「我被擋住」**，agent 很容易誤判：
+
+- `screencapture` 回 `could not create image from display` → 不是沒有螢幕，是沙箱
+- `system_profiler SPAudioDataType` 回空、CoreAudio `devices bytes=0` → 不是沒有音訊裝置，是沙箱
+- `open` 回 `kLSNoExecutableErr`
+- `swift build` 撞 `~/.cache/clang/ModuleCache` 權限；agent 會自己繞出一個 wrapper 檔案，收工要清掉
+
+**所以：凡是要看畫面、碰硬體、驗 GUI 行為的，派工方自己做，不要交給 subagent。** 主對話直接跑 `screencapture` 是可行的，實測有效。已經發生兩次：agent 憑推論做了修法並標成完成，主對話一截圖就證明無效。
+
+### agy 的 headless 權限
+
+- 讀的是 `~/.gemini/antigravity-cli/settings.json`，**不是** `~/.gemini/settings.json`。加錯檔案時 log 會印 `permissions=<nil>`，用 `~/.gemini/antigravity-cli/log/cli-*.log` 確認。
+- 規則寫 `command(swift)` 這種裸命令形式，**不要加 `*`**。官方說明是「`git` matches `git add` but NOT `github`」，加了 `*` 反而比對不到。
+- 檔案工具要另外開：`read_file(*)`、`write_file(*)`、`edit_file(*)`、`replace(*)` 等。
+- 帶 pipe 或 redirection 的指令仍會被拒，派工單要叫它跑單一命令。
+
+### 派工的教訓
+
+1. **檔案清單要列死**。併行時在派工單寫明「允許修改」與「嚴禁修改」，否則會互相覆蓋。即使列了 agent 仍可能越界——收工一定要 `git status` 逐檔核對。
+2. **越界產出不要因為「測試綠」就照單全收**，也不要無腦還原。逐檔審閱，合理就收下並在 commit message 寫清楚來歷。
+3. **把推測與實證分開要求**。驗收條件裡明確寫「查不出來就誠實說查不到，列出已排除的可能」，agent 就真的會照做；不寫，它會給一個聽起來合理的原因。
+4. **不要讓 agent 自己宣告視覺驗收**。派工單直接寫「這個環境無法驗證視覺結果，不准聲稱已驗收」，並要求它產出「需要使用者用眼睛確認」清單。
+5. **背景執行的輸出不要自己重導**到別的檔案，會讓使用者在 CLI 看不到進度。
+6. **前一輪的結論被推翻時，新派工單要明講「不要再往那個方向查」**，否則它會重走一遍老路。
+7. **踩到 `docs/06-handoff.md` 的既有約束時，先講出來再做**，不要默默繞過。已發生：模型下載、LAN 開放兩件事都撞到明文條件。
+
 - Keep delegated work scoped, independently verifiable, and reported back to the root agent before integration. Do not claim completion without running appropriate validation.
 
 ## Codebase discovery
