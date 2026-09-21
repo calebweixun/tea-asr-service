@@ -11,7 +11,8 @@ struct AudioLevelSample: Equatable {
     static let zero = AudioLevelSample(rms: 0, peak: 0)
 }
 
-/// Pure level math keeps the audio callback small and makes the signal policy testable without hardware.
+/// Pure level math keeps the shared-source callback small and testable without
+/// requiring a real microphone.
 enum AudioLevelMath {
     private struct Accumulator {
         var sumOfSquares: Double = 0
@@ -37,16 +38,30 @@ enum AudioLevelMath {
 
     static func measure(samples: [Float]) -> AudioLevelSample? {
         var accumulator = Accumulator()
-        for sample in samples {
-            accumulator.append(sample)
-        }
+        for sample in samples { accumulator.append(sample) }
         return accumulator.result
     }
 
     static func measure(buffer: AVAudioPCMBuffer) -> AudioLevelSample? {
+        measure(buffer: buffer, channelPolicy: .mixdown)
+    }
+
+    static func measure(
+        buffer: AVAudioPCMBuffer,
+        channelPolicy: AudioChannelPolicy
+    ) -> AudioLevelSample? {
         let frameCount = Int(buffer.frameLength)
         let channelCount = Int(buffer.format.channelCount)
         guard frameCount > 0, channelCount > 0 else { return nil }
+
+        let selectedChannel: Int?
+        switch channelPolicy {
+        case .mixdown:
+            selectedChannel = nil
+        case .channel(let index):
+            guard (0..<channelCount).contains(index) else { return nil }
+            selectedChannel = index
+        }
 
         var accumulator = Accumulator()
         if let channels = buffer.floatChannelData {
@@ -55,18 +70,20 @@ enum AudioLevelMath {
                     start: channels[0],
                     count: frameCount * channelCount
                 )
-                for sample in samples {
-                    accumulator.append(sample)
+                if let selectedChannel {
+                    for frame in 0..<frameCount {
+                        accumulator.append(samples[frame * channelCount + selectedChannel])
+                    }
+                } else {
+                    for sample in samples { accumulator.append(sample) }
                 }
+            } else if let selectedChannel {
+                let samples = UnsafeBufferPointer(start: channels[selectedChannel], count: frameCount)
+                for sample in samples { accumulator.append(sample) }
             } else {
                 for channel in 0..<channelCount {
-                    let samples = UnsafeBufferPointer(
-                        start: channels[channel],
-                        count: frameCount
-                    )
-                    for sample in samples {
-                        accumulator.append(sample)
-                    }
+                    let samples = UnsafeBufferPointer(start: channels[channel], count: frameCount)
+                    for sample in samples { accumulator.append(sample) }
                 }
             }
             return accumulator.result
@@ -79,18 +96,20 @@ enum AudioLevelMath {
                     start: channels[0],
                     count: frameCount * channelCount
                 )
-                for sample in samples {
-                    accumulator.append(Float(sample) / scale)
+                if let selectedChannel {
+                    for frame in 0..<frameCount {
+                        accumulator.append(Float(samples[frame * channelCount + selectedChannel]) / scale)
+                    }
+                } else {
+                    for sample in samples { accumulator.append(Float(sample) / scale) }
                 }
+            } else if let selectedChannel {
+                let samples = UnsafeBufferPointer(start: channels[selectedChannel], count: frameCount)
+                for sample in samples { accumulator.append(Float(sample) / scale) }
             } else {
                 for channel in 0..<channelCount {
-                    let samples = UnsafeBufferPointer(
-                        start: channels[channel],
-                        count: frameCount
-                    )
-                    for sample in samples {
-                        accumulator.append(Float(sample) / scale)
-                    }
+                    let samples = UnsafeBufferPointer(start: channels[channel], count: frameCount)
+                    for sample in samples { accumulator.append(Float(sample) / scale) }
                 }
             }
             return accumulator.result
@@ -103,40 +122,31 @@ enum AudioLevelMath {
                     start: channels[0],
                     count: frameCount * channelCount
                 )
-                for sample in samples {
-                    accumulator.append(Float(sample) / scale)
+                if let selectedChannel {
+                    for frame in 0..<frameCount {
+                        accumulator.append(Float(samples[frame * channelCount + selectedChannel]) / scale)
+                    }
+                } else {
+                    for sample in samples { accumulator.append(Float(sample) / scale) }
                 }
+            } else if let selectedChannel {
+                let samples = UnsafeBufferPointer(start: channels[selectedChannel], count: frameCount)
+                for sample in samples { accumulator.append(Float(sample) / scale) }
             } else {
                 for channel in 0..<channelCount {
-                    let samples = UnsafeBufferPointer(
-                        start: channels[channel],
-                        count: frameCount
-                    )
-                    for sample in samples {
-                        accumulator.append(Float(sample) / scale)
-                    }
+                    let samples = UnsafeBufferPointer(start: channels[channel], count: frameCount)
+                    for sample in samples { accumulator.append(Float(sample) / scale) }
                 }
             }
             return accumulator.result
         }
-
         return nil
     }
 }
 
-/// Display scale for the input-level bar.
-///
-/// A linear RMS amplitude is the wrong thing to use as a fill ratio: ordinary
-/// speech sits around 0.02–0.1 RMS, which fills 2–10% of the bar and looks
-/// broken.  Ears — and every conventional level meter — are logarithmic, so the
-/// bar maps dBFS instead.  The floor is −60 dBFS: quiet room tone lands near
-/// the bottom, normal speech (−30…−18 dBFS) lands in the middle half, and
-/// clipping reaches the right edge.
 enum AudioLevelScale {
-    /// Everything at or below this many dBFS maps to an empty bar.
     static let floorDB: Float = -60
 
-    /// Convert a linear 0…1 amplitude to a 0…1 bar fill ratio on a dBFS scale.
     static func normalized(amplitude: Float) -> Float {
         guard amplitude.isFinite, amplitude > 0 else { return 0 }
         let bounded = min(1, amplitude)
@@ -145,7 +155,6 @@ enum AudioLevelScale {
         return min(1, (decibels - floorDB) / -floorDB)
     }
 
-    /// Convert a measured (linear) sample into the display units the bar draws.
     static func display(for sample: AudioLevelSample) -> AudioLevelSample {
         AudioLevelSample(
             rms: normalized(amplitude: sample.rms),
@@ -154,24 +163,9 @@ enum AudioLevelScale {
     }
 }
 
-/// Decides when a freshly smoothed level is worth pushing to the UI.
-///
-/// The cap used to be 30 Hz while the tap handed over a ~43 ms buffer, so the
-/// throttle never actually fired: the *source* was the limit and the bar
-/// updated at ~23 Hz.  The tap now delivers ~10.7 ms buffers, so the cap is
-/// what sets the rate, and it is raised to 60 Hz to match a normal display.
-/// Deliveries are still skipped while the value is visually unchanged, so a
-/// silent settings page does no drawing work at all.
 enum AudioLevelUpdatePolicy {
-    /// 60 Hz: one delivery per display refresh, and above the ~23 Hz the old
-    /// pairing of a 43 ms tap buffer with a 30 Hz cap could ever reach.
     static let minimumInterval: TimeInterval = 1.0 / 60.0
-    /// Below this the fill moves less than half a point on a 220 pt bar.
-    /// Lower than the previous 0.004 because at 60 Hz the tail of a release
-    /// moves in smaller steps, and gating those out made the bar settle in
-    /// visible jumps.
     static let minimumChange: Float = 0.002
-    /// Even a frozen value is refreshed this often so the bar always settles.
     static let idleRefreshInterval: TimeInterval = 0.5
 
     static func shouldDeliver(
@@ -192,14 +186,6 @@ enum AudioLevelUpdatePolicy {
         return elapsed >= idleRefreshInterval
     }
 
-    /// Deliveries per second a *continuously changing* signal can achieve when
-    /// the tap produces one sample every `sourceInterval` seconds.
-    ///
-    /// The throttle can only drop whole source samples, so the answer is not
-    /// `1 / minimumInterval`: it is the source rate divided by the number of
-    /// source samples that fit inside one minimum interval.  This is the
-    /// number to look at when the bar "feels like a low frame rate", and it is
-    /// why shrinking the tap buffer matters more than raising the cap.
     static func effectiveRate(
         sourceInterval: TimeInterval,
         minimumInterval: TimeInterval = minimumInterval
@@ -211,29 +197,9 @@ enum AudioLevelUpdatePolicy {
     }
 }
 
-/// One-pole attack/release smoothing expressed as *time constants*.
-///
-/// The previous version applied a fixed coefficient per buffer, which made the
-/// filter's behaviour depend on whatever buffer size the HAL happened to hand
-/// over: the same 0.65 attack is ~43 ms of rise at a 2048-frame buffer and
-/// ~11 ms at 512.  Anchoring to seconds keeps attack and release identical
-/// across devices, and is what makes the "is the attack fast enough?" question
-/// answerable in a test rather than by eye.
-///
-/// The values fed in are already on the dBFS display scale, so the
-/// coefficients behave uniformly across the whole range instead of crawling
-/// near silence the way linear-amplitude smoothing does.
 struct AudioLevelSmoother {
-    /// 12 ms: a speech onset is >95 % of the way up within ~36 ms, i.e. inside
-    /// three tap buffers, so the visible delay is the buffer and the display
-    /// refresh rather than the filter.  The old per-buffer 0.65 needed three
-    /// ~43 ms buffers (~130 ms) for the same rise — the reported lag.
     static let defaultAttackSeconds: TimeInterval = 0.012
-    /// 220 ms: falls to ~5 % in about 0.65 s.  Long enough that the bar does
-    /// not flicker between syllables, short enough that it visibly settles
-    /// when the talker stops.
     static let defaultReleaseSeconds: TimeInterval = 0.220
-    /// Used when a caller has no measured buffer duration to offer.
     static let defaultInterval: TimeInterval = 1.0 / 60.0
 
     let attackSeconds: TimeInterval
@@ -248,25 +214,18 @@ struct AudioLevelSmoother {
         self.releaseSeconds = max(0, releaseSeconds)
     }
 
-    /// Fraction of the remaining distance a one-pole filter covers in
-    /// `interval` seconds for the given time constant.
     static func coefficient(timeConstant: TimeInterval, interval: TimeInterval) -> Float {
         guard interval > 0 else { return 0 }
         guard timeConstant > 0 else { return 1 }
         return Float(1 - exp(-interval / timeConstant))
     }
 
-    mutating func reset() {
-        current = .zero
-    }
+    mutating func reset() { current = .zero }
 
     mutating func update(
         _ sample: AudioLevelSample,
         interval: TimeInterval = AudioLevelSmoother.defaultInterval
     ) -> AudioLevelSample {
-        // A buffer duration reported as zero or nonsense must not freeze the
-        // meter, and an absurdly long one (a stalled queue catching up) must
-        // not make the filter overshoot; both are clamped into a sane range.
         let bounded = min(max(interval.isFinite ? interval : 0, 0.001), 0.2)
         current = AudioLevelSample(
             rms: smooth(current.rms, target: sample.rms, interval: bounded),
@@ -280,114 +239,6 @@ struct AudioLevelSmoother {
         let timeConstant = boundedTarget >= current ? attackSeconds : releaseSeconds
         let coefficient = Self.coefficient(timeConstant: timeConstant, interval: interval)
         return current + ((boundedTarget - current) * coefficient)
-    }
-}
-
-/// The monitor and AudioCapture can share this process-local ownership gate during their handoff.
-final class AudioInputLease {
-    let deviceUID: String
-
-    private let token: UUID
-    private let releaseLock = NSLock()
-    private var isReleased = false
-
-    fileprivate init(deviceUID: String, token: UUID) {
-        self.deviceUID = deviceUID
-        self.token = token
-    }
-
-    func release() {
-        releaseLock.lock()
-        guard !isReleased else {
-            releaseLock.unlock()
-            return
-        }
-        isReleased = true
-        releaseLock.unlock()
-        AudioInputLeaseCoordinator.release(deviceUID: deviceUID, token: token)
-    }
-
-    deinit {
-        release()
-    }
-}
-
-enum AudioInputLeaseCoordinator {
-    /// Upper bound on how long a starting capture waits for the level monitor
-    /// to finish letting go of the device.  The wait exists so a handoff that
-    /// is merely slow does not look like a conflict; it is bounded so a stuck
-    /// holder surfaces as a visible failure instead of hanging the app.
-    static let handoffTimeout: TimeInterval = 1.0
-
-    private static let condition = NSCondition()
-    private static var holder: (deviceUID: String, token: UUID)?
-
-    /// True while any audio path in this process owns the input device.
-    static var isHeld: Bool {
-        condition.lock()
-        defer { condition.unlock() }
-        return holder != nil
-    }
-
-    static func acquire(deviceUID: String) throws -> AudioInputLease {
-        try acquire(deviceUID: deviceUID, waitingUpTo: 0)
-    }
-
-    /// Acquire the process-wide input lease, optionally waiting up to
-    /// `timeout` seconds for the current holder to release it.
-    static func acquire(
-        deviceUID: String,
-        waitingUpTo timeout: TimeInterval
-    ) throws -> AudioInputLease {
-        let normalizedUID = deviceUID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedUID.isEmpty else {
-            throw AudioLevelMonitorError.invalidDeviceUID
-        }
-
-        let boundedTimeout = max(0, timeout)
-        let deadline = Date().addingTimeInterval(boundedTimeout)
-
-        condition.lock()
-        defer { condition.unlock() }
-
-        while holder != nil {
-            guard boundedTimeout > 0 else {
-                throw AudioLevelMonitorError.deviceBusy(uid: normalizedUID)
-            }
-            // NSCondition.wait(until:) returns false once the deadline passes.
-            if !condition.wait(until: deadline) { break }
-        }
-        guard holder == nil else {
-            throw AudioLevelMonitorError.deviceHandoffTimedOut(
-                uid: normalizedUID,
-                seconds: boundedTimeout
-            )
-        }
-
-        let token = UUID()
-        holder = (normalizedUID, token)
-        return AudioInputLease(deviceUID: normalizedUID, token: token)
-    }
-
-    /// Wait, bounded, until no audio path holds the device.  Returns false if
-    /// the lease is still held when the timeout expires.
-    @discardableResult
-    static func waitUntilIdle(timeout: TimeInterval = handoffTimeout) -> Bool {
-        let deadline = Date().addingTimeInterval(max(0, timeout))
-        condition.lock()
-        defer { condition.unlock() }
-        while holder != nil {
-            if !condition.wait(until: deadline) { break }
-        }
-        return holder == nil
-    }
-
-    fileprivate static func release(deviceUID: String, token: UUID) {
-        condition.lock()
-        defer { condition.unlock() }
-        guard holder?.deviceUID == deviceUID, holder?.token == token else { return }
-        holder = nil
-        condition.broadcast()
     }
 }
 
@@ -407,8 +258,7 @@ enum AudioLevelMonitorError: LocalizedError, Equatable {
     case permissionDenied
     case deviceCatalogFailed(reason: String)
     case inputDeviceUnavailable(uid: String)
-    case deviceBusy(uid: String)
-    case deviceHandoffTimedOut(uid: String, seconds: TimeInterval)
+    case startCancelled
     case audioUnitUnavailable(name: String, uid: String)
     case deviceConfigurationFailed(name: String, uid: String, reason: String)
     case invalidNativeFormat(name: String, uid: String, sampleRate: Double, channels: Int)
@@ -426,10 +276,8 @@ enum AudioLevelMonitorError: LocalizedError, Equatable {
             return "無法查詢輸入裝置清單：\(reason)"
         case .inputDeviceUnavailable(let uid):
             return "找不到指定的輸入裝置（UID: \(uid)）；沒有改用系統預設裝置。"
-        case .deviceBusy(let uid):
-            return "輸入裝置目前由另一個錄音路徑使用中（UID: \(uid)）。請先停止錄音或電平監看。"
-        case .deviceHandoffTimedOut(let uid, let seconds):
-            return "等待輸入電平監看釋放輸入裝置逾時（UID: \(uid)，已等 \(String(format: "%.1f", seconds)) 秒）。請關閉設定頁面後再試一次。"
+        case .startCancelled:
+            return "輸入電平監看啟動已取消。"
         case .audioUnitUnavailable(let name, let uid):
             return "輸入裝置「\(name)」（UID: \(uid)）沒有可用的音訊單元。"
         case .deviceConfigurationFailed(let name, let uid, let reason):
@@ -445,27 +293,19 @@ enum AudioLevelMonitorError: LocalizedError, Equatable {
 enum AudioLevelMonitorPermissionPolicy {
     static func error(for status: AVAuthorizationStatus) -> AudioLevelMonitorError? {
         switch status {
-        case .authorized:
-            return nil
-        case .notDetermined:
-            return .permissionRequired
-        case .denied, .restricted:
-            return .permissionDenied
-        @unknown default:
-            return .permissionDenied
+        case .authorized: return nil
+        case .notDetermined: return .permissionRequired
+        case .denied, .restricted: return .permissionDenied
+        @unknown default: return .permissionDenied
         }
     }
 
     static func state(for status: AVAuthorizationStatus) -> AudioLevelMonitorState? {
         switch status {
-        case .authorized:
-            return nil
-        case .notDetermined:
-            return .permissionRequired
-        case .denied, .restricted:
-            return .permissionDenied
-        @unknown default:
-            return .permissionDenied
+        case .authorized: return nil
+        case .notDetermined: return .permissionRequired
+        case .denied, .restricted: return .permissionDenied
+        @unknown default: return .permissionDenied
         }
     }
 }
@@ -480,20 +320,31 @@ final class AudioLevelMonitor {
     struct Configuration: Equatable {
         let deviceUID: String
         let deviceName: String?
+        let channelPolicy: AudioChannelPolicy
 
-        init(deviceUID: String, deviceName: String? = nil) {
+        init(
+            deviceUID: String,
+            deviceName: String? = nil,
+            channelPolicy: AudioChannelPolicy = .mixdown
+        ) {
             self.deviceUID = deviceUID.trimmingCharacters(in: .whitespacesAndNewlines)
             self.deviceName = deviceName
+            self.channelPolicy = channelPolicy
         }
     }
 
     private let callbackQueue: DispatchQueue
     private let controlQueue = DispatchQueue(label: "com.tea-asr.audio-level-monitor.control")
+    private let startQueue = DispatchQueue(
+        label: "com.tea-asr.audio-level-monitor.start",
+        qos: .userInitiated
+    )
     private let levelQueue = DispatchQueue(label: "com.tea-asr.audio-level-monitor.level")
     private let stateLock = NSLock()
     private let levelQueueSlots = DispatchSemaphore(value: 2)
     private let deliveryQueueSlots = DispatchSemaphore(value: 2)
     private let noDataTimeout: DispatchTimeInterval
+    private let inputSource: AudioInputSource
 
     private var stateValue: AudioLevelMonitorState = .idle
     private var stateHandler: ((AudioLevelMonitorState) -> Void)?
@@ -504,79 +355,68 @@ final class AudioLevelMonitor {
     private var hasReceivedSample = false
     private var noDataWorkItem: DispatchWorkItem?
     private var smoother = AudioLevelSmoother()
-    /// Throttle bookkeeping; only touched on `levelQueue`.
     private var lastDeliveredSample: AudioLevelSample?
     private var lastDeliveredAt: Date?
-    private var engine: AVAudioEngine?
-    private var lease: AudioInputLease?
-    private var tapInstalled = false
+    private var subscription: AudioInputSource.Subscription?
     private var isActive = false
+    private let startStateLock = NSLock()
+    private var startGeneration: UInt64 = 0
 
     init(
         callbackQueue: DispatchQueue = .main,
-        noDataTimeout: DispatchTimeInterval = .milliseconds(1_500)
+        noDataTimeout: DispatchTimeInterval = .milliseconds(1_500),
+        inputSource: AudioInputSource = .shared
     ) {
         self.callbackQueue = callbackQueue
         self.noDataTimeout = noDataTimeout
+        self.inputSource = inputSource
     }
 
     var onState: ((AudioLevelMonitorState) -> Void)? {
-        get {
-            stateLock.lock()
-            defer { stateLock.unlock() }
-            return stateHandler
-        }
-        set {
-            stateLock.lock()
-            stateHandler = newValue
-            stateLock.unlock()
-        }
+        get { stateLock.withLock { stateHandler } }
+        set { stateLock.withLock { stateHandler = newValue } }
     }
 
     var onLevel: ((AudioLevelSample) -> Void)? {
-        get {
-            stateLock.lock()
-            defer { stateLock.unlock() }
-            return levelHandler
-        }
-        set {
-            stateLock.lock()
-            levelHandler = newValue
-            stateLock.unlock()
-        }
+        get { stateLock.withLock { levelHandler } }
+        set { stateLock.withLock { levelHandler = newValue } }
     }
 
-    var state: AudioLevelMonitorState {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return stateValue
-    }
-
-    var deviceUID: String? {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return selectedUID
-    }
-
-    var deviceName: String? {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return selectedName
-    }
+    var state: AudioLevelMonitorState { stateLock.withLock { stateValue } }
+    var deviceUID: String? { stateLock.withLock { selectedUID } }
+    var deviceName: String? { stateLock.withLock { selectedName } }
 
     func start(configuration: Configuration) throws {
-        stop()
+        let token = beginStartRequest()
+        try startSynchronously(configuration: configuration, token: token)
+    }
 
-        let uid = configuration.deviceUID
-        stateLock.lock()
-        selectedUID = uid
-        selectedName = configuration.deviceName
-        stateLock.unlock()
+    func startAsync(
+        configuration: Configuration,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        let token = beginStartRequest()
+        startQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                try self.startSynchronously(configuration: configuration, token: token)
+                try self.ensureStartRequestIsCurrent(token)
+                self.callbackQueue.async { completion(.success(())) }
+            } catch {
+                self.callbackQueue.async { completion(.failure(error)) }
+            }
+        }
+    }
 
-        guard !uid.isEmpty else {
-            let error = AudioLevelMonitorError.invalidDeviceUID
-            fail(error)
-            throw error
+    private func startSynchronously(
+        configuration: Configuration,
+        token: UInt64
+    ) throws {
+        try ensureStartRequestIsCurrent(token)
+        teardownResources()
+        stateLock.withLock {
+            selectedUID = configuration.deviceUID
+            selectedName = configuration.deviceName
         }
 
         let permissionStatus = AVCaptureDevice.authorizationStatus(for: .audio)
@@ -584,165 +424,127 @@ final class AudioLevelMonitor {
             setState(AudioLevelMonitorPermissionPolicy.state(for: permissionStatus) ?? .failed(permissionError.localizedDescription))
             throw permissionError
         }
-
         setState(.starting)
+        try ensureStartRequestIsCurrent(token)
 
         let records: [AudioInputDeviceCatalog.Record]
         do {
             records = try AudioInputDeviceCatalog.recordsOrThrow()
         } catch {
-            let monitorError = AudioLevelMonitorError.deviceCatalogFailed(
+            let monitorError = AudioLevelMonitorError.deviceCatalogFailed(reason: error.localizedDescription)
+            fail(monitorError)
+            throw monitorError
+        }
+
+        let record: AudioInputDeviceCatalog.Record
+        if configuration.deviceUID.isEmpty {
+            do {
+                record = try AudioInputDeviceCatalog.defaultRecordOrThrow()
+            } catch {
+                let monitorError = AudioLevelMonitorError.deviceCatalogFailed(reason: error.localizedDescription)
+                fail(monitorError)
+                throw monitorError
+            }
+        } else if let selected = records.first(where: { $0.descriptor.uid == configuration.deviceUID }) {
+            record = selected
+        } else {
+            let monitorError = AudioLevelMonitorError.inputDeviceUnavailable(uid: configuration.deviceUID)
+            fail(monitorError)
+            throw monitorError
+        }
+
+        stateLock.withLock {
+            selectedUID = record.descriptor.uid
+            selectedName = record.descriptor.name
+            generation &+= 1
+            hasReceivedSample = false
+            isActive = true
+        }
+        let monitorToken = stateLock.withLock { generation }
+        let sourceConfiguration = AudioInputSourceConfiguration(
+            record: record,
+            channelPolicy: configuration.channelPolicy
+        )
+        try ensureStartRequestIsCurrent(token)
+
+        do {
+            let newSubscription = try inputSource.subscribe(configuration: sourceConfiguration) {
+                [weak self] buffer in
+                self?.enqueue(
+                    buffer: buffer,
+                    duration: buffer.format.sampleRate > 0
+                        ? Double(buffer.frameLength) / buffer.format.sampleRate
+                        : AudioLevelSmoother.defaultInterval,
+                    generation: monitorToken,
+                    channelPolicy: configuration.channelPolicy
+                )
+            }
+            try ensureStartRequestIsCurrent(token)
+            stateLock.withLock { subscription = newSubscription }
+        } catch let error as AudioInputSourceError {
+            let monitorError = mapSourceError(error, record: record)
+            fail(monitorError)
+            throw monitorError
+        } catch {
+            let monitorError = AudioLevelMonitorError.deviceConfigurationFailed(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
                 reason: error.localizedDescription
             )
             fail(monitorError)
             throw monitorError
         }
-        guard let record = records.first(where: { $0.descriptor.uid == uid }) else {
-            let error = AudioLevelMonitorError.inputDeviceUnavailable(uid: uid)
-            fail(error)
-            throw error
-        }
-
-        let name = record.descriptor.name
-        stateLock.lock()
-        selectedName = name
-        generation &+= 1
-        let token = generation
-        hasReceivedSample = false
-        isActive = true
-        stateLock.unlock()
-
-        let acquiredLease: AudioInputLease
-        do {
-            acquiredLease = try AudioInputLeaseCoordinator.acquire(deviceUID: uid)
-        } catch let error as AudioLevelMonitorError {
-            fail(error)
-            throw error
-        } catch {
-            let wrapped = AudioLevelMonitorError.deviceBusy(uid: uid)
-            fail(wrapped)
-            throw wrapped
-        }
-
-        let candidateEngine = AVAudioEngine()
-        let input = candidateEngine.inputNode
-        do {
-            try AudioInputDeviceRouting.configure(deviceID: record.deviceID, on: input)
-        } catch let routingError {
-            acquiredLease.release()
-            let error: AudioLevelMonitorError
-            if let routingError = routingError as? AudioInputRoutingError,
-               case .audioUnitUnavailable = routingError {
-                error = .audioUnitUnavailable(name: name, uid: uid)
-            } else {
-                error = .deviceConfigurationFailed(
-                    name: name,
-                    uid: uid,
-                    reason: routingError.localizedDescription
-                )
-            }
-            fail(error)
-            throw error
-        }
-
-        let nativeFormat = input.outputFormat(forBus: 0)
-        let sampleRate = nativeFormat.sampleRate
-        let channelCount = Int(nativeFormat.channelCount)
-        do {
-            try AudioInputFormatPolicy.validate(
-                sampleRate: sampleRate,
-                channelCount: channelCount,
-                commonFormat: nativeFormat.commonFormat,
-                channelPolicy: .mixdown
-            )
-        } catch {
-            acquiredLease.release()
-            let error = AudioLevelMonitorError.invalidNativeFormat(
-                name: name,
-                uid: uid,
-                sampleRate: sampleRate,
-                channels: channelCount
-            )
-            fail(error)
-            throw error
-        }
-
-        stateLock.lock()
-        engine = candidateEngine
-        lease = acquiredLease
-        stateLock.unlock()
-
-        // 512 rather than 2,048 frames: at 48 kHz that is ~10.7 ms of audio
-        // per measurement instead of ~42.7 ms.  The old size put a hard ~23 Hz
-        // ceiling on the meter no matter what the delivery throttle allowed,
-        // which is what made the bar look like a low-frame-rate widget.  The
-        // work per buffer is an RMS/peak pass over a few hundred floats, so
-        // four times as many callbacks is still negligible, and nothing here
-        // feeds the ASR timeline.
-        input.installTap(onBus: 0, bufferSize: 512, format: nativeFormat) { [weak self] buffer, _ in
-            guard let self, let sample = AudioLevelMath.measure(buffer: buffer) else { return }
-            let duration = buffer.format.sampleRate > 0
-                ? Double(buffer.frameLength) / buffer.format.sampleRate
-                : AudioLevelSmoother.defaultInterval
-            self.enqueue(sample: sample, duration: duration, generation: token)
-        }
-
-        stateLock.lock()
-        tapInstalled = true
-        stateLock.unlock()
-
-        candidateEngine.prepare()
-        do {
-            try candidateEngine.start()
-        } catch {
-            teardownResources()
-            let wrapped = AudioLevelMonitorError.engineStartFailed(
-                name: name,
-                uid: uid,
-                reason: error.localizedDescription
-            )
-            fail(wrapped)
-            throw wrapped
-        }
 
         setState(.monitoring)
-        scheduleNoDataCheck(generation: token)
+        scheduleNoDataCheck(generation: monitorToken)
     }
 
     func stop() {
+        startStateLock.lock()
+        startGeneration &+= 1
+        startStateLock.unlock()
         teardownResources()
         setState(.idle)
     }
 
+    private func beginStartRequest() -> UInt64 {
+        startStateLock.lock()
+        startGeneration &+= 1
+        let token = startGeneration
+        startStateLock.unlock()
+        return token
+    }
+
+    private func ensureStartRequestIsCurrent(_ token: UInt64) throws {
+        startStateLock.lock()
+        let isCurrent = startGeneration == token
+        startStateLock.unlock()
+        guard isCurrent else { throw AudioLevelMonitorError.startCancelled }
+    }
+
     private func enqueue(
-        sample: AudioLevelSample,
+        buffer: AVAudioPCMBuffer,
         duration: TimeInterval,
-        generation token: UInt64
+        generation token: UInt64,
+        channelPolicy: AudioChannelPolicy
     ) {
-        // A full level queue drops only a redundant display sample; it never drops audio frames used by ASR.
         guard levelQueueSlots.wait(timeout: .now()) == .success else { return }
+        guard let copied = buffer.copy() as? AVAudioPCMBuffer else {
+            levelQueueSlots.signal()
+            return
+        }
         levelQueue.async { [weak self] in
             defer { self?.levelQueueSlots.signal() }
-            guard let self, self.isGenerationActive(token) else { return }
+            guard let self, self.isGenerationActive(token),
+                  let sample = AudioLevelMath.measure(buffer: copied, channelPolicy: channelPolicy)
+            else { return }
 
-            self.stateLock.lock()
-            self.hasReceivedSample = true
-            self.stateLock.unlock()
-
-            // Map to the dBFS display scale before smoothing so attack/release
-            // behave the same at speech level and at room-tone level.
-            // The real buffer duration, not a nominal one: attack and release
-            // are time constants, so they stay identical whatever size the
-            // HAL actually hands over.
+            self.stateLock.withLock { self.hasReceivedSample = true }
             let smoothed = self.smoother.update(
                 AudioLevelScale.display(for: sample),
                 interval: duration
             )
-            if self.state == .noData {
-                self.setState(.monitoring)
-            }
-
-            // levelQueue is serial, so this throttle state needs no extra lock.
+            if self.state == .noData { self.setState(.monitoring) }
             let now = Date()
             let elapsed = self.lastDeliveredAt.map { now.timeIntervalSince($0) } ?? .infinity
             guard AudioLevelUpdatePolicy.shouldDeliver(
@@ -752,7 +554,6 @@ final class AudioLevelMonitor {
             ) else { return }
             self.lastDeliveredSample = smoothed
             self.lastDeliveredAt = now
-
             self.deliver(smoothed, generation: token)
         }
     }
@@ -770,43 +571,29 @@ final class AudioLevelMonitor {
     private func scheduleNoDataCheck(generation token: UInt64) {
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, self.isGenerationActive(token) else { return }
-            self.stateLock.lock()
-            let shouldPublish = AudioLevelMonitorNoDataPolicy.shouldPublishNoData(
-                hasReceivedSample: self.hasReceivedSample
-            )
-            self.stateLock.unlock()
-            if shouldPublish {
-                self.setState(.noData)
+            let shouldPublish = self.stateLock.withLock {
+                AudioLevelMonitorNoDataPolicy.shouldPublishNoData(hasReceivedSample: self.hasReceivedSample)
             }
+            if shouldPublish { self.setState(.noData) }
         }
-        stateLock.lock()
-        noDataWorkItem?.cancel()
-        noDataWorkItem = workItem
-        stateLock.unlock()
+        stateLock.withLock {
+            noDataWorkItem?.cancel()
+            noDataWorkItem = workItem
+        }
         controlQueue.asyncAfter(deadline: .now() + noDataTimeout, execute: workItem)
     }
 
     private func teardownResources() {
-        stateLock.lock()
-        isActive = false
-        generation &+= 1
-        noDataWorkItem?.cancel()
-        noDataWorkItem = nil
-        let activeEngine = engine
-        let hadTap = tapInstalled
-        let activeLease = lease
-        engine = nil
-        tapInstalled = false
-        lease = nil
-        stateLock.unlock()
-
-        // Invalidate callbacks before touching the engine so a queued tap cannot publish during teardown.
-        if hadTap {
-            activeEngine?.inputNode.removeTap(onBus: 0)
+        let activeSubscription: AudioInputSource.Subscription? = stateLock.withLock {
+            isActive = false
+            generation &+= 1
+            noDataWorkItem?.cancel()
+            noDataWorkItem = nil
+            let active = subscription
+            subscription = nil
+            return active
         }
-        activeEngine?.stop()
-        activeLease?.release()
-
+        activeSubscription?.cancel()
         levelQueue.async { [weak self] in
             self?.smoother.reset()
             self?.lastDeliveredSample = nil
@@ -814,13 +601,31 @@ final class AudioLevelMonitor {
         }
     }
 
-    /// Wait, bounded, until this process no longer holds the input device.
-    /// AudioCapture uses this so a start never races a monitor teardown.
-    @discardableResult
-    static func waitForInputHandoff(
-        timeout: TimeInterval = AudioInputLeaseCoordinator.handoffTimeout
-    ) -> Bool {
-        AudioInputLeaseCoordinator.waitUntilIdle(timeout: timeout)
+    private func mapSourceError(
+        _ error: AudioInputSourceError,
+        record: AudioInputDeviceCatalog.Record
+    ) -> AudioLevelMonitorError {
+        switch error {
+        case .invalidFormat:
+            return .invalidNativeFormat(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                sampleRate: 0,
+                channels: record.descriptor.inputChannels
+            )
+        case .engineStartFailed(_, _, let reason):
+            return .engineStartFailed(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                reason: reason
+            )
+        default:
+            return .deviceConfigurationFailed(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                reason: error.localizedDescription
+            )
+        }
     }
 
     private func fail(_ error: AudioLevelMonitorError) {
@@ -829,25 +634,28 @@ final class AudioLevelMonitor {
     }
 
     private func isGenerationActive(_ token: UInt64) -> Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return isActive && generation == token
+        stateLock.withLock { isActive && generation == token }
     }
 
     private func setState(_ newState: AudioLevelMonitorState) {
-        stateLock.lock()
-        stateValue = newState
-        let handler = stateHandler
-        stateLock.unlock()
-        guard let handler else { return }
-        callbackQueue.async {
-            handler(newState)
+        let handler = stateLock.withLock { () -> ((AudioLevelMonitorState) -> Void)? in
+            stateValue = newState
+            return stateHandler
+        }
+        if let handler {
+            callbackQueue.async { handler(newState) }
         }
     }
 
     private func levelHandlerSnapshot() -> ((AudioLevelSample) -> Void)? {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return levelHandler
+        stateLock.withLock { levelHandler }
+    }
+}
+
+private extension NSLock {
+    func withLock<T>(_ body: () -> T) -> T {
+        lock()
+        defer { unlock() }
+        return body()
     }
 }

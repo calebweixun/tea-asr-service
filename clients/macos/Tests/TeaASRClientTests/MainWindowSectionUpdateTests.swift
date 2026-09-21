@@ -193,23 +193,34 @@ final class MainWindowSectionUpdateTests: XCTestCase {
         XCTAssertTrue(controller.debugLabelTexts().contains("輸入電平"), "設定頁應有「輸入電平」標籤")
     }
 
-    /// 驗證 ASR 開始時電平監看停止，ASR 結束回到 idle 時電平監看重啟。
+    /// 驗證 ASR 開始時不會拆掉設定頁的電平監看；兩者現在共享同一
+    /// 個輸入來源，回到 idle 也不需要額外重啟。
     @MainActor
-    func testAudioLevelMonitorStopsWhenASRStartsAndRestartsWhenIdle() {
+    func testAudioLevelMonitorRemainsActiveWhileASRStarts() {
         let appState = AppState()
         let controller = makeController(appState: appState)
         controller.show(section: .settings)
 
+        let countBeforeASR = controller.debugMonitorStartCount
+
         // 開始 ASR（模式非 idle）
         appState.setMode(.dictation)
         controller.refresh()
-        XCTAssertEqual(controller.debugAudioLevelMonitor.state, .idle, "ASR 開始時 monitor 必須停止")
+        XCTAssertEqual(
+            controller.debugMonitorStartCount,
+            countBeforeASR,
+            "ASR 開始時不應停止並重啟設定頁 monitor"
+        )
 
         // ASR 結束回到 idle
         let countBeforeIdle = controller.debugMonitorStartCount
         appState.setMode(.idle)
         controller.refresh()
-        XCTAssertGreaterThan(controller.debugMonitorStartCount, countBeforeIdle, "ASR 結束且在設定頁時 monitor 應重啟")
+        XCTAssertEqual(
+            controller.debugMonitorStartCount,
+            countBeforeIdle,
+            "共享輸入源不需要因為 ASR 結束而重啟 monitor"
+        )
     }
 
     @MainActor

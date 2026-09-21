@@ -88,23 +88,6 @@ final class AudioLevelMonitorTests: XCTestCase {
         XCTAssertNil(AudioLevelMonitorPermissionPolicy.error(for: .authorized))
     }
 
-    func testInputLeaseRejectsASecondAudioPathEvenForAnotherDevice() throws {
-        let first = try AudioInputLeaseCoordinator.acquire(
-            deviceUID: "test-lease-\(UUID().uuidString)"
-        )
-        defer { first.release() }
-
-        XCTAssertThrowsError(
-            try AudioInputLeaseCoordinator.acquire(
-                deviceUID: "test-other-\(UUID().uuidString)"
-            )
-        ) { error in
-            guard case .deviceBusy = error as? AudioLevelMonitorError else {
-                return XCTFail("expected process-wide input lease failure, got \(error)")
-            }
-        }
-    }
-
     func testLevelBarExposesAStableControlSizeAndPermissionState() {
         let view = AudioLevelBarView()
 
