@@ -13,62 +13,130 @@ final class AudioHandoffTests: XCTestCase {
         commonFormat: .pcmFormatFloat32
     )
 
-    // MARK: - Lease handoff timing
+    // MARK: - Shared input-source lifecycle
 
-    func testCaptureWaitsForTheMonitorToReleaseTheDeviceAndThenStarts() throws {
-        let uid = "handoff-\(UUID().uuidString)"
-        let monitorLease = try AudioInputLeaseCoordinator.acquire(deviceUID: uid)
-        XCTAssertTrue(AudioInputLeaseCoordinator.isHeld)
-
-        // The monitor teardown finishes shortly after dictation is requested.
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) {
-            monitorLease.release()
-        }
-
-        let captureLease = try AudioInputLeaseCoordinator.acquire(
+    private func configuration(
+        uid: String,
+        channelPolicy: AudioChannelPolicy = .mixdown
+    ) -> AudioInputSourceLifecycle.Configuration {
+        AudioInputSourceLifecycle.Configuration(
             deviceUID: uid,
-            waitingUpTo: 2.0
+            channelPolicy: channelPolicy
         )
-        defer { captureLease.release() }
-
-        XCTAssertEqual(captureLease.deviceUID, uid)
     }
 
-    func testCaptureFailsWithAnExplicitTimeoutWhenTheMonitorNeverReleases() throws {
-        let uid = "stuck-\(UUID().uuidString)"
-        let stuckLease = try AudioInputLeaseCoordinator.acquire(deviceUID: uid)
-        defer { stuckLease.release() }
+    func testLevelAndCaptureConsumersShareOneOpenAndCloseAfterLastDetach() throws {
+        var openCount = 0
+        var closeCount = 0
+        var levelBuffers: [Data] = []
+        var captureBuffers: [Data] = []
+        let source = AudioInputSourceLifecycle(
+            open: { _ in openCount += 1 },
+            close: { closeCount += 1 },
+            reconfigure: { _ in }
+        )
+        let config = configuration(uid: "shared-\(UUID().uuidString)")
+
+        let level = try source.attach(configuration: config) { levelBuffers.append($0) }
+        let capture = try source.attach(configuration: config) { captureBuffers.append($0) }
+        source.publish(Data([1, 2, 3]))
+
+        XCTAssertEqual(openCount, 1, "two consumers must open one input resource")
+        XCTAssertEqual(levelBuffers, [Data([1, 2, 3])])
+        XCTAssertEqual(captureBuffers, [Data([1, 2, 3])])
+        XCTAssertEqual(source.consumerCount, 2)
+
+        try source.detach(level)
+        XCTAssertTrue(source.isOpen, "the recording consumer still owns the source")
+        XCTAssertEqual(closeCount, 0)
+        try source.detach(capture)
+        XCTAssertFalse(source.isOpen)
+        XCTAssertEqual(closeCount, 1, "the last consumer must release the input")
+    }
+
+    func testMeterConsumerCannotDropRecordingConsumerBuffers() throws {
+        var meterCount = 0
+        var recordingBuffers: [Data] = []
+        let source = AudioInputSourceLifecycle(
+            open: { _ in },
+            close: {},
+            reconfigure: { _ in }
+        )
+        let config = configuration(uid: "fanout-\(UUID().uuidString)")
+        let meter = try source.attach(configuration: config) { _ in meterCount += 1 }
+        let recording = try source.attach(configuration: config) { recordingBuffers.append($0) }
+
+        for value in 0..<4 { source.publish(Data([UInt8(value)])) }
+
+        XCTAssertEqual(meterCount, 4)
+        XCTAssertEqual(recordingBuffers, (0..<4).map { Data([UInt8($0)]) })
+        try source.detach(meter)
+        try source.detach(recording)
+    }
+
+    func testChangingDeviceOrChannelReconfiguresTheSharedSource() throws {
+        var opened: [AudioInputSourceLifecycle.Configuration] = []
+        var reconfigured: [AudioInputSourceLifecycle.Configuration] = []
+        var closeCount = 0
+        let source = AudioInputSourceLifecycle(
+            open: { opened.append($0) },
+            close: { closeCount += 1 },
+            reconfigure: { reconfigured.append($0) }
+        )
+        let consumer = try source.attach(
+            configuration: configuration(uid: "device-a", channelPolicy: .mixdown),
+            handler: { _ in }
+        )
+        try source.update(
+            consumer,
+            configuration: configuration(uid: "device-a", channelPolicy: .channel(1))
+        )
+        try source.update(
+            consumer,
+            configuration: configuration(uid: "device-b", channelPolicy: .channel(1))
+        )
+
+        XCTAssertEqual(opened.count, 1)
+        XCTAssertEqual(reconfigured, [
+            configuration(uid: "device-a", channelPolicy: .channel(1)),
+            configuration(uid: "device-b", channelPolicy: .channel(1))
+        ])
+        XCTAssertEqual(source.activeConfiguration, configuration(uid: "device-b", channelPolicy: .channel(1)))
+        try source.detach(consumer)
+        XCTAssertEqual(closeCount, 3, "each configuration switch closes the old stream and the final detach closes the new one")
+    }
+
+    func testMismatchedSecondConsumerFailsWithoutOpeningAnotherDevice() throws {
+        var openCount = 0
+        let source = AudioInputSourceLifecycle(
+            open: { _ in openCount += 1 },
+            close: {},
+            reconfigure: { _ in }
+        )
+        let first = try source.attach(configuration: configuration(uid: "first")) { _ in }
 
         XCTAssertThrowsError(
-            try AudioInputLeaseCoordinator.acquire(deviceUID: uid, waitingUpTo: 0.2)
+            try source.attach(configuration: configuration(uid: "second")) { _ in }
         ) { error in
-            guard case .deviceHandoffTimedOut(let reportedUID, let seconds)? =
-                error as? AudioLevelMonitorError else {
-                return XCTFail("expected a bounded handoff timeout, got \(error)")
+            guard case .configurationConflict = error as? AudioInputSourceLifecycle.Error else {
+                return XCTFail("expected an explicit shared-source configuration conflict")
             }
-            XCTAssertEqual(reportedUID, uid)
-            XCTAssertEqual(seconds, 0.2, accuracy: 0.0001)
         }
+        XCTAssertEqual(openCount, 1)
+        try source.detach(first)
     }
 
-    func testHandoffTimeoutMessageNamesTheDeviceAndRulesOutASilentFallback() {
-        let message = AudioCapture.CaptureError.inputHandoffTimedOut(
-            name: "MacBook Pro的麥克風",
-            uid: "BuiltInMicrophoneDevice",
-            seconds: 1.0
-        ).localizedDescription
-
-        XCTAssertTrue(message.contains("MacBook Pro的麥克風"))
-        XCTAssertTrue(message.contains("BuiltInMicrophoneDevice"))
-        XCTAssertTrue(message.contains("沒有改用其他裝置"))
-    }
-
-    func testWaitUntilIdleReportsWhetherTheDeviceWasActuallyReleased() throws {
-        let uid = "idle-\(UUID().uuidString)"
-        let lease = try AudioInputLeaseCoordinator.acquire(deviceUID: uid)
-        XCTAssertFalse(AudioInputLeaseCoordinator.waitUntilIdle(timeout: 0.05))
-        lease.release()
-        XCTAssertTrue(AudioLevelMonitor.waitForInputHandoff(timeout: 0.05))
+    func testSharedSourceRejectsUnknownConsumerWithoutChangingOpenState() throws {
+        let source = AudioInputSourceLifecycle(
+            open: { _ in },
+            close: {},
+            reconfigure: { _ in }
+        )
+        let missing = UUID()
+        XCTAssertThrowsError(try source.detach(missing)) { error in
+            XCTAssertEqual(error as? AudioInputSourceLifecycle.Error, .unknownConsumer)
+        }
+        XCTAssertFalse(source.isOpen)
     }
 
     // MARK: - Engine reconfiguration policy

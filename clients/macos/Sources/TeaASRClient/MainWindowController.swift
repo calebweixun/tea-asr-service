@@ -461,31 +461,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// Release the microphone before a dictation session starts.
-    ///
-    /// This used to `orderOut` the window and `NSApp.hide(nil)` as well, so
-    /// that TEA ASR could not become the paste target. It no longer does, for
-    /// two reasons. The guard against pasting into ourselves does not depend
-    /// on it: `TextInjector.captureFocusedTarget(excluding:)` refuses to
-    /// record this process as a target at all, and `insert(_:ifCurrent:)` only
-    /// pastes when the *captured* pid still owns focus — so a final can never
-    /// reach a TEA ASR window whether it is visible or not. And hiding cost
-    /// the user their window on every hot-key press, while repeating
-    /// `NSApp.hide` / `NSApp.activate(ignoringOtherApps:)` on an `.accessory`
-    /// app churned the activation state for no benefit.
-    ///
-    /// What does still have to happen here is the level meter letting go of
-    /// the process-wide input lease, because `AudioCapture.start` is about to
-    /// ask for the same device and would otherwise block the main thread for
-    /// `AudioInputLeaseCoordinator.handoffTimeout`.
+    /// Kept as a session-start hook for AppController.  The level monitor and
+    /// recorder now subscribe to one process-wide input source, so starting a
+    /// dictation session must not stop the settings meter.
     func hideForDictation() {
-        stopAudioLevelMonitor()
+        // TextInjector captures the target before this hook is called.  There
+        // is intentionally no audio work here.
     }
 
     func refresh() {
-        if appState.mode != .idle {
-            stopAudioLevelMonitor()
-        } else if selectedSection == .settings && isWindowOpen {
+        if selectedSection == .settings && isWindowOpen {
             if audioLevelMonitor.state == .idle {
                 startAudioLevelMonitor()
             }
@@ -548,9 +533,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func setAudioDiagnostics(_ diagnostics: AudioDiagnostics) {
-        if diagnostics.isRunning {
-            stopAudioLevelMonitor()
-        }
         audioDiagnostics = diagnostics
         // AudioCapture emits one snapshot per tap buffer (can be well over
         // 100/sec). Applying an update is now cheap — it assigns a string to
@@ -1843,7 +1825,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if appState.mode == .dictation {
             onStopSession?()
         } else {
-            stopAudioLevelMonitor()
             onStartDictation?()
         }
     }
@@ -1852,7 +1833,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if appState.mode == .meeting {
             onStopSession?()
         } else {
-            stopAudioLevelMonitor()
             onStartMeeting?()
         }
     }
@@ -1996,54 +1976,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private func startAudioLevelMonitor() {
         stopAudioLevelMonitor()
 
-        guard selectedSection == .settings, isWindowOpen, appState.mode == .idle else { return }
+        guard selectedSection == .settings, isWindowOpen else { return }
 
         #if DEBUG
         monitorStartCount += 1
         #endif
 
-        let targetUID: String
-        let targetName: String?
-
         let controls = controlsInSettingsView()
         let rawSelectedUID = controls.inputDevice?.selectedItem?.representedObject as? String
         let selectedUID = rawSelectedUID ?? settings.inputDeviceUID ?? AudioInputDevice.systemDefaultUID
-
-        if !selectedUID.isEmpty && selectedUID != AudioInputDevice.systemDefaultUID {
-            targetUID = selectedUID
-            targetName = controls.inputDevice?.selectedItem?.title
-        } else {
-            // 系統預設要先用 AudioInputDeviceCatalog.defaultRecordOrThrow() 解析成實際 UID，不要傳空 UID。
-            let enumeration = AudioInputDeviceCatalog.enumerationResult()
-            switch enumeration {
-            case .success(let devices) where devices.isEmpty:
-                audioLevelBar.setState(.failed("CoreAudio 未回報任何輸入裝置（裝置清單為 0 bytes）。"))
-                return
-            case .failure(let error):
-                audioLevelBar.setState(.failed(error.localizedDescription))
-                return
-            case .success:
-                break
-            }
-            do {
-                let defaultRecord = try AudioInputDeviceCatalog.defaultRecordOrThrow()
-                targetUID = defaultRecord.descriptor.uid
-                targetName = defaultRecord.descriptor.name
-            } catch {
-                audioLevelBar.setState(.failed(error.localizedDescription))
-                return
-            }
-        }
-
-        do {
-            try audioLevelMonitor.start(
-                configuration: .init(deviceUID: targetUID, deviceName: targetName)
-            )
-        } catch {
-            if audioLevelMonitor.state == .idle {
-                audioLevelBar.setState(.failed(error.localizedDescription))
-            } else {
-                audioLevelBar.setState(audioLevelMonitor.state)
+        let selectedName = controls.inputDevice?.selectedItem?.title
+        let configuration = AudioLevelMonitor.Configuration(
+            deviceUID: selectedUID,
+            deviceName: selectedName,
+            channelPolicy: settings.inputChannelPolicy
+        )
+        audioLevelMonitor.startAsync(configuration: configuration) { [weak self] result in
+            guard let self else { return }
+            guard self.selectedSection == .settings, self.isWindowOpen else { return }
+            if case .failure(let error) = result,
+               let monitorError = error as? AudioLevelMonitorError,
+               case .startCancelled = monitorError { return }
+            if case .failure(let error) = result,
+               self.audioLevelMonitor.state == .idle {
+                self.audioLevelBar.setState(.failed(error.localizedDescription))
             }
         }
     }

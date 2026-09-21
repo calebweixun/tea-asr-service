@@ -51,10 +51,9 @@ enum AudioEngineConfigurationChangeDecision: Equatable {
 }
 
 /// Why `AVAudioEngineConfigurationChange` cannot be treated as "the device
-/// changed": AVAudioEngine posts it for our *own* reconfiguration too.  Setting
-/// `kAudioOutputUnitProperty_CurrentDevice` during start, and the HAL settling
-/// after the level monitor releases the same microphone, both produce one —
-/// asynchronously on the main queue, i.e. after the session is already running.
+/// changed": AVAudioEngine posts it for our *own* reconfiguration too. Setting
+/// `kAudioOutputUnitProperty_CurrentDevice` during shared-source start can
+/// produce one asynchronously after the session is already running.
 ///
 /// Treating those as an external device switch is what aborts dictation started
 /// from the settings page.  The silent-fallback guard from docs/06 still has to
@@ -112,7 +111,7 @@ final class AudioCapture {
         case inputDeviceUnavailable(uid: String)
         case deviceCatalogFailed(uid: String?, reason: String)
         case deviceConfigurationFailed(name: String, uid: String, reason: String)
-        case inputHandoffTimedOut(name: String, uid: String, seconds: TimeInterval)
+        case startCancelled
         case formatUnavailable(name: String, uid: String, sampleRate: Double, channels: Int, reason: String)
         case channelUnavailable(name: String, uid: String, policy: AudioChannelPolicy, available: Int)
         case engineStartFailed(name: String, uid: String, reason: String)
@@ -136,8 +135,8 @@ final class AudioCapture {
                 return "無法查詢輸入裝置：\(reason)"
             case .deviceConfigurationFailed(let name, let uid, let reason):
                 return "無法使用輸入裝置「\(name)」（UID: \(uid)）：\(reason) 請改選其他裝置後再試。"
-            case .inputHandoffTimedOut(let name, let uid, let seconds):
-                return "輸入裝置「\(name)」（UID: \(uid)）仍被輸入電平監看佔用，等待 \(String(format: "%.1f", seconds)) 秒後仍未釋放；沒有改用其他裝置。請離開設定頁面後再開始錄音。"
+            case .startCancelled:
+                return "錄音啟動已取消。"
             case .formatUnavailable(let name, let uid, let sampleRate, let channels, let reason):
                 return "輸入裝置「\(name)」（UID: \(uid)）回報無法使用的格式（\(sampleRate) Hz、\(channels) 聲道）：\(reason)"
             case .channelUnavailable(let name, let uid, let policy, let available):
@@ -152,11 +151,17 @@ final class AudioCapture {
         }
     }
 
-    private let engine = AVAudioEngine()
-    private var activeInputNode: AVAudioInputNode?
+    private let inputSource: AudioInputSource
+    private let startQueue = DispatchQueue(
+        label: "com.tea-asr.audio-capture.start",
+        qos: .userInitiated
+    )
+    private let audioEventQueue = DispatchQueue(
+        label: "com.tea-asr.audio-capture.events",
+        qos: .utility
+    )
     private var converter: AVAudioConverter?
-    private var tapInstalled = false
-    private var inputLease: AudioInputLease?
+    private var subscription: AudioInputSource.Subscription?
     private var pending = Data()
     private let lock = NSLock()
     private let frameBytes = Wire.frameSamples * 2
@@ -164,7 +169,7 @@ final class AudioCapture {
         label: "com.tea-asr.audio-capture.processing",
         qos: .userInitiated
     )
-    private let processingQueueKey = DispatchSpecificKey<Void>()
+    private let processingStateLock = NSLock()
     private let processingQueueSlots = DispatchSemaphore(value: 4)
     private var processingGeneration: UInt64 = 0
     private var processingActive = false
@@ -187,6 +192,8 @@ final class AudioCapture {
     private var deviceAliveListener: AudioObjectPropertyListenerBlock?
     private var deviceAliveAddress: AudioObjectPropertyAddress?
     private var monitoredDeviceID: AudioDeviceID?
+    private let startStateLock = NSLock()
+    private var startGeneration: UInt64 = 0
 
     /// Called from the capture processing queue with exactly one frame of PCM.
     var onFrame: ((Data) -> Void)?
@@ -199,8 +206,8 @@ final class AudioCapture {
 
     private(set) var isRunning = false
 
-    init() {
-        processingQueue.setSpecific(key: processingQueueKey, value: ())
+    init(inputSource: AudioInputSource = .shared) {
+        self.inputSource = inputSource
     }
 
     static func requestPermission(_ completion: @escaping (Bool) -> Void) {
@@ -218,6 +225,39 @@ final class AudioCapture {
 
     func start(configuration: AudioInputConfiguration = .default) throws {
         guard !isRunning else { return }
+        let token = beginStartRequest()
+        try startSynchronously(configuration: configuration, token: token)
+    }
+
+    /// Device enumeration, CoreAudio routing, engine start, and converter
+    /// construction are deliberately kept off the main queue.  The callback
+    /// is delivered on main because AppController owns UI/session state.
+    func startAsync(
+        configuration: AudioInputConfiguration = .default,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        guard !isRunning else {
+            DispatchQueue.main.async { completion(.success(())) }
+            return
+        }
+        let token = beginStartRequest()
+        startQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                try self.startSynchronously(configuration: configuration, token: token)
+                try self.ensureStartRequestIsCurrent(token)
+                DispatchQueue.main.async { completion(.success(())) }
+            } catch {
+                DispatchQueue.main.async { completion(.failure(error)) }
+            }
+        }
+    }
+
+    private func startSynchronously(
+        configuration: AudioInputConfiguration,
+        token: UInt64
+    ) throws {
+        try ensureStartRequestIsCurrent(token)
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
             throw CaptureError.permissionDenied
         }
@@ -230,6 +270,14 @@ final class AudioCapture {
         failureGate.reset()
         lastError = nil
         lock.unlock()
+
+        var didStart = false
+        defer {
+            if !didStart {
+                teardownCapture()
+                publishDiagnostics()
+            }
+        }
 
         let records: [AudioInputDeviceCatalog.Record]
         do {
@@ -312,100 +360,8 @@ final class AudioCapture {
             )
         }
 
-        // Do not touch AVAudioEngine.inputNode until the strict CoreAudio
-        // preflight above has found a real device.  On a host with no audio
-        // objects AVFAudio raises an Objective-C exception here instead of a
-        // Swift error, so this ordering is part of the failure policy.
-        let input = engine.inputNode
-
-        // Starting dictation straight from the settings page hands the device
-        // over from the level monitor.  The monitor is stopped first, but its
-        // teardown can still be finishing, so wait — bounded, never forever —
-        // for the process-wide lease instead of failing on a transient busy.
-        let acquiredLease: AudioInputLease
-        do {
-            acquiredLease = try AudioInputLeaseCoordinator.acquire(
-                deviceUID: record.descriptor.uid,
-                waitingUpTo: AudioInputLeaseCoordinator.handoffTimeout
-            )
-        } catch let error as AudioLevelMonitorError {
-            if case .deviceHandoffTimedOut(_, let seconds) = error {
-                throw CaptureError.inputHandoffTimedOut(
-                    name: record.descriptor.name,
-                    uid: record.descriptor.uid,
-                    seconds: seconds
-                )
-            }
-            throw CaptureError.deviceConfigurationFailed(
-                name: record.descriptor.name,
-                uid: record.descriptor.uid,
-                reason: error.localizedDescription
-            )
-        } catch {
-            throw CaptureError.deviceConfigurationFailed(
-                name: record.descriptor.name,
-                uid: record.descriptor.uid,
-                reason: error.localizedDescription
-            )
-        }
-        inputLease = acquiredLease
-        var leaseCommitted = false
-        defer {
-            if !leaseCommitted {
-                teardownCapture()
-                acquiredLease.release()
-            }
-        }
+        try ensureStartRequestIsCurrent(token)
         let processingToken = beginProcessingSession()
-
-        // Apply this even for System Default. The same AVAudioEngine is reused
-        // after stop(), and an earlier explicit device selection must not leak
-        // into a later default-device session.
-        do {
-            try AudioInputDeviceRouting.configure(deviceID: record.deviceID, on: input)
-        } catch {
-            throw CaptureError.deviceConfigurationFailed(
-                name: record.descriptor.name,
-                uid: record.descriptor.uid,
-                reason: error.localizedDescription
-            )
-        }
-
-        let inputFormat = input.outputFormat(forBus: 0)
-        let inputChannelCount = Int(inputFormat.channelCount)
-        do {
-            try AudioInputFormatPolicy.validate(
-                sampleRate: inputFormat.sampleRate,
-                channelCount: inputChannelCount,
-                commonFormat: inputFormat.commonFormat,
-                channelPolicy: configuration.channelPolicy
-            )
-        } catch let error as AudioInputFormatError {
-            if case .channelOutOfBounds = error {
-                throw CaptureError.channelUnavailable(
-                    name: record.descriptor.name,
-                    uid: record.descriptor.uid,
-                    policy: configuration.channelPolicy,
-                    available: inputChannelCount
-                )
-            }
-            throw CaptureError.formatUnavailable(
-                name: record.descriptor.name,
-                uid: record.descriptor.uid,
-                sampleRate: inputFormat.sampleRate,
-                channels: inputChannelCount,
-                reason: error.localizedDescription
-            )
-        } catch {
-            throw CaptureError.formatUnavailable(
-                name: record.descriptor.name,
-                uid: record.descriptor.uid,
-                sampleRate: inputFormat.sampleRate,
-                channels: inputChannelCount,
-                reason: error.localizedDescription
-            )
-        }
-        inputDeviceName = record.descriptor.name
 
         guard let target = AVAudioFormat(
             commonFormat: .pcmFormatInt16,
@@ -416,71 +372,111 @@ final class AudioCapture {
             throw CaptureError.formatUnavailable(
                 name: record.descriptor.name,
                 uid: record.descriptor.uid,
-                sampleRate: inputFormat.sampleRate,
-                channels: inputChannelCount,
+                sampleRate: 0,
+                channels: record.descriptor.inputChannels,
                 reason: "無法建立服務需要的 16 kHz mono PCM16 目標格式"
             )
         }
-        guard let monoFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: inputFormat.sampleRate,
-            channels: 1,
-            interleaved: false
-        ) else {
-            throw CaptureError.formatUnavailable(
-                name: record.descriptor.name,
-                uid: record.descriptor.uid,
-                sampleRate: inputFormat.sampleRate,
-                channels: inputChannelCount,
-                reason: "無法建立裝置原生取樣率的 mono Float32 格式"
+
+        var preparedConverter: AVAudioConverter?
+        let newSubscription: AudioInputSource.Subscription
+        do {
+            newSubscription = try inputSource.subscribe(
+                configuration: AudioInputSourceConfiguration(
+                    record: record,
+                    channelPolicy: configuration.channelPolicy
+                ),
+                prepare: { [weak self] inputFormat in
+                    let inputChannelCount = Int(inputFormat.channelCount)
+                    do {
+                        try AudioInputFormatPolicy.validate(
+                            sampleRate: inputFormat.sampleRate,
+                            channelCount: inputChannelCount,
+                            commonFormat: inputFormat.commonFormat,
+                            channelPolicy: configuration.channelPolicy
+                        )
+                    } catch let error as AudioInputFormatError {
+                        if case .channelOutOfBounds = error {
+                            throw CaptureError.channelUnavailable(
+                                name: record.descriptor.name,
+                                uid: record.descriptor.uid,
+                                policy: configuration.channelPolicy,
+                                available: inputChannelCount
+                            )
+                        }
+                        throw CaptureError.formatUnavailable(
+                            name: record.descriptor.name,
+                            uid: record.descriptor.uid,
+                            sampleRate: inputFormat.sampleRate,
+                            channels: inputChannelCount,
+                            reason: error.localizedDescription
+                        )
+                    } catch {
+                        throw CaptureError.formatUnavailable(
+                            name: record.descriptor.name,
+                            uid: record.descriptor.uid,
+                            sampleRate: inputFormat.sampleRate,
+                            channels: inputChannelCount,
+                            reason: error.localizedDescription
+                        )
+                    }
+                    guard let monoFormat = AVAudioFormat(
+                        commonFormat: .pcmFormatFloat32,
+                        sampleRate: inputFormat.sampleRate,
+                        channels: 1,
+                        interleaved: false
+                    ) else {
+                        throw CaptureError.formatUnavailable(
+                            name: record.descriptor.name,
+                            uid: record.descriptor.uid,
+                            sampleRate: inputFormat.sampleRate,
+                            channels: inputChannelCount,
+                            reason: "無法建立裝置原生取樣率的 mono Float32 格式"
+                        )
+                    }
+                    guard let converter = AVAudioConverter(from: monoFormat, to: target) else {
+                        throw CaptureError.converterUnavailable(
+                            name: record.descriptor.name,
+                            uid: record.descriptor.uid,
+                            sourceSampleRate: inputFormat.sampleRate
+                        )
+                    }
+                    converter.sampleRateConverterQuality = AVAudioQuality.high.rawValue
+                    preparedConverter = converter
+                    self?.inputDeviceName = record.descriptor.name
+                },
+                handler: { [weak self] buffer in
+                    guard let converter = preparedConverter else { return }
+                    self?.enqueue(
+                        buffer: buffer,
+                        converter: converter,
+                        target: target,
+                        channelPolicy: configuration.channelPolicy,
+                        generation: processingToken,
+                        deviceName: record.descriptor.name,
+                        deviceUID: record.descriptor.uid
+                    )
+                }
             )
+        } catch let error as AudioInputSourceError {
+            throw mapSourceError(error, record: record)
         }
-        guard let converter = AVAudioConverter(from: monoFormat, to: target) else {
+        try ensureStartRequestIsCurrent(token)
+        let inputFormat = newSubscription.inputFormat
+        guard let converter = preparedConverter else {
             throw CaptureError.converterUnavailable(
                 name: record.descriptor.name,
                 uid: record.descriptor.uid,
                 sourceSampleRate: inputFormat.sampleRate
             )
         }
-        converter.sampleRateConverterQuality = AVAudioQuality.high.rawValue
         self.converter = converter
-
-        input.installTap(onBus: 0, bufferSize: 4_096, format: inputFormat) { [weak self] buffer, _ in
-            self?.enqueue(
-                buffer: buffer,
-                converter: converter,
-                target: target,
-                channelPolicy: configuration.channelPolicy,
-                generation: processingToken,
-                deviceName: record.descriptor.name,
-                deviceUID: record.descriptor.uid
-            )
-        }
-        activeInputNode = input
-        tapInstalled = true
-        engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            // installTap mutates the input node even when engine.start() fails
-            // (for example when an audio device disappears). Remove it before
-            // returning so a permission/device retry does not hit "tap already
-            // installed" on the next start attempt.
-            teardownCapture()
-            publishDiagnostics()
-            let nsError = error as NSError
-            throw CaptureError.engineStartFailed(
-                name: record.descriptor.name,
-                uid: record.descriptor.uid,
-                reason: "\(nsError.localizedDescription)（domain: \(nsError.domain), code: \(nsError.code)）"
-            )
-        }
+        subscription = newSubscription
         isRunning = true
         activeConfiguration = configuration
         activeDevice = record
         activeInputFormat = AudioInputFormatSignature(inputFormat)
         monitoredDeviceID = record.deviceID
-        leaseCommitted = true
         do {
             try installRuntimeObservers(for: record)
         } catch {
@@ -488,32 +484,59 @@ final class AudioCapture {
             publishDiagnostics()
             throw error
         }
+        try ensureStartRequestIsCurrent(token)
+        didStart = true
         publishDiagnostics()
     }
 
     func stop() {
-        teardownCapture()
-        publishDiagnostics()
+        startStateLock.lock()
+        startGeneration &+= 1
+        startStateLock.unlock()
+
+        processingStateLock.lock()
+        processingActive = false
+        processingGeneration &+= 1
+        processingStateLock.unlock()
+        isRunning = false
+
+        // Listener removal and shared-source teardown are serialized away from
+        // the UI queue.  The generation flip above makes already queued audio
+        // work harmless before this asynchronous cleanup runs.
+        startQueue.async { [weak self] in
+            self?.teardownCapture()
+            self?.publishDiagnostics()
+        }
     }
 
     private func beginProcessingSession() -> UInt64 {
-        processingQueue.sync {
-            processingGeneration &+= 1
-            processingActive = true
-            return processingGeneration
-        }
+        processingStateLock.lock()
+        defer { processingStateLock.unlock() }
+        processingGeneration &+= 1
+        processingActive = true
+        return processingGeneration
     }
 
     private func invalidateProcessingSession() {
-        let invalidate = {
-            self.processingActive = false
-            self.processingGeneration &+= 1
-        }
-        if DispatchQueue.getSpecific(key: processingQueueKey) != nil {
-            invalidate()
-        } else {
-            processingQueue.sync(execute: invalidate)
-        }
+        processingStateLock.lock()
+        processingActive = false
+        processingGeneration &+= 1
+        processingStateLock.unlock()
+    }
+
+    private func beginStartRequest() -> UInt64 {
+        startStateLock.lock()
+        startGeneration &+= 1
+        let token = startGeneration
+        startStateLock.unlock()
+        return token
+    }
+
+    private func ensureStartRequestIsCurrent(_ token: UInt64) throws {
+        startStateLock.lock()
+        let isCurrent = startGeneration == token
+        startStateLock.unlock()
+        guard isCurrent else { throw CaptureError.startCancelled }
     }
 
     private func enqueue(
@@ -552,10 +575,12 @@ final class AudioCapture {
 
         processingQueue.async { [weak self] in
             defer { self?.processingQueueSlots.signal() }
-            guard let self,
-                  self.processingActive,
-                  self.processingGeneration == generation
-            else { return }
+            guard let self else { return }
+            self.processingStateLock.lock()
+            let isCurrent = self.processingActive
+                && self.processingGeneration == generation
+            self.processingStateLock.unlock()
+            guard isCurrent else { return }
             self.consume(
                 copiedBuffer,
                 converter: converter,
@@ -576,16 +601,10 @@ final class AudioCapture {
         removeRuntimeObservers()
         invalidateProcessingSession()
 
-        if tapInstalled {
-            activeInputNode?.removeTap(onBus: 0)
-            tapInstalled = false
-        }
-        activeInputNode = nil
-        engine.stop()
         converter = nil
-        let lease = inputLease
-        inputLease = nil
-        lease?.release()
+        let activeSubscription = subscription
+        subscription = nil
+        activeSubscription?.cancel()
 
         lock.lock()
         framesDropped += AudioCaptureTeardownPolicy.clearPending(
@@ -598,6 +617,34 @@ final class AudioCapture {
         activeDevice = nil
         activeInputFormat = nil
         monitoredDeviceID = nil
+    }
+
+    private func mapSourceError(
+        _ error: AudioInputSourceError,
+        record: AudioInputDeviceCatalog.Record
+    ) -> CaptureError {
+        switch error {
+        case .invalidFormat(_, _, let reason):
+            return .formatUnavailable(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                sampleRate: 0,
+                channels: record.descriptor.inputChannels,
+                reason: reason
+            )
+        case .engineStartFailed(_, _, let reason):
+            return .engineStartFailed(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                reason: reason
+            )
+        default:
+            return .deviceConfigurationFailed(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                reason: error.localizedDescription
+            )
+        }
     }
 
     private func consume(
@@ -697,10 +744,11 @@ final class AudioCapture {
     ) throws {
         configurationChangeObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: .main
+            object: inputSource.currentEngine,
+            queue: nil
         ) { [weak self] _ in
-            self?.handleEngineConfigurationChange()
+            guard let self else { return }
+            self.audioEventQueue.async { self.handleEngineConfigurationChange() }
         }
 
         var devicesAddress = AudioObjectPropertyAddress(
@@ -714,7 +762,7 @@ final class AudioCapture {
         guard AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject),
             &devicesAddress,
-            .main,
+            audioEventQueue,
             devicesListener
         ) == noErr else {
             removeRuntimeObservers()
@@ -734,7 +782,7 @@ final class AudioCapture {
         guard AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject),
             &defaultAddress,
-            .main,
+            audioEventQueue,
             defaultListener
         ) == noErr else {
             removeRuntimeObservers()
@@ -754,7 +802,7 @@ final class AudioCapture {
         guard AudioObjectAddPropertyListenerBlock(
             record.deviceID,
             &aliveAddress,
-            .main,
+            audioEventQueue,
             aliveListener
         ) == noErr else {
             removeRuntimeObservers()
@@ -766,10 +814,10 @@ final class AudioCapture {
 
     private func handleEngineConfigurationChange() {
         guard isRunning else { return }
-        let currentFormat = activeInputNode.map {
+        let currentFormat = inputSource.currentInputNode.map {
             AudioInputFormatSignature($0.outputFormat(forBus: 0))
         }
-        let boundDeviceID = activeInputNode.flatMap {
+        let boundDeviceID = inputSource.currentInputNode.flatMap {
             AudioInputDeviceRouting.boundDeviceID(on: $0)
         }
         let decision = AudioEngineConfigurationChangePolicy.decide(
@@ -805,7 +853,7 @@ final class AudioCapture {
             _ = AudioObjectRemovePropertyListenerBlock(
                 AudioObjectID(kAudioObjectSystemObject),
                 &address,
-                .main,
+                audioEventQueue,
                 listener
             )
         }
@@ -815,7 +863,7 @@ final class AudioCapture {
             _ = AudioObjectRemovePropertyListenerBlock(
                 AudioObjectID(kAudioObjectSystemObject),
                 &address,
-                .main,
+                audioEventQueue,
                 listener
             )
         }
@@ -824,7 +872,7 @@ final class AudioCapture {
         if let listener = deviceAliveListener,
            let deviceID = monitoredDeviceID,
            var address = deviceAliveAddress {
-            _ = AudioObjectRemovePropertyListenerBlock(deviceID, &address, .main, listener)
+            _ = AudioObjectRemovePropertyListenerBlock(deviceID, &address, audioEventQueue, listener)
         }
         deviceAliveListener = nil
         deviceAliveAddress = nil
@@ -832,7 +880,7 @@ final class AudioCapture {
 
     private func handleRuntimeAudioChange(source: RuntimeAudioChangeSource) {
         guard isRunning, let configuration = activeConfiguration else { return }
-        guard engine.isRunning else {
+        guard inputSource.currentEngine?.isRunning == true else {
             failRuntime(
                 .deviceConfigurationFailed(
                     name: activeDevice?.descriptor.name ?? "",

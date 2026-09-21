@@ -517,25 +517,42 @@ final class AppController: NSObject, NSApplicationDelegate {
         guard startGate.begin() else { return }
         if newMode == .dictation {
             // Feedback first, before anything that can block or go async: the
-            // Accessibility focus query below, microphone consent, the
-            // process-wide input-device lease
-            // (`AudioInputLeaseCoordinator.handoffTimeout` waits up to a full
-            // second for the level meter to let go) and the audio unit all
-            // sit between here and a working session. `.starting` says
+            // Accessibility focus query below, microphone consent, and audio
+            // device startup all sit between here and a working session. `.starting` says
             // exactly that much and no more — it does not claim recording has
             // begun. Showing it first is safe: the panel is a nonactivating
             // one that can never become key, so it does not disturb the
             // focused target captured on the next line.
             dictationOverlay.startRequested()
-            // Capture before the asynchronous microphone-consent flow can
-            // activate our app or its prompt. The target is the app/field that
-            // owned focus when this dictation request actually began.
-            dictationInsertionTarget = TextInjector.captureFocusedTarget(
-                excluding: NSRunningApplication.current.processIdentifier
-            )
+            // Accessibility can cross an XPC boundary into the focused app.
+            // Capture the target before the microphone prompt, but keep that
+            // remote query off the main queue.
+            let excludedProcessIdentifier = NSRunningApplication.current.processIdentifier
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let target = TextInjector.captureFocusedTarget(
+                    excluding: excludedProcessIdentifier
+                )
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    guard self.settings.interactionMode != .pushToTalk
+                        || self.interactionMachine.active
+                    else {
+                        self.startGate.finish()
+                        self.dictationOverlay.hide()
+                        return
+                    }
+                    self.dictationInsertionTarget = target
+                    self.requestMicrophonePermission(for: newMode)
+                }
+            }
+            return
         } else {
             dictationInsertionTarget = nil
         }
+        requestMicrophonePermission(for: newMode)
+    }
+
+    private func requestMicrophonePermission(for newMode: Mode) {
         AudioCapture.requestPermission { [weak self] granted in
             guard let self else { return }
             guard granted else {
@@ -569,9 +586,6 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func reallyStart(mode newMode: Mode) {
-        // Every exit from here on has a session (or a reported failure), so
-        // the gate reopens exactly once, at the end of this function.
-        defer { startGate.finish() }
         mode = newMode
         appState.setMode(newMode == .meeting ? .meeting : .dictation)
         capture.onFrame = { [weak self] frame in self?.client.send(pcm: frame) }
@@ -594,44 +608,66 @@ final class AppController: NSObject, NSApplicationDelegate {
             }
         }
         if newMode == .dictation {
-            // Ordered *before* `capture.start` on purpose: it stops the input
-            // level meter, which holds the process-wide input lease. Doing it
-            // afterwards made every dictation start from an open Settings page
-            // wait out `AudioInputLeaseCoordinator.handoffTimeout` for a device
-            // this app was about to release anyway.
-            //
-            // It no longer hides the management window. The user's window
-            // staying put is the point; `dictationInsertionTarget` above is
-            // what keeps a final out of TEA ASR itself.
+            // The management window stays available while both consumers use
+            // the shared input source.  The insertion target was captured
+            // before any asynchronous startup could change focus.
             mainWindow?.hideForDictation()
         }
-        do {
-            try capture.start(configuration: settings.audioInputConfiguration)
-        } catch {
-            interactionMachine.resetAfterStartFailure()
-            dictationInsertionTarget = nil
-            mode = .idle
-            appState.setMode(.idle)
-            if newMode == .dictation {
-                dictationOverlay.showError(error.localizedDescription)
+        capture.startAsync(configuration: settings.audioInputConfiguration) { [weak self] result in
+            guard let self else { return }
+            self.startGate.finish()
+            switch result {
+            case .success:
+                guard self.mode == newMode else {
+                    self.capture.stop()
+                    return
+                }
+                if newMode == .dictation,
+                   self.settings.interactionMode == .pushToTalk,
+                   !self.interactionMachine.active {
+                    self.capture.stop()
+                    self.dictationInsertionTarget = nil
+                    self.interactionMachine.resetAfterStartFailure()
+                    self.mode = .idle
+                    self.appState.setMode(.idle)
+                    self.dictationOverlay.hide()
+                    return
+                }
+                if newMode == .dictation {
+                    self.dictationOverlay.begin()
+                    self.insertedDictationSegments.removeAll()
+                    self.playFeedback(.started)
+                }
+                // Partials are rendered only in our own overlay; they never
+                // enter the target app. This keeps dictation safe while still
+                // making the live state visible.
+                self.client.connect(wantsPreview: self.settings.revisablePreview)
+                if newMode == .meeting {
+                    self.mainWindow?.show(section: .operations)
+                }
+                self.render()
+            case .failure(let error):
+                if case AudioCapture.CaptureError.startCancelled = error {
+                    self.interactionMachine.resetAfterStartFailure()
+                    self.dictationInsertionTarget = nil
+                    if self.mode == newMode {
+                        self.mode = .idle
+                        self.appState.setMode(.idle)
+                    }
+                    if newMode == .dictation { self.dictationOverlay.hide() }
+                    return
+                }
+                self.interactionMachine.resetAfterStartFailure()
+                self.dictationInsertionTarget = nil
+                self.mode = .idle
+                self.appState.setMode(.idle)
+                if newMode == .dictation {
+                    self.dictationOverlay.showError(error.localizedDescription)
+                }
+                self.mainWindow?.setStatus("無法開始錄音：\(error.localizedDescription)")
+                self.alert("無法開始錄音", error.localizedDescription)
             }
-            mainWindow?.setStatus("無法開始錄音：\(error.localizedDescription)")
-            alert("無法開始錄音", error.localizedDescription)
-            return
         }
-        if newMode == .dictation {
-            dictationOverlay.begin()
-            insertedDictationSegments.removeAll()
-            playFeedback(.started)
-        }
-        // Partials are rendered only in our own overlay; they never enter the
-        // target app.  This keeps dictation safe while still making the live
-        // state visible.
-        client.connect(wantsPreview: settings.revisablePreview)
-        if newMode == .meeting {
-            mainWindow?.show(section: .operations)
-        }
-        render()
     }
 
     private func stopSession() {
