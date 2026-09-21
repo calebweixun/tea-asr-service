@@ -118,6 +118,10 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var localKeyUpMonitor: Any?
     private var hotKeyRegistered = false
     private var hotKeyRegistrationOutcome: ShortcutRegistrationOutcome = .unavailable
+    /// Guards `autoStartServiceIfNeeded()` so it only ever runs the one time
+    /// this app is launched, never again on `applicationDidBecomeActive` or
+    /// any other later re-entry into launch-adjacent code.
+    private var didAttemptServiceAutoStart = false
     private var interactionMachine = DictationInteractionStateMachine(mode: .toggle)
     /// Drops shortcut presses that arrive while a previous start is still
     /// waiting on microphone consent (see `SessionStartGate`).
@@ -163,6 +167,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         registerHotKey()
         installWorkspaceObservers()
         refreshServiceState()
+        autoStartServiceIfNeeded()
         healthTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshServiceState()
@@ -431,6 +436,28 @@ final class AppController: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.appState.updateService(result)
             self.render()
+        }
+    }
+
+    /// This app is the service's main runtime, and quitting it already stops
+    /// whatever it launched unconditionally (see `stopManagedService`).
+    /// Launching it now does the symmetric thing: bring the service up too,
+    /// unless something already answers on the configured host/port — a
+    /// LaunchAgent-started service, a developer's own terminal-launched one,
+    /// or one left running from a previous quit-that-couldn't-stop-it.
+    ///
+    /// A plain `/healthz` probe (not the full `ServiceProbe` used by
+    /// `refreshServiceState`/`render`) is enough here: this only needs to
+    /// know "does anything answer at all", not the authenticated status or
+    /// capabilities payload, and it must not wait on a token round trip
+    /// before deciding whether to start anything. The probe itself is
+    /// asynchronous and its completion always lands on the main queue (see
+    /// `ServiceControl.probeHealth`), so this never blocks app launch.
+    private func autoStartServiceIfNeeded() {
+        guard !didAttemptServiceAutoStart else { return }
+        didAttemptServiceAutoStart = true
+        ServiceControl.probeHealth(host: settings.host, port: settings.port) { [weak self] reachable in
+            self?.mainWindow?.startManagedServiceAtLaunch(alreadyReachable: reachable)
         }
     }
 

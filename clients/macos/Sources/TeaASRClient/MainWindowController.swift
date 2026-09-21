@@ -183,6 +183,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private var serviceLoginItemInstalled: Bool?
     private var serviceLoginItemProbeInFlight = false
 
+    /// Set by `startManagedServiceAtLaunch(alreadyReachable:)` when the
+    /// app-launch auto-start path could not put a process up (no
+    /// executable found, or a crash-on-start) — surfaced in the Settings
+    /// page's own service-status line so a launch-time failure is never
+    /// silent, without popping a modal `NSAlert` on every app start. `nil`
+    /// once cleared by a later successful auto-start, or by the user
+    /// explicitly pressing "重新啟動服務" (whatever that action reports takes
+    /// over from here).
+    private var launchAutoStartDiagnostic: String?
+
     // MARK: - 日誌頁狀態
     //
     // The level defaults to `.warning` (warning + error), not `.debug`: the
@@ -1155,8 +1165,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                 serviceControlButton.title = presentation.buttonTitle
             }
             serviceControlButton.isEnabled = presentation.buttonEnabled
-            if serviceControlStatus.stringValue != presentation.statusText {
-                serviceControlStatus.stringValue = presentation.statusText
+            var statusText = presentation.statusText
+            if let launchAutoStartDiagnostic {
+                statusText += "\n開啟 app 時自動啟動服務失敗：\(launchAutoStartDiagnostic)"
+            }
+            if serviceControlStatus.stringValue != statusText {
+                serviceControlStatus.stringValue = statusText
             }
 
             let loginItemExecutableFound = ServiceControl.search(configured: settings.serviceExecutable).executable != nil
@@ -1258,6 +1272,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// as the disabled button on the Settings page already implies (see
     /// `ManagedProcess`, `ServiceRuntimeControl`).
     func restartManagedService() {
+        // A deliberate manual restart supersedes whatever the launch-time
+        // auto-start diagnostic said; leaving it in place would keep
+        // claiming a launch-time failure after the user has already acted.
+        launchAutoStartDiagnostic = nil
         switch serviceRuntimeState() {
         case .reachableElsewhere:
             presentAlert(
@@ -1309,6 +1327,78 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// path can stop it unconditionally without ever discovering a process
     /// by name. `nil` means this app launched nothing it can stop.
     var managedServiceProcess: ManagedProcess? { managedService }
+
+    /// The app-launch half of `ServiceQuitPolicy`'s symmetry: this app is the
+    /// service's main runtime, so opening it should bring the service up too
+    /// — but only when nothing already answers on the configured host/port
+    /// (a LaunchAgent, a developer's terminal, or a previous run's process
+    /// all count; see `ServiceAutoStartPolicy`). `alreadyReachable` is the
+    /// caller's own `/healthz` probe result, taken at face value here rather
+    /// than re-probed, so this never doubles the network round trip
+    /// `AppController.applicationDidFinishLaunching` already made.
+    ///
+    /// The actual launch happens off the main thread: `ServiceControl
+    /// .launchService` blocks its calling thread for up to 1.2s while it
+    /// waits out a possible crash-on-start, and that must never delay app
+    /// launch or freeze the main thread the way running it here directly
+    /// would. Only the final state mutation (`managedService`,
+    /// `launchAutoStartDiagnostic`, and the section refresh) comes back to
+    /// the main actor.
+    func startManagedServiceAtLaunch(alreadyReachable: Bool) {
+        // A fresh app launch cannot already hold a managed handle; this
+        // guard only protects against calling this more than once.
+        guard managedService == nil else { return }
+        let search = ServiceControl.search(configured: settings.serviceExecutable)
+        switch ServiceAutoStartPolicy.decide(reachable: alreadyReachable, executableFound: search.executable != nil) {
+        case .skipAlreadyRunning:
+            return
+        case .skipExecutableNotFound:
+            // Not silent: this becomes visible immediately in the Settings
+            // page's own service-status line via `update()` above, reusing
+            // the exact wording `ServiceControl.ControlError` already gives
+            // the Settings page's manual restart button for the same
+            // failure, rather than a separate message that could drift.
+            launchAutoStartDiagnostic = ServiceControl.ControlError
+                .executableNotFound(searched: search.searchedPaths).localizedDescription
+            updateSection(.settings)
+            return
+        case .start:
+            break
+        }
+        guard let binary = search.executable else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let managed = try ServiceControl.launchService(executable: binary)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    // Another path (e.g. a manual restart click while this
+                    // was still launching) may have already set a managed
+                    // process; never clobber it with this one.
+                    guard self.managedService == nil else {
+                        managed.terminate()
+                        return
+                    }
+                    managed.onExit = { [weak self] _ in
+                        DispatchQueue.main.async {
+                            self?.updateSection(.settings)
+                            self?.updateSection(.logs)
+                        }
+                    }
+                    self.managedService = managed
+                    self.launchAutoStartDiagnostic = nil
+                    self.onRefreshService?()
+                    self.updateSection(.settings)
+                    self.updateSection(.logs)
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.launchAutoStartDiagnostic = error.localizedDescription
+                    self.updateSection(.settings)
+                }
+            }
+        }
+    }
 
     /// Re-probes the service's LaunchAgent state off the main thread, and
     /// re-renders only when the answer actually changed — the exact same
@@ -2677,5 +2767,9 @@ extension MainWindowController {
         get { serviceLoginItemInstalled }
         set { serviceLoginItemInstalled = newValue }
     }
+
+    /// The launch-time auto-start diagnostic text, for asserting on it
+    /// directly instead of scraping it back out of `debugLabelTexts()`.
+    var debugLaunchAutoStartDiagnostic: String? { launchAutoStartDiagnostic }
 }
 #endif

@@ -202,6 +202,103 @@ final class ServiceControlSectionTests: XCTestCase {
         )
     }
 
+    // MARK: - App-launch auto-start (`startManagedServiceAtLaunch`)
+
+    /// The core bug this fixes: nothing was running, an executable is
+    /// configured, so app launch must bring the service up on its own,
+    /// through the same captured-output path a manual restart uses (so the
+    /// Logs page's "服務輸出" tab has something to show and quit can stop
+    /// it later).
+    @MainActor
+    func testAutoStartLaunchesTheServiceWhenNothingWasRunning() throws {
+        let script = try makeExecutableScript(body: "#!/bin/sh\nsleep 5\n")
+        let controller = makeController(serviceExecutable: script.path)
+        controller.startManagedServiceAtLaunch(alreadyReachable: false)
+        defer { controller.debugManagedService?.terminate() }
+
+        let deadline = Date().addingTimeInterval(3)
+        while controller.debugManagedService == nil && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+
+        XCTAssertNotNil(controller.debugManagedService, "auto-start must produce a tracked, stoppable process")
+        XCTAssertTrue(controller.debugManagedService?.isRunning ?? false)
+    }
+
+    /// A service already answering (LaunchAgent, a developer's terminal, a
+    /// leftover previous run) must never be duplicated by app launch.
+    @MainActor
+    func testAutoStartDoesNothingWhenSomethingAlreadyAnswers() throws {
+        let script = try makeExecutableScript(body: "#!/bin/sh\nsleep 5\n")
+        let controller = makeController(serviceExecutable: script.path)
+        controller.startManagedServiceAtLaunch(alreadyReachable: true)
+
+        // Give the (intentionally unused) async path a moment to prove it
+        // never launches anything, rather than asserting immediately on a
+        // guard that happens to return synchronously today.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertNil(controller.debugManagedService, "must not start a second copy next to one already reachable")
+    }
+
+    /// A missing executable must surface a concrete, visible reason on the
+    /// Settings page rather than failing silently.
+    @MainActor
+    func testAutoStartReportsAClearReasonWhenNoExecutableIsFound() {
+        let controller = makeController(serviceExecutable: "/definitely/not/a/real/path/tea-asr")
+        controller.startManagedServiceAtLaunch(alreadyReachable: false)
+
+        XCTAssertNil(controller.debugManagedService)
+        XCTAssertNotNil(controller.debugLaunchAutoStartDiagnostic)
+        XCTAssertTrue(controller.debugLaunchAutoStartDiagnostic?.contains("找不到") ?? false)
+
+        controller.show(section: .settings)
+        XCTAssertTrue(
+            controller.debugLabelTexts().contains(where: { $0.contains("開啟 app 時自動啟動服務失敗") }),
+            "the launch-time failure must be visible in the Settings page, not only on a debug accessor"
+        )
+    }
+
+    /// Calling this twice (defensive; production only ever calls it once
+    /// per launch) must never leave two live processes behind.
+    @MainActor
+    func testAutoStartIsANoOpOnceThisControllerAlreadyHasAManagedProcess() throws {
+        let script = try makeExecutableScript(body: "#!/bin/sh\nsleep 5\n")
+        let controller = makeController(serviceExecutable: script.path)
+        let process = Process()
+        process.executableURL = script
+        try process.run()
+        defer { process.terminate() }
+        let existing = ManagedProcess(process: process, outputCapacity: 100)
+        controller.debugManagedService = existing
+
+        controller.startManagedServiceAtLaunch(alreadyReachable: false)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+
+        XCTAssertTrue(controller.debugManagedService === existing, "must not replace an already-managed process")
+    }
+
+    /// The launch call must return before the launched process is confirmed
+    /// running, i.e. the crash-on-start wait inside `ServiceControl
+    /// .launchService` happens off the calling thread. A script that stays
+    /// up for a full second lets this test tell "returned immediately" apart
+    /// from "blocked until the process was confirmed alive".
+    @MainActor
+    func testAutoStartDoesNotBlockItsCallerWhileWaitingOutTheCrashOnStartWindow() throws {
+        let script = try makeExecutableScript(body: "#!/bin/sh\nsleep 1\n")
+        let controller = makeController(serviceExecutable: script.path)
+
+        let start = Date()
+        controller.startManagedServiceAtLaunch(alreadyReachable: false)
+        let elapsed = Date().timeIntervalSince(start)
+        defer { controller.debugManagedService?.terminate() }
+
+        XCTAssertLessThan(
+            elapsed, 0.5,
+            "startManagedServiceAtLaunch must return immediately; ServiceControl.launchService's own"
+                + " ~1.2s crash-on-start wait must run off the caller's thread"
+        )
+    }
+
     // MARK: - Service login item (LaunchAgent), moved here from the menu bar
 
     /// The real probe (`refreshServiceLoginItemState()`) runs off the main
