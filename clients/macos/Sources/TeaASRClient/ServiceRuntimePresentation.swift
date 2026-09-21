@@ -74,6 +74,40 @@ enum ServiceRuntimeControl {
     }
 }
 
+/// Decides what the app-launch auto-start path should do, before it ever
+/// touches `Process` or the filesystem — kept pure so every combination is
+/// directly testable.
+///
+/// This app is the service's main runtime (see `ServiceQuitPolicy`), so the
+/// symmetric half of "quitting the app stops the service it launched" is
+/// "launching the app starts the service" — but only when nothing is
+/// already answering. A LaunchAgent-started service, a developer's own
+/// terminal-launched one, or one left over from a previous run all answer
+/// `/healthz`, and this app must never start a second copy next to any of
+/// them (`ServiceRuntimeControl.State.reachableElsewhere` already encodes
+/// the same "never touch it, never duplicate it" rule for the Settings
+/// page's button; this is that same rule at launch time, before a
+/// `ManagedProcess` handle exists to reason about).
+enum ServiceAutoStartPolicy {
+    enum Decision: Equatable {
+        /// Something already answers on the configured host/port — do not
+        /// start a second copy, managed or not.
+        case skipAlreadyRunning
+        /// Nothing answers, and no `tea-asr` executable was found either —
+        /// this must be surfaced in the UI, never dropped silently.
+        case skipExecutableNotFound
+        /// Nothing answers, and an executable was found: go ahead and start
+        /// it the same way the Settings page's own button would.
+        case start
+    }
+
+    static func decide(reachable: Bool, executableFound: Bool) -> Decision {
+        if reachable { return .skipAlreadyRunning }
+        if !executableFound { return .skipExecutableNotFound }
+        return .start
+    }
+}
+
 /// Pure presentation logic for the Logs page's "服務輸出" tab: the service
 /// process's own stdout/stderr, as opposed to the structured `/v1/logs`
 /// feed shown in the other tab. Kept separate from `LogsPresentation` (which

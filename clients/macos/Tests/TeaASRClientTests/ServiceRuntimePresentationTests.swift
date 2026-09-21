@@ -66,6 +66,33 @@ final class ServiceRuntimeControlTests: XCTestCase {
     }
 }
 
+final class ServiceAutoStartPolicyTests: XCTestCase {
+    func testSkipsWhenAlreadyReachableRegardlessOfExecutable() {
+        XCTAssertEqual(
+            ServiceAutoStartPolicy.decide(reachable: true, executableFound: true),
+            .skipAlreadyRunning
+        )
+        XCTAssertEqual(
+            ServiceAutoStartPolicy.decide(reachable: true, executableFound: false),
+            .skipAlreadyRunning
+        )
+    }
+
+    func testSkipsWithAClearReasonWhenNothingIsReachableAndNoExecutableWasFound() {
+        XCTAssertEqual(
+            ServiceAutoStartPolicy.decide(reachable: false, executableFound: false),
+            .skipExecutableNotFound
+        )
+    }
+
+    func testStartsWhenNothingIsReachableAndAnExecutableWasFound() {
+        XCTAssertEqual(
+            ServiceAutoStartPolicy.decide(reachable: false, executableFound: true),
+            .start
+        )
+    }
+}
+
 final class ServiceOutputPresentationTests: XCTestCase {
     func testNotManagedAndReachableElsewhereSaysSoExplicitlyRatherThanShowingNothing() {
         let text = ServiceOutputPresentation.statusText(isManaged: false, isRunning: false, reachableElsewhere: true)
