@@ -141,8 +141,8 @@ final class AudioLevelBarView: NSView {
             return nil
         case .noData:
             return "沒有收到音訊資料"
-        case .failed:
-            return "無法監看輸入電平"
+        case .failed(let reason):
+            return reason
         }
     }
 }

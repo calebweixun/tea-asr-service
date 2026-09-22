@@ -229,6 +229,10 @@ enum AudioInputFormatError: LocalizedError, Equatable {
     case noInputChannels
     case channelOutOfBounds(index: Int, count: Int)
     case unsupportedSampleFormat
+    case changedDuringTapSetup(
+        preparedFor: AudioInputFormatSignature,
+        current: AudioInputFormatSignature
+    )
 
     var errorDescription: String? {
         switch self {
@@ -240,6 +244,8 @@ enum AudioInputFormatError: LocalizedError, Equatable {
             return "指定聲道 \(index + 1) 超出裝置目前的 \(count) 個聲道。"
         case .unsupportedSampleFormat:
             return "輸入裝置的原生 PCM 格式不是目前支援的 Float32 或 Int16。"
+        case .changedDuringTapSetup(let preparedFor, let current):
+            return "輸入裝置格式在 tap 安裝前變更（準備 \(preparedFor.sampleRate) Hz/\(preparedFor.channelCount) ch，現在為 \(current.sampleRate) Hz/\(current.channelCount) ch）。"
         }
     }
 }
@@ -270,6 +276,58 @@ enum AudioInputFormatPolicy {
         default:
             throw AudioInputFormatError.unsupportedSampleFormat
         }
+    }
+}
+
+/// The format checks that must happen at the last possible point before an
+/// input tap is installed.  The value-only API keeps this race-sensitive part
+/// hardware-free in tests; the production source supplies fresh
+/// `AVAudioFormat` snapshots around its converter preparation and tap call.
+enum AudioInputTapFormatPolicy {
+    static func validateCurrentFormat(
+        _ format: AudioInputFormatSignature,
+        channelPolicy: AudioChannelPolicy
+    ) throws {
+        try AudioInputFormatPolicy.validate(
+            sampleRate: format.sampleRate,
+            channelCount: format.channelCount,
+            commonFormat: format.commonFormat,
+            channelPolicy: channelPolicy
+        )
+    }
+
+    static func requireUnchangedFormat(
+        preparedFor: AudioInputFormatSignature,
+        current: AudioInputFormatSignature
+    ) throws {
+        guard preparedFor == current else {
+            throw AudioInputFormatError.changedDuringTapSetup(
+                preparedFor: preparedFor,
+                current: current
+            )
+        }
+    }
+}
+
+/// Runs the final format checks before invoking an injected tap installer.
+/// Keeping the installer as a closure makes the "invalid format means no tap"
+/// guarantee directly testable without constructing an audio engine.
+enum AudioInputTapInstallationPolicy {
+    static func installIfCurrentFormatIsValid(
+        preparedFor: AudioInputFormatSignature,
+        current: AudioInputFormatSignature,
+        channelPolicy: AudioChannelPolicy,
+        install: () throws -> Void
+    ) throws {
+        try AudioInputTapFormatPolicy.validateCurrentFormat(
+            current,
+            channelPolicy: channelPolicy
+        )
+        try AudioInputTapFormatPolicy.requireUnchangedFormat(
+            preparedFor: preparedFor,
+            current: current
+        )
+        try install()
     }
 }
 

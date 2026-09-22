@@ -1,4 +1,5 @@
 import AVFoundation
+import AVAudioEngineTapShim
 import CoreAudio
 import Foundation
 
@@ -42,6 +43,7 @@ enum AudioInputSourceError: LocalizedError {
     )
     case routingFailed(name: String, uid: String, reason: String)
     case invalidFormat(name: String, uid: String, reason: String)
+    case tapInstallationFailed(name: String, uid: String, reason: String)
     case engineStartFailed(name: String, uid: String, reason: String)
 
     var errorDescription: String? {
@@ -56,6 +58,8 @@ enum AudioInputSourceError: LocalizedError {
             return "無法設定輸入裝置「\(name)」（UID: \(uid)）：\(reason)"
         case .invalidFormat(let name, let uid, let reason):
             return "輸入裝置「\(name)」（UID: \(uid)）回報無效格式：\(reason)"
+        case .tapInstallationFailed(let name, let uid, let reason):
+            return "無法在輸入裝置「\(name)」（UID: \(uid)）安裝音訊 tap：\(reason)"
         case .engineStartFailed(let name, let uid, let reason):
             return "無法啟動輸入裝置「\(name)」（UID: \(uid)）：\(reason)"
         }
@@ -440,12 +444,10 @@ final class AudioInputSource {
             )
         }
 
-        let nativeFormat = candidateInput.outputFormat(forBus: 0)
+        let initialFormat = candidateInput.outputFormat(forBus: 0)
         do {
-            try AudioInputFormatPolicy.validate(
-                sampleRate: nativeFormat.sampleRate,
-                channelCount: Int(nativeFormat.channelCount),
-                commonFormat: nativeFormat.commonFormat,
+            try AudioInputTapFormatPolicy.validateCurrentFormat(
+                AudioInputFormatSignature(initialFormat),
                 channelPolicy: requested.channelPolicy
             )
         } catch {
@@ -456,12 +458,83 @@ final class AudioInputSource {
             )
         }
 
-        try prepare?(nativeFormat)
-
-        candidateInput.installTap(onBus: 0, bufferSize: 512, format: nativeFormat) {
-            [weak self] buffer, _ in
-            self?.publish(buffer)
+        // Routing can make the HAL renegotiate between two reads.  Prepare the
+        // converter from a fresh snapshot, then take one final snapshot before
+        // the tap call and refuse to install if that snapshot changed again.
+        let preparedFormat = candidateInput.outputFormat(forBus: 0)
+        do {
+            try AudioInputTapFormatPolicy.validateCurrentFormat(
+                AudioInputFormatSignature(preparedFormat),
+                channelPolicy: requested.channelPolicy
+            )
+        } catch {
+            throw AudioInputSourceError.invalidFormat(
+                name: requested.deviceName,
+                uid: requested.deviceUID,
+                reason: error.localizedDescription
+            )
         }
+        try prepare?(preparedFormat)
+
+        // Keep the final validated format explicit.  `nil` would let
+        // AVAudioEngine choose whatever the bus reports at installation time,
+        // which can silently diverge from the converter prepared above if the
+        // HAL changes again.  Passing the validated snapshot makes a later
+        // race fail at this one guarded call instead of feeding a mismatched
+        // format to the converter; the ObjC shim turns that exception into a
+        // normal Swift error.
+        let tapFormat = candidateInput.outputFormat(forBus: 0)
+        do {
+            let preparedSignature = AudioInputFormatSignature(preparedFormat)
+            let tapSignature = AudioInputFormatSignature(tapFormat)
+            try AudioInputTapFormatPolicy.validateCurrentFormat(
+                tapSignature,
+                channelPolicy: requested.channelPolicy
+            )
+            try AudioInputTapFormatPolicy.requireUnchangedFormat(
+                preparedFor: preparedSignature,
+                current: tapSignature
+            )
+        } catch {
+            throw AudioInputSourceError.invalidFormat(
+                name: requested.deviceName,
+                uid: requested.deviceUID,
+                reason: error.localizedDescription
+            )
+        }
+
+        do {
+            try AudioInputTapInstallationPolicy.installIfCurrentFormatIsValid(
+                preparedFor: AudioInputFormatSignature(preparedFormat),
+                current: AudioInputFormatSignature(tapFormat),
+                channelPolicy: requested.channelPolicy
+            ) {
+                var tapError: NSError?
+                let tapInstalled = TEAInstallAudioInputTap(
+                    candidateInput,
+                    512,
+                    tapFormat,
+                    { [weak self] buffer, _ in
+                        self?.publish(buffer)
+                    },
+                    &tapError
+                )
+                guard tapInstalled else {
+                    throw AudioInputSourceError.tapInstallationFailed(
+                        name: requested.deviceName,
+                        uid: requested.deviceUID,
+                        reason: tapError?.localizedDescription ?? "AVFAudio 未提供例外原因"
+                    )
+                }
+            }
+        } catch let error as AudioInputFormatError {
+            throw AudioInputSourceError.invalidFormat(
+                name: requested.deviceName,
+                uid: requested.deviceUID,
+                reason: error.localizedDescription
+            )
+        }
+
         candidateEngine.prepare()
         do {
             try candidateEngine.start()
@@ -478,7 +551,7 @@ final class AudioInputSource {
         stateLock.lock()
         engine = candidateEngine
         inputNode = candidateInput
-        inputFormat = nativeFormat
+        inputFormat = tapFormat
         configuration = requested
         stateLock.unlock()
     }
