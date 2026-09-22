@@ -632,6 +632,12 @@ final class AudioCapture {
                 channels: record.descriptor.inputChannels,
                 reason: reason
             )
+        case .tapInstallationFailed(_, _, let reason):
+            return .deviceConfigurationFailed(
+                name: record.descriptor.name,
+                uid: record.descriptor.uid,
+                reason: reason
+            )
         case .engineStartFailed(_, _, let reason):
             return .engineStartFailed(
                 name: record.descriptor.name,
