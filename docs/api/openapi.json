@@ -23,6 +23,16 @@
           "protocol_version": {
             "title": "Protocol Version",
             "type": "string"
+          },
+          "translation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TranslationCapability"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -451,6 +461,73 @@
           "inference_ms"
         ],
         "title": "TranscriptionResponse",
+        "type": "object"
+      },
+      "TranslationCapability": {
+        "additionalProperties": false,
+        "description": "The opt-in translation provider (docs/04「翻譯（opt-in）」).\n\nPresent only when the server was started with translation enabled; the\ncapabilities route omits it otherwise, so a server without translation\nanswers exactly as before.",
+        "properties": {
+          "directions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Directions",
+            "type": "array"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "latency_modes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Latency Modes",
+            "type": "array"
+          },
+          "max_pending_segments": {
+            "title": "Max Pending Segments",
+            "type": "integer"
+          },
+          "max_sessions": {
+            "title": "Max Sessions",
+            "type": "integer"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "model_revision": {
+            "title": "Model Revision",
+            "type": "string"
+          },
+          "request_timeout_ms": {
+            "title": "Request Timeout Ms",
+            "type": "integer"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "model",
+          "model_revision",
+          "directions",
+          "latency_modes",
+          "max_sessions",
+          "max_pending_segments",
+          "request_timeout_ms"
+        ],
+        "title": "TranslationCapability",
         "type": "object"
       }
     }

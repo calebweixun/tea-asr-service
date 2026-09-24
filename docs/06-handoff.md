@@ -141,7 +141,7 @@ server repo只放reference clients与protocol測試；正式Swift app／OBS plug
 |---|---|
 | 跨句全文校訂／可選LLM潤飾 | P2a同片段修訂完成，另定document revision與原稿保存；不可回改ASR final |
 | 熱詞 | 固定模型system_prompt實測；未支援時要拒絕而非忽略 |
-| 翻譯 | 來源／目標語言、使用者是否接受雲端、獨立provider／保留原稿。**2026-09-24 狀態**：候選為 `netease-youdao/Confucius4-T3PO`（14B 文字對文字同步翻譯，Qwen2.5-14B，Apache-2.0），中英互譯、全本機、獨立 provider，設計上串接在 R2T2 串流 ASR 之後。待 R2T2 評估完成後再評估；bf16 權重 29.5 GB，需先騰出磁碟空間。原稿保留與 capabilities 宣告仍依第 5、6 條 |
+| 翻譯 | 來源／目標語言、使用者是否接受雲端、獨立provider／保留原稿。**2026-09-24 已接入（opt-in，預設關閉）**：`netease-youdao/Confucius4-T3PO` 4-bit，獨立 worker 子程序，**只提供 zh→en**（en→zh 回譯 20 句有 18 句含簡體字，不宣告）。只翻 `transcript.final`，譯文走新事件（`translation.started`／`.segment`／`.error`），既有事件與原稿不動。開啟時 ASR final 延遲 p95 約多 0.2–0.3 s（GPU 爭用）。翻譯品質尚無量化分數（缺平行語料），見 `docs/benchmarks/t3po-eval-report.md` |
 | Forced alignment | 後端相容性、額外模型memory與對齊品質 |
 | Diarization | 多人會議需求、額外模型與重疊發話處理，不以來源軌代替 |
 | LAN | 明確需求、TLS／授權／rate limit；不得只改bind至0.0.0.0。**W9已實作，決策記錄：** 明確需求＝macOS client／OBS外掛／其他本機轉錄工具，皆使用者自有裝置；**刻意不做TLS**——使用者在被告知取捨後決定，加密與身分交給WireGuard／Tailscale隧道層，應用層不重複做憑證管理，這是明確取捨而非疏漏，連線與token因此仍是明文，僅限受信任LAN／Tailscale、不得暴露公開網路；授權＝token rotation／revocation（不做expiration／per-token scope，理由見docs/04-api.md）；rate limit＝每來源位址認證失敗次數視窗；bind＝`allow_lan`預設False，未明確opt-in時非本機host一律拒絕啟動，不是只改host；Host／Origin allowlist在LAN模式下限縮為私有網段＋Tailscale CGNAT＋明確列出的額外主機名，不是任意Host都收；細節見docs/04-api.md「W9｜LAN／Tailscale 模式」。 |

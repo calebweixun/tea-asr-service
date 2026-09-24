@@ -16,11 +16,11 @@
 - **WS Origin allowlist**：`/v1/stream` upgrade 驗證 `Origin` 僅限 `http://127.0.0.1`／`http://localhost`；省略 Origin（native client）視為合法；不符時在 `accept()` 之前拒絕，網路上實際收到的是空 body 的 HTTP 403，不是 WS close 1008（`src/tea_asr/api/stream.py::run_stream`；細節見下方「`accept()` 之前的拒絕」）。這與上一條 Host 檢查是兩段獨立程式碼，不是同一個中介層。
 - **`limits.max_continuous_sessions`**：伺服器實際 enforce，預設2，只算 `profile=continuous`；超過回 `concurrent_session_limit`，close 4029（`ContinuousSessionAdmission`）。
 - **`limits.max_total_connections`**：伺服器實際 enforce，預設4，涵蓋 `/v1/stream` 所有 profile 的連線總數；超過在 `accept()` 之前拒絕，網路上實際收到的是空 body 的 HTTP 403（不是 WS close 1013；收不到 `hello`；細節見下方「`accept()` 之前的拒絕」）（`ContinuousSessionAdmission` 重用於 `connection_admission`）。
-- **capabilities.features**：固定輸出10個布林欄位（含 `context_biasing`、`durable_revisable`），只有實際驗收過的功能才是 `true`；目前只有 `partial_transcripts` 依 `TEA_ASR_REVISABLE_PREVIEW` 可能為 `true`，其餘一律 `false`（`src/tea_asr/wire.py::CapabilityFeatures`）。
+- **capabilities.features**：固定輸出10個布林欄位（含 `context_biasing`、`durable_revisable`），只有實際驗收過的功能才是 `true`；`partial_transcripts` 依 `TEA_ASR_REVISABLE_PREVIEW` 可能為 `true`；`translation` 只有在明確啟用翻譯 provider（預設關閉）且其模型已 ready 時才是 `true`（見下方「翻譯（opt-in）」）；其餘一律 `false`（`src/tea_asr/wire.py::CapabilityFeatures`）。翻譯關閉時 capabilities 回應與加入翻譯前逐欄相同（`tests/integration/test_translation_disabled.py`）。
 - **flow.control 節奏**：只在流控窗口實際往前推進時送出，不是固定週期輪詢（`src/tea_asr/api/stream.py::_handle_frame`）。
 - **WS 心跳**：server 每15秒送 WS-layer ping，30秒未收到 pong 判定斷線（`uvicorn.run(..., ws_ping_interval=15, ws_ping_timeout=30)`，`src/tea_asr/cli.py`）。
 - **v0.2 端點**：`/v1/jobs*` 未實作，一律404，不回假 202（`tests/integration/test_schema_export.py::test_v0_2_endpoints_are_absent_not_faked`）。
-- **錯誤碼全集**：`unauthenticated`、`forbidden_origin`、`rate_limited`（W9）、`invalid_audio`、`unsupported_option`、`protocol_error`、`conflict`、`payload_too_large`、`queue_full`、`session_limit`、`concurrent_session_limit`、`model_loading`、`model_unavailable`、`model_incompatible`、`inference_failed`、`inference_timeout`、`timeline_gap`、`internal_error`、`storage_full`（v0.2）；HTTP 狀態碼與 WS close code 對照見下方錯誤表，唯一真相來源是 `src/tea_asr/errors.py`。
+- **錯誤碼全集**：`unauthenticated`、`forbidden_origin`、`rate_limited`（W9）、`invalid_audio`、`unsupported_option`、`protocol_error`、`conflict`、`payload_too_large`、`queue_full`、`session_limit`、`concurrent_session_limit`、`model_loading`、`model_unavailable`、`model_incompatible`、`inference_failed`、`inference_timeout`、`timeline_gap`、`internal_error`、`storage_full`（v0.2），以及只屬於 opt-in 翻譯的 `translation_unavailable`、`translation_failed`、`translation_timeout`；HTTP 狀態碼與 WS close code 對照見下方錯誤表，唯一真相來源是 `src/tea_asr/errors.py`。
 
 ## W9｜LAN／Tailscale 模式（opt-in，非預設）
 
@@ -306,6 +306,71 @@ outgoing queue可把同segment尚未送出的partial合併成最新值；final�
 P2a先驗收ephemeral；同時要求durable=true且尚未完成P4整合時回unsupported_option。P4完成後在capabilities另外宣告 `durable_revisable=true`；resume時client清除未final預覽，server不重播舊partial，依07保存revision high-water mark並從音訊重建。final保留原本的持久化、順序與去重保證。
 
 HTTP一次性transcription不提供partial；既有client不選revisable，端點與效能行為保持基線。
+
+## 翻譯（opt-in，預設關閉）
+
+**狀態（2026-09-24）：** 已實作、預設關閉。模型是 `netease-youdao/Confucius4-T3PO`（revision `446e5dcca080740f2c2dc9d06a91ed66a9920410`，Apache-2.0）本機轉成的 MLX 4bit，量測見 [T3PO 評估報告](benchmarks/t3po-eval-report.md)。只宣告實際跑過的方向：**`zh2en`**。`en2zh` 能跑但輸出是簡體中文與大陸用語，不提供。品質只做過 20 句質性抽樣，**沒有 BLEU／COMET 等量化結論**。
+
+**獨立 provider（docs/06 #2）：** 翻譯是另一個 worker 子行程（`python -m tea_asr.translation.worker`），有自己的模型、佇列與逾時，不共用也不替代 ASR worker。翻譯卡住或當掉只會被殺掉重啟，ASR 不受影響。
+
+**啟用：** `config.toml` 的 `[service]` 設 `translation_enabled = true` 與 `translation_model_path = "/Volumes/.../t3po-mlx-4bit"`，或環境變數 `TEA_ASR_TRANSLATION=1`、`TEA_ASR_TRANSLATION_MODEL_PATH=...`。啟用但沒給路徑時拒絕啟動。模型在背景載入（約 7 秒），不擋 ASR 啟動。`translation_max_memory_gib`（預設 12，上限 40）：載入後佔用超過就拒絕使用。
+
+**模型路徑不存在（例如外接 SSD 被拔掉）：** 服務照常啟動、ASR 照常運作；provider 狀態為 `failed`，`capabilities.translation.last_error` 寫明路徑與原因，要求翻譯的 `session.start` 一律被拒（見下），**不會靜默當成 ASR-only session，也不會假裝翻譯成功**。磁碟接回後，下一個要求翻譯的 `session.start` 會觸發重新載入並先回 `retryable=true`。
+
+### 為什麼不改既有事件
+
+翻譯不得改寫 ASR 原稿（docs/06 #5），所以翻譯**全部走新的事件**：`transcript.final`／`transcript.partial`／`session.started` 的欄位、sample clock、segment ID、revision、事件順序規則一律不變。沒要求翻譯的 session 收到的事件與關閉翻譯時完全相同。這樣舊 client 不必知道翻譯存在；新 client 用 `source_segment_ids` 把譯文對回它已經有的 final。
+
+### Capabilities
+
+啟用時 `/v1/capabilities` 多一個 `translation` 物件（關閉時整個欄位不出現）：
+
+```json
+"translation":{"state":"ready","model":"netease-youdao/Confucius4-T3PO","model_revision":"446e5dcca080740f2c2dc9d06a91ed66a9920410","directions":["zh2en"],"latency_modes":["low","native","high"],"max_sessions":1,"max_pending_segments":16,"request_timeout_ms":20000}
+```
+
+`state` 為 `unprepared`／`loading`／`ready`／`recovering`／`failed`；失敗時另有 `last_error`。`features.translation` 只在 `state=ready` 時為 true。
+
+### session.start
+
+新增可選欄位 `translation`：
+
+```json
+{"type":"session.start","request_id":"start-1","profile":"continuous","audio":{"sample_rate":16000,"channels":1,"format":"pcm_s16le"},"language":"Chinese","durable":false,"translation":{"direction":"zh2en","latency_mode":"native"}}
+```
+
+- `direction` 目前只接受 `"zh2en"`；其他值回 `unsupported_option`。`latency_mode` 為官方三檔 `low`／`native`（預設）／`high`。
+- 伺服器沒啟用翻譯時回 `unsupported_option`（close 1008）。省略 `translation` 等於不翻譯，行為與以前完全相同。
+- provider 不能用時回 `translation_unavailable`（close **4503**）：模型路徑不存在或載入失敗是 `retryable=false`；載入中、重新載入中、或**已有另一個 session 在翻譯**（一次只服務一個 session，因為 worker 只有一份 history／KV cache）是 `retryable=true`。client 可以改成不帶 `translation` 重新開 session。
+
+### 事件
+
+接受翻譯時，`session.started` 之後緊接著送 `translation.started`：
+
+```json
+{"type":"translation.started","session_id":"session-uuid","event_id":1,"request_id":"start-1","direction":"zh2en","latency_mode":"native","model":"netease-youdao/Confucius4-T3PO","model_revision":"446e5dcca080740f2c2dc9d06a91ed66a9920410"}
+```
+
+| type | 欄位 | 語意 |
+|---|---|---|
+| `translation.segment` | translation_index、source_segment_ids、source_text、text、direction、latency_mode、forced、inference_ms | 一段**已提交、append-only** 的譯文。`translation_index` 從 0 遞增、不重用、不修訂；`source_segment_ids` 是它涵蓋的 `transcript.final`（依 segment 順序，可能多段合併）；`source_text` 是送進模型的原文（final 的 `text`，PUA 已過濾） |
+| `translation.error` | code、message、retryable、source_segment_ids、stopped | 這些 final 不會有譯文；`stopped=true` 表示這個 session 之後不會再有任何翻譯事件 |
+
+```json
+{"type":"translation.segment","session_id":"session-uuid","event_id":9,"translation_index":0,"source_segment_ids":["segment-uuid"],"source_text":"遲遲未定的原因。","text":"The reason for the delay.","direction":"zh2en","latency_mode":"native","forced":true,"inference_ms":412}
+```
+
+上面的數字只示範欄位，不是效能實測。
+
+規則：
+
+- **只翻譯 `transcript.final`**。partial 會被修訂，餵給 append-only 的翻譯會產生無法撤回的錯譯，所以不翻。每個 final 在 `transcript.final` 送出**之後**才進翻譯佇列；`translation.segment` 一定晚於它涵蓋的 final。
+- 每個 final 以 force 模式送進模型（必須產出譯文）。官方協定的 READ/WRITE 決策在這條路徑上是逐 final 發生的，不是逐字；原因與量測見報告。模型極少數情況仍回 WAIT 時，那段原文留在模型 buffer，併進下一個 final 一起提交（`source_segment_ids` 會列出兩段）。
+- 翻譯落後時，佇列中已到的 final 合併成一次呼叫；每個 session 最多 16 段在排隊，超過的 final 直接回 `translation.error`（`queue_full`），**ASR 不受影響、final 照常送出**。
+- 單次翻譯逾時 20 秒：回 `translation.error`（`translation_timeout`），worker 被殺掉重啟（1／2／4 秒退避，60 秒內最多 3 次）；重啟後 history 重置，之前暫存未提交的原文會以 `translation_failed` 回報。
+- `session.stop`：所有 ASR 終局事件送完後，最多再等 30 秒讓佇列中的翻譯完成，未完成的以 `translation.error`（`translation_timeout`、`stopped=true`）列出，再送 `session.stopped`。
+- `session.cancel`／session 錯誤：翻譯立即停止，`session.cancelled`／`error` 之後不會再有翻譯事件。
+- 翻譯事件與 final 一樣不可丟棄（writer 不合併、不淘汰）。
 
 ## v0.2：長檔案 jobs
 

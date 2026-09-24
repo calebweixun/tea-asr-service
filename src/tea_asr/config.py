@@ -243,6 +243,18 @@ class ServiceConfig:
     #: them first. Still bounded — see `validate_log_retention_or_raise` —
     #: there is no "keep forever" setting.
     log_error_backup_count: int = 10
+    #: Opt-in translation provider (docs/04「翻譯（opt-in）」). Off by default;
+    #: when off nothing about ASR changes and no translation model is touched.
+    #: It is a separate worker process with its own model (docs/06 #2), never
+    #: a replacement for the ASR model.
+    translation_enabled: bool = False
+    #: Local MLX 4bit folder of Confucius4-T3PO (see models.lock.json). May sit
+    #: on an external disk: a missing path is reported as a failed provider,
+    #: never as a silently disabled one.
+    translation_model_path: str = ""
+    #: Refuse to keep the translation worker if the loaded model occupies more
+    #: than this much Metal memory. Measured peak is ~8.5 GiB.
+    translation_max_memory_gib: float = 12.0
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> ServiceConfig:
@@ -322,7 +334,34 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
     log_error_backup_count = get("TEA_ASR_LOG_ERROR_BACKUP_COUNT")
     if log_error_backup_count is not None:
         config = replace(config, log_error_backup_count=int(log_error_backup_count))
+    translation = get("TEA_ASR_TRANSLATION")
+    if translation is not None:
+        config = replace(config, translation_enabled=translation not in {"0", "false", "no", ""})
+    translation_path = get("TEA_ASR_TRANSLATION_MODEL_PATH")
+    if translation_path is not None:
+        config = replace(config, translation_model_path=translation_path.strip())
     return config
+
+
+def validate_translation_or_raise(config: ServiceConfig) -> None:
+    """Refuse to start with translation switched on but nowhere to load it from.
+
+    A path that is set but missing (unplugged SSD) is *not* a start-up error:
+    ASR must still come up, and the provider reports itself as failed with the
+    reason in capabilities and on every session.start that asks for it.
+    """
+
+    if not config.translation_enabled:
+        return
+    if not config.translation_model_path.strip():
+        raise RuntimeError(
+            "translation_enabled=true 但沒有設定 translation_model_path"
+            "（config.toml 的 [service] 區塊或 TEA_ASR_TRANSLATION_MODEL_PATH）。"
+        )
+    if not (0 < config.translation_max_memory_gib <= 40):
+        raise RuntimeError(
+            f"translation_max_memory_gib={config.translation_max_memory_gib} 超出範圍（0–40 GiB）。"
+        )
 
 
 #: Log levels `tea_asr.logs.event()` and `ServiceConfig.log_level` accept.

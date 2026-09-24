@@ -25,6 +25,10 @@ TERMINAL_TYPES = frozenset(
         "session.cancelled",
         "error",
         "pong",
+        # Translation is append-only: a dropped piece would silently lose text.
+        "translation.started",
+        "translation.segment",
+        "translation.error",
     }
 )
 
