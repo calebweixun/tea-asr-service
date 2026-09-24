@@ -13,9 +13,9 @@
 
 - **認證**：除 `/healthz`、`/readyz` 外，HTTP 與 WS 都要求 `Authorization: Bearer <token>`（`src/tea_asr/api/app.py` `authorize`／`src/tea_asr/api/stream.py::run_stream`）。
 - **HTTP Host allowlist**：所有 HTTP 路由（含健康檢查）由 `HostValidationMiddleware` 驗證 `Host` 標頭僅限 `127.0.0.1`／`localhost`，早於 auth 檢查；不符回 `forbidden_origin`／403（`src/tea_asr/api/app.py`）。
-- **WS Origin allowlist**：`/v1/stream` upgrade 驗證 `Origin` 僅限 `http://127.0.0.1`／`http://localhost`；省略 Origin（native client）視為合法；不符 close 1008 `forbidden_origin`（`src/tea_asr/api/stream.py::run_stream`）。這與上一條 Host 檢查是兩段獨立程式碼，不是同一個中介層。
+- **WS Origin allowlist**：`/v1/stream` upgrade 驗證 `Origin` 僅限 `http://127.0.0.1`／`http://localhost`；省略 Origin（native client）視為合法；不符時在 `accept()` 之前拒絕，網路上實際收到的是空 body 的 HTTP 403，不是 WS close 1008（`src/tea_asr/api/stream.py::run_stream`；細節見下方「`accept()` 之前的拒絕」）。這與上一條 Host 檢查是兩段獨立程式碼，不是同一個中介層。
 - **`limits.max_continuous_sessions`**：伺服器實際 enforce，預設2，只算 `profile=continuous`；超過回 `concurrent_session_limit`，close 4029（`ContinuousSessionAdmission`）。
-- **`limits.max_total_connections`**：伺服器實際 enforce，預設4，涵蓋 `/v1/stream` 所有 profile 的連線總數；超過在 `accept()` 之前拒絕，close 1013 `session_limit`（收不到 `hello`）（`ContinuousSessionAdmission` 重用於 `connection_admission`）。
+- **`limits.max_total_connections`**：伺服器實際 enforce，預設4，涵蓋 `/v1/stream` 所有 profile 的連線總數；超過在 `accept()` 之前拒絕，網路上實際收到的是空 body 的 HTTP 403（不是 WS close 1013；收不到 `hello`；細節見下方「`accept()` 之前的拒絕」）（`ContinuousSessionAdmission` 重用於 `connection_admission`）。
 - **capabilities.features**：固定輸出10個布林欄位（含 `context_biasing`、`durable_revisable`），只有實際驗收過的功能才是 `true`；目前只有 `partial_transcripts` 依 `TEA_ASR_REVISABLE_PREVIEW` 可能為 `true`，其餘一律 `false`（`src/tea_asr/wire.py::CapabilityFeatures`）。
 - **flow.control 節奏**：只在流控窗口實際往前推進時送出，不是固定週期輪詢（`src/tea_asr/api/stream.py::_handle_frame`）。
 - **WS 心跳**：server 每15秒送 WS-layer ping，30秒未收到 pong 判定斷線（`uvicorn.run(..., ws_ping_interval=15, ws_ping_timeout=30)`，`src/tea_asr/cli.py`）。
@@ -28,7 +28,7 @@
 
 - **預設值不變**：`ServiceConfig.allow_lan` 預設 `False`，服務只 bind `127.0.0.1`。任何要監聽非本機位址的操作都必須明確 opt-in：`config.toml` 的 `[service] allow_lan = true`、環境變數 `TEA_ASR_ALLOW_LAN=1`，或 `tea-asr serve --allow-lan` / `tea-asr service install --allow-lan`。`ServiceConfig.validate_bind_or_raise(host, allow_lan=...)` 是唯一的檢查點，`tea-asr serve`／`tea-asr service install` 在真正 bind／安裝 LaunchAgent 之前都會呼叫；host 非本機且未 opt-in 一律拋 `RuntimeError`，不會靜默監聽（`src/tea_asr/config.py`）。
 - **Host／Origin allowlist 在 LAN 模式下的擴充**：預設（`allow_lan=False`）行為與 W1 完全相同，只接受 `127.0.0.1`／`localhost`（Host）與 `http://127.0.0.1`／`http://localhost`（Origin，不含 port）。開啟 `allow_lan` 後才擴大成：RFC1918 私有網段（`10/8`、`172.16/12`、`192.168/16`）、Tailscale 的 CGNAT 網段（`100.64.0.0/10`）與其 IPv6 ULA 範圍、`127/8`／`::1`，以及 `ServiceConfig.extra_allowed_hosts` 明確列出的主機名（例如 Tailscale MagicDNS 名稱，逗號分隔於 `TEA_ASR_EXTRA_ALLOWED_HOSTS` 或設定檔陣列）。公開 IP 與其他任意網域即使在 LAN 模式下仍會被拒絕（`forbidden_origin`）；LAN 模式下的 Origin 只接受 `http://`，不接受 `https://`（本服務不做 TLS，宣稱 https 的 Origin 沒有意義）。實作見 `src/tea_asr/wire.py::make_host_allowlist`／`make_origin_allowlist`。
-- **認證失敗的 rate limit**：每個來源位址（HTTP 用 `request.client.host`，WS 用 `websocket.client.host`）在滑動視窗內（預設 60 秒內 10 次失敗）超過失敗次數上限後，之後的請求一律回 `rate_limited`（HTTP 429／WS close 1013），即使之後才送出正確 token 也一樣，直到視窗過期或該來源曾經認證成功（成功會清空該來源的失敗計數）。這是防止 token 被暴力猜測的最低限度保護，獨立於 LAN 模式開關（loopback 模式下也生效）。實作見 `src/tea_asr/rate_limit.py::AuthRateLimiter`。
+- **認證失敗的 rate limit**：每個來源位址（HTTP 用 `request.client.host`，WS 用 `websocket.client.host`）在滑動視窗內（預設 60 秒內 10 次失敗）超過失敗次數上限後，之後的請求一律回 `rate_limited`（HTTP 429；WS 端這個檢查在 `accept()` 之前執行，網路上實際收到的是空 body 的 HTTP 403，不是 WS close 1013，細節見下方「`accept()` 之前的拒絕」），即使之後才送出正確 token 也一樣，直到視窗過期或該來源曾經認證成功（成功會清空該來源的失敗計數）。這是防止 token 被暴力猜測的最低限度保護，獨立於 LAN 模式開關（loopback 模式下也生效）。實作見 `src/tea_asr/rate_limit.py::AuthRateLimiter`。
 - **不加密警告**：`allow_lan=true` 生效時，啟動 log 會送出 `service.insecure_lan_bind` 事件；每個 HTTP 回應（含 `/v1/status`）會附加 `X-TEA-ASR-Security: unencrypted-lan-mode` 與 `X-TEA-ASR-Security-Notice` 標頭；WS `accept()` 的握手回應也附加同樣的標頭。這是標頭而非回應 body 欄位，因為 body 走的是 `docs/api/openapi.json` 凍結的 Pydantic schema，用標頭可以在不擴充 wire 契約的前提下讓警告在任何 HTTP client（`curl -i` 等）上都看得到。`tea-asr serve`／`tea-asr service install` 在 `allow_lan` 生效時也會在啟動時印出同樣的警告文字到 stderr。
 - **Token rotation／revocation**：`tea-asr token rotate` 產生新 token 並立即讓舊 token 失效（無寬限期）；`tea-asr token revoke` 讓 token 檔案清空、所有請求都被拒絕直到下一次 rotate。執行中的服務透過 `TokenAuthenticator`（追蹤 token 檔案 mtime，變動才重新讀取）偵測變化，不需要重啟即可套用。`create_app(token=...)` 這個明確傳入固定字串的路徑（測試、`export-schemas`）維持舊行為，不會追蹤檔案。**不做 expiration／per-token scope**：這是單一使用者的本機服務、所有路由共用同一把 bearer token，沒有多租戶場景需要切分 scope；固定到期時間只會在使用者沒做錯任何事的情況下讓 client 忽然斷線，卻攔不到任何攻擊者——rotation／revocation 已經涵蓋「token 外洩」與「我現在要切斷這個 client」兩種真實需求。
 
@@ -106,7 +106,7 @@ feature 只有完成該功能驗收才變 true；即使 mock mode 也不能假�
 `limits.max_continuous_sessions` 回報的是伺服器**實際會擋**的上限，不是文件推導值：超過時 `/v1/stream` 對新的 `session.start`（`profile=continuous`）回 `concurrent_session_limit`（見下方錯誤表），既有 session 不受影響。預設 2，量測方法與依據見
 [docs/benchmarks/concurrency-report.md](benchmarks/concurrency-report.md)；可用 `config.toml` 的 `service.max_continuous_sessions` 調整，已量測安全上限為 4。
 
-`limits.max_total_connections` 同樣是伺服器**實際 enforce** 的上限，涵蓋 `/v1/stream` 的**所有** profile（utterance＋continuous 總和），不是 continuous 之外「另外」的名額。超過時新連線在 WS upgrade 完成、`accept()` 之前即被拒絕並以 close code 1013（`session_limit`）關閉，因此被拒絕的連線收不到 `hello`；名額在連線關閉時立即釋出，可供下一個連線使用。預設 4，可用 `config.toml` 的 `service.max_total_connections` 調整。
+`limits.max_total_connections` 同樣是伺服器**實際 enforce** 的上限，涵蓋 `/v1/stream` 的**所有** profile（utterance＋continuous 總和），不是 continuous 之外「另外」的名額。超過時新連線在 `accept()` 之前即被拒絕；因為 ASGI 在 accept() 完成前無法送出帶 close code 的 WS close frame，網路上實際收到的是內容為空的 `HTTP/1.1 403 Forbidden`，不是 WS close 1013，`session_limit` 只是 server 內部記錄用的錯誤碼，client 從連線本身看不到（細節與其他三種同樣狀況見下方「`accept()` 之前的拒絕」）。因此被拒絕的連線收不到 `hello`；名額在連線關閉時立即釋出，可供下一個連線使用。預設 4，可用 `config.toml` 的 `service.max_total_connections` 調整。
 
 ## W10｜日誌讀取（`GET /v1/logs`）
 
@@ -228,13 +228,13 @@ outgoing events 最多256項或1MiB，先到為準。flow/ACK可合併成最新�
 
 | 錯誤 | HTTP | WS處置 |
 |---|---|---|
-| unauthenticated／forbidden_origin | 401／403 | upgrade拒絕；`forbidden_origin` 也是 HTTP `Host` allowlist 未過時的錯誤碼（含 `/healthz`、`/readyz`），不只限 WS Origin |
-| invalid_audio／unsupported_option | 422 | error；協定損壞close1008 |
-| protocol_error | 400 | 訊息不是合法 JSON、缺 `type`、未知欄位、seq／sample clock 不連續、frame 超出流控窗口等協定層違規；一律 close1008，不當成單一控制訊息的可恢復錯誤 |
+| unauthenticated／forbidden_origin | 401／403 | upgrade拒絕；WS 端這兩種與 rate_limited、`limits.max_total_connections` 觸發的 session_limit 一樣是在 `accept()` 之前拒絕，網路上實際都是空 body 的 HTTP 403，不是 WS close 1008（見下方「`accept()` 之前的拒絕」）；`forbidden_origin` 也是 HTTP `Host` allowlist 未過時的錯誤碼（含 `/healthz`、`/readyz`），不只限 WS Origin |
+| invalid_audio／unsupported_option | 422 | error；協定損壞close1008（這些發生在 session 已 accept 之後，close code 會真的送達） |
+| protocol_error | 400 | 訊息不是合法 JSON、缺 `type`、未知欄位、seq／sample clock 不連續、frame 超出流控窗口等協定層違規；一律 close1008，不當成單一控制訊息的可恢復錯誤（accept 之後才會發生，close code 會真的送達） |
 | conflict | 409 | 同一 `request_id` 對應到不同內容的控制訊息（見上方 commit/stop 去重規則）；連線不中止，回 `error` 事件即可 |
 | payload_too_large | 413 | close1009 |
-| queue_full／session_limit | 429 | start拒絕或flow pause；超配close1013；`session_limit` 也用於 `/v1/stream` 連線數已達 `limits.max_total_connections` 時拒絕新連線（accept前即拒絕，收不到hello），與單一 session 的等待片段佇列滿共用同一碼 |
-| concurrent_session_limit | 429 | 併發 continuous session 數已達 `limits.max_continuous_sessions`；`session.start` 被拒，close **4029**（不與queue_full／session_limit／slow_client共用的1013混在一起，這三者目前仍共用1013，client無法從close code分辨，見下方已知限制）；retryable=true，client應該退避後重試或等其他session結束 |
+| queue_full／session_limit | 429 | start拒絕或flow pause；超配close1013（accept 之後才會發生，close code 會真的送達）；`session_limit` 也用於 `/v1/stream` 連線數已達 `limits.max_total_connections` 時拒絕新連線——這種情況是在 accept 前拒絕，網路上實際是空 body HTTP 403，不是 WS close 1013（見下方「`accept()` 之前的拒絕」），跟這裡「單一 session 等待片段佇列滿」的 1013 是同一個錯誤碼、兩種完全不同的可觀察行為 |
+| concurrent_session_limit | 429 | 併發 continuous session 數已達 `limits.max_continuous_sessions`；`session.start` 被拒，close **4029**（不與queue_full／session_limit／slow_client共用的1013混在一起，這三者目前仍共用1013，client無法從close code分辨，見下方已知限制）；retryable=true，client應該退避後重試或等其他session結束；這個檢查發生在 accept 之後（`session.start` 訊息處理階段），close code 會真的送達 |
 | model_loading／model_unavailable | 503 | start拒絕；既有session送狀態相關error |
 | model_incompatible | 503 | worker 載入的 checkpoint 不符合預期格式／權重；不可重試，不進入自動重啟迴圈（見03） |
 | inference_failed／inference_timeout | 500／504 | segment.error；必要時worker復原 |
@@ -242,7 +242,33 @@ outgoing events 最多256項或1MiB，先到為準。flow/ACK可合併成最新�
 | internal_error | 500 | 單一片段辨識時的未預期例外；回該片段的 `segment.error`，不中止連線 |
 | storage_full（v0.2） | 507 | 停止 durable ACK、error、close1013 |
 
-**已知限制（尚未修）：** `queue_full`／`session_limit`／`slow_client` 三者仍共用 close 1013，client 無法單從 close code 分辨是「自己這個 session 的待轉錄佇列滿了」還是「被伺服器整體限速」。`concurrent_session_limit` 是唯一一個在本次改動中拿到獨立 close code（4029）的錯誤，因為它是連線admission階段就拒絕、語意與那三者都不同；把既有三者也拆開是更大範圍的改動，不在本次範圍內。
+**已知限制（尚未修）：** `queue_full`／`session_limit`／`slow_client` 三者在 accept 之後發生時仍共用 close 1013，client 無法單從 close code 分辨是「自己這個 session 的待轉錄佇列滿了」還是「被伺服器整體限速」。`concurrent_session_limit` 是唯一一個在本次改動中拿到獨立 close code（4029）的錯誤，因為它是連線admission階段就拒絕、語意與那三者都不同；把既有三者也拆開是更大範圍的改動，不在本次範圍內。
+
+### `accept()` 之前的拒絕：實際只有空 body 的 HTTP 403
+
+`unauthenticated`、`rate_limited`、`forbidden_origin`，以及 `limits.max_total_connections` 觸發的
+`session_limit`，這四種情況都是在 `websocket.accept()` 完成**之前**被 `run_stream`（`src/tea_asr/api/stream.py`）拒絕。ASGI 規範下，伺服器只有在 accept() 完成、WS 交握完成之後才能送出帶
+close code 的 WS close frame；accept() 之前唯一能回應 client 的是 HTTP 層級的回應。因此即使程式碼
+呼叫 `websocket.close(code=1008, reason=...)` 或 `websocket.close(code=1013, reason=...)`，uvicorn
+實際在網路上送出的都是**內容為空的 `HTTP/1.1 403 Forbidden`**（`Content-Length: 0`），不是 WS
+close 1008／1013——`reason` 與程式碼裡指定的 close code 都到不了 client，只存在於 server 端行為。
+這是用真實 `uvicorn` 搭配原始 socket（略過 `TestClient` 的 ASGI 模擬層，`TestClient` 會如實回放
+`websocket.close(code=...)`，掩蓋了這個落差）實測驗證的結果，不是理論推測。
+
+實務影響：
+
+- 上述四種拒絕原因（token 錯誤、被限速、Origin 不合法、連線數已滿）在 wire 上彼此**無法區分**，都是
+  同一個空 body 的 403；client 不能依賴 close code 或回應內容判斷是哪一種。
+- `session_limit` 這個錯誤碼本身橫跨兩種情境：連線 admission 階段（本節說的 accept 前拒絕，只回
+  HTTP 403）與單一 session 的等待片段佇列滿（accept 之後才會發生，這種才真的會送出 WS close
+  1013）——同一個錯誤碼、兩種完全不同的可觀察行為，見上方錯誤表。
+- 需要診斷連線為何被拒絕時，可行的做法只有額外對已認證的 HTTP 端點（例如 `GET /v1/status`）發一次
+  帶 token 的請求：能確認 token 本身是否有效（401 vs 200），但無法反推 Origin 或連線數上限是否是
+  真正原因——這是 wire 層級的資訊上限，不是本服務刻意隱藏。
+- 這是 ASGI／uvicorn 的框架行為，不是這個 service 特有的 bug：要送出真正的 WS close code 必須先
+  完成 accept()，而「先 accept 再關閉」代表讓未授權或被限速的連線先完成一次完整的 WS 交握——多耗
+  一次握手成本，也讓這類連線比純 HTTP 403 多換到一點點狀態（accept 之後才能被關閉）。兩者都是更差
+  的取捨，因此這裡選擇維持「accept 前用 HTTP 拒絕」的既有實作，只修正文件使其與實際行為一致。
 
 ## P2a／v0.1.1：可修訂預覽擴充
 
