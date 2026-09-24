@@ -18,6 +18,24 @@ def has_private_use(text: str) -> bool:
     return any(0xE000 <= ord(char) <= 0xF8FF for char in text)
 
 
+def replay_prefixes(backend: TeaMlxBackend, audio, step: int) -> list[dict]:
+    """docs/07 revisable replay: re-recognize 0..step, 0..2*step, ... then the whole.
+
+    Every row but the last is one preview snapshot; the last row is the final.
+    Shared with benchmarks/stable_prefix_eval.py so both measure the same replay.
+    """
+
+    runs = []
+    for end in [*range(step, len(audio), step), len(audio)]:
+        result = backend.transcribe(audio[:end])
+        row = asdict(result)
+        row["end_sample"] = end
+        row["rtf"] = result.total_time_s / (end / 16_000)
+        row["contains_private_use"] = has_private_use(result.text)
+        runs.append(row)
+    return runs
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("wav", type=Path)
@@ -32,22 +50,7 @@ def main() -> int:
     backend.load()
     load_s = time.perf_counter() - started
 
-    step = args.step_ms * 16
-    runs = []
-    for end in range(step, len(audio), step):
-        result = backend.transcribe(audio[:end])
-        row = asdict(result)
-        row["end_sample"] = end
-        row["rtf"] = result.total_time_s / (end / 16_000)
-        row["contains_private_use"] = has_private_use(result.text)
-        runs.append(row)
-
-    final = backend.transcribe(audio)
-    final_row = asdict(final)
-    final_row["end_sample"] = len(audio)
-    final_row["rtf"] = final.total_time_s / (len(audio) / 16_000)
-    final_row["contains_private_use"] = has_private_use(final.text)
-    runs.append(final_row)
+    runs = replay_prefixes(backend, audio, args.step_ms * 16)
 
     report = {
         "environment": {

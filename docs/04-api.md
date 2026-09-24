@@ -16,7 +16,7 @@
 - **WS Origin allowlist**：`/v1/stream` upgrade 驗證 `Origin` 僅限 `http://127.0.0.1`／`http://localhost`；省略 Origin（native client）視為合法；不符時在 `accept()` 之前拒絕，網路上實際收到的是空 body 的 HTTP 403，不是 WS close 1008（`src/tea_asr/api/stream.py::run_stream`；細節見下方「`accept()` 之前的拒絕」）。這與上一條 Host 檢查是兩段獨立程式碼，不是同一個中介層。
 - **`limits.max_continuous_sessions`**：伺服器實際 enforce，預設2，只算 `profile=continuous`；超過回 `concurrent_session_limit`，close 4029（`ContinuousSessionAdmission`）。
 - **`limits.max_total_connections`**：伺服器實際 enforce，預設4，涵蓋 `/v1/stream` 所有 profile 的連線總數；超過在 `accept()` 之前拒絕，網路上實際收到的是空 body 的 HTTP 403（不是 WS close 1013；收不到 `hello`；細節見下方「`accept()` 之前的拒絕」）（`ContinuousSessionAdmission` 重用於 `connection_admission`）。
-- **capabilities.features**：固定輸出10個布林欄位（含 `context_biasing`、`durable_revisable`），只有實際驗收過的功能才是 `true`；`partial_transcripts` 依 `TEA_ASR_REVISABLE_PREVIEW` 可能為 `true`；`translation` 只有在明確啟用翻譯 provider（預設關閉）且其模型已 ready 時才是 `true`（見下方「翻譯（opt-in）」）；其餘一律 `false`（`src/tea_asr/wire.py::CapabilityFeatures`）。翻譯關閉時 capabilities 回應與加入翻譯前逐欄相同（`tests/integration/test_translation_disabled.py`）。
+- **capabilities.features**：固定輸出10個布林欄位（含 `context_biasing`、`durable_revisable`），只有實際驗收過的功能才是 `true`；`partial_transcripts` 依 `TEA_ASR_REVISABLE_PREVIEW` 可能為 `true`；`translation` 只有在明確啟用翻譯 provider（預設關閉）且其模型已 ready 時才是 `true`（見下方「翻譯（opt-in）」）；其餘一律 `false`（`src/tea_asr/wire.py::CapabilityFeatures`）。翻譯關閉時 capabilities 回應與加入翻譯前逐欄相同（`tests/integration/test_translation_disabled.py`）。另有可選的第11個欄位 `stable_transcripts`：只在 revisable 預覽開啟時出現且為 `true`，關閉時整個欄位不出現（見下方「只增不改的穩定字幕流」）。
 - **flow.control 節奏**：只在流控窗口實際往前推進時送出，不是固定週期輪詢（`src/tea_asr/api/stream.py::_handle_frame`）。
 - **WS 心跳**：server 每15秒送 WS-layer ping，30秒未收到 pong 判定斷線（`uvicorn.run(..., ws_ping_interval=15, ws_ping_timeout=30)`，`src/tea_asr/cli.py`）。
 - **v0.2 端點**：`/v1/jobs*` 未實作，一律404，不回假 202（`tests/integration/test_schema_export.py::test_v0_2_endpoints_are_absent_not_faked`）。
@@ -306,6 +306,50 @@ outgoing queue可把同segment尚未送出的partial合併成最新值；final�
 P2a先驗收ephemeral；同時要求durable=true且尚未完成P4整合時回unsupported_option。P4完成後在capabilities另外宣告 `durable_revisable=true`；resume時client清除未final預覽，server不重播舊partial，依07保存revision high-water mark並從音訊重建。final保留原本的持久化、順序與去重保證。
 
 HTTP一次性transcription不提供partial；既有client不選revisable，端點與效能行為保持基線。
+
+## 只增不改的穩定字幕流（opt-in，2026-09-24）
+
+給 live subtitle 用：`transcript.partial` 會改掉已顯示的字，字幕因此會跳；`transcript.stable` 是由同一批 partial
+推導出的**衍生事件**，文字只增不改。演算法與切點規則見 [07](07-contextual-streaming.md)「只增不改的穩定前綴」，
+量測與門檻見 [穩定前綴報告](benchmarks/stable-prefix-report.md)。
+
+**宣告與要求。** revisable 預覽開啟時 `capabilities.features.stable_transcripts=true`（關閉時欄位不出現）。
+session.start 加可選 `stable`，必須同時 `transcript_mode="revisable"`，否則回 `unsupported_option`：
+
+```json
+{"type":"session.start","request_id":"start-1","profile":"continuous","audio":{"sample_rate":16000,"channels":1,"format":"pcm_s16le"},"language":"Chinese","durable":false,"transcript_mode":"revisable","stable":{"agreement":2}}
+```
+
+`agreement` 只接受 2（預設）或 3，其他值回 `unsupported_option`；server 照要求的值執行，不另送確認事件。
+省略 `stable` 時**完全不送** `transcript.stable`，其他事件逐欄不變；`session.started` 也沒有新增欄位。
+舊 server 不認得 `stable` 欄位會回 `protocol_error`（client 欄位 extra=forbid），client 可據此降級成只用 partial／final。
+
+| type | 欄位 | 語意 |
+|---|---|---|
+| `transcript.stable` | session_id、event_id、segment_id、segment_index、stable_revision、source_revision、start_sample、end_sample、text、state、diverged_chars | 該 segment 目前**完整**的已提交文字（不是增量、不是位置） |
+
+```json
+{"type":"transcript.stable","session_id":"session-uuid","event_id":5,"segment_id":"segment-uuid","segment_index":0,"stable_revision":1,"source_revision":2,"start_sample":0,"end_sample":25600,"text":"我們需要","state":"open","diverged_chars":0}
+```
+
+- `stable_revision`：每個 segment 從 1 起嚴格遞增，與 partial／final 的 `revision` 無關；`source_revision` 是產生此值的
+  partial 或 final 的 `revision`。`start_sample`／`end_sample` 同來源事件，sample clock 與 segment ID 沿用、不另分配。
+- **只增不改**：同一 `segment_id` 的後一則 `text` 一定以前一則開頭（也因此 UTF-8 bytes 以前一則 bytes 開頭），
+  且結尾落在 grapheme cluster 邊界。client 只需把多出的尾巴接上，不需要也不應該做 diff。
+- `state`：`open`＝之後可能還有；其餘三種是該 segment **最後一則** `transcript.stable`：
+  - `final`：`text` 與 `transcript.final.text` 完全相同。
+  - `diverged`：final 沒有延伸已提交的文字。`text`＝已提交文字＋final 在對齊點之後的部分，**不等於** final；
+    `diverged_chars` 是已提交文字中從第一個不一致處起算的字數。實測約 4% 的句子（n=2），逐字稿仍以 final 為準。
+  - `abandoned`：segment 以 `segment.skipped` 或 `segment.error` 結束；`text` 維持最後已提交的值，從未被 final 確認。
+    只有已經送過至少一則 `transcript.stable` 的 segment 才會收到它。
+- **時序**：每個 `transcript.final` 之後緊接著送該段的收尾 `transcript.stable`（`final` 或 `diverged`），中間沒有其他事件；
+  `abandoned` 緊接在 `segment.skipped`／`segment.error` 之後。open 的 stable 不會早於產生它的 partial（兩者都可能被合併，所以不保證相鄰）。
+  session.cancelled 或 session 級 error 之後不再送任何 `transcript.stable`，也不補收尾。
+- **跨 segment 隔離**：每段各自追蹤；下一段的 `transcript.stable` 可能早於上一段的 final 或收尾事件到達，
+  client 必須以 `segment_id` 分開保存，不能用「最新一則」覆蓋其他段。
+- **合併**：outgoing queue 可把同段尚未送出的 `open` 合併成最新值（新值包含舊值，不會少字）；收尾事件不合併、不丟棄，
+  並取代同段尚未送出的 `open`。client 不能要求每個 `stable_revision` 都收到。
+- **權威**：`transcript.stable` 只供顯示。貼入、匯出、存檔、翻譯與去重只認 `transcript.final`；翻譯仍只吃 final。
 
 ## 翻譯（opt-in，預設關閉）
 

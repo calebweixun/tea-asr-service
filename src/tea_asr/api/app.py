@@ -453,6 +453,7 @@ def create_app(
             features=CapabilityFeatures(
                 # Only flip these once the matching acceptance in docs/05 passes.
                 partial_transcripts=settings.revisable_preview,
+                stable_transcripts=True if settings.revisable_preview else None,
                 translation=translation is not None and translation.state == "ready",
             ),
             limits=CapabilityLimits(

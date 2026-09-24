@@ -709,6 +709,17 @@
             "title": "Request Id",
             "type": "string"
           },
+          "stable": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/models/StableOptions"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "transcript_mode": {
             "default": "final_only",
             "enum": [
@@ -950,6 +961,23 @@
         "title": "SpeechStarted",
         "type": "object"
       },
+      "StableOptions": {
+        "additionalProperties": false,
+        "description": "Opt-in append-only subtitle stream (`transcript.stable`).\n\n`agreement` is LocalAgreement-n: how many consecutive partials must share a\nprefix before it is committed. Both values were measured\n(docs/benchmarks/stable-prefix-report.md).",
+        "properties": {
+          "agreement": {
+            "default": 2,
+            "enum": [
+              2,
+              3
+            ],
+            "title": "Agreement",
+            "type": "integer"
+          }
+        },
+        "title": "StableOptions",
+        "type": "object"
+      },
       "TranscriptFinal": {
         "additionalProperties": false,
         "properties": {
@@ -1101,6 +1129,90 @@
           "text"
         ],
         "title": "TranscriptPartial",
+        "type": "object"
+      },
+      "TranscriptStable": {
+        "additionalProperties": false,
+        "description": "Append-only view of one segment for live subtitles (opt-in).\n\n`text` is the segment's whole committed text, never a delta: every event\nfor a `segment_id` has a `text` that starts with the previous one's, cut\nonly at grapheme-cluster boundaries. `state=\"open\"` may be followed by more;\nany other state is the segment's last `transcript.stable`. It never\nreplaces `transcript.partial` or `transcript.final`: the transcript, exports\nand translation keep using `transcript.final`.",
+        "properties": {
+          "diverged_chars": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Diverged Chars",
+            "type": "integer"
+          },
+          "end_sample": {
+            "title": "End Sample",
+            "type": "integer"
+          },
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "segment_id": {
+            "title": "Segment Id",
+            "type": "string"
+          },
+          "segment_index": {
+            "title": "Segment Index",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "source_revision": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Source Revision",
+            "type": "integer"
+          },
+          "stable_revision": {
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "title": "Stable Revision",
+            "type": "integer"
+          },
+          "start_sample": {
+            "title": "Start Sample",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "open",
+              "final",
+              "diverged",
+              "abandoned"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "type": {
+            "const": "transcript.stable",
+            "default": "transcript.stable",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "segment_id",
+          "segment_index",
+          "stable_revision",
+          "source_revision",
+          "start_sample",
+          "end_sample",
+          "text",
+          "state"
+        ],
+        "title": "TranscriptStable",
         "type": "object"
       },
       "TranslationError": {
@@ -1330,6 +1442,7 @@
           "speech.started": "#/$defs/models/SpeechStarted",
           "transcript.final": "#/$defs/models/TranscriptFinal",
           "transcript.partial": "#/$defs/models/TranscriptPartial",
+          "transcript.stable": "#/$defs/models/TranscriptStable",
           "translation.error": "#/$defs/models/TranslationError",
           "translation.segment": "#/$defs/models/TranslationSegment",
           "translation.started": "#/$defs/models/TranslationStarted"
@@ -1357,6 +1470,9 @@
         },
         {
           "$ref": "#/$defs/models/TranscriptFinal"
+        },
+        {
+          "$ref": "#/$defs/models/TranscriptStable"
         },
         {
           "$ref": "#/$defs/models/SegmentSkipped"

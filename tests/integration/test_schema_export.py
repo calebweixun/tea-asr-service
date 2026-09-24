@@ -44,6 +44,7 @@ def test_openapi_documents_the_error_envelope() -> None:
         "SegmentError",
         "TranscriptFinal",
         "TranscriptPartial",
+        "TranscriptStable",
         "FlowControl",
         "PreviewStatus",
         "SessionStopped",

@@ -109,6 +109,17 @@
             "title": "Partial Transcripts",
             "type": "boolean"
           },
+          "stable_transcripts": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stable Transcripts"
+          },
           "translation": {
             "default": false,
             "title": "Translation",
