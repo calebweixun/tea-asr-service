@@ -34,6 +34,14 @@ ERROR_HTTP_STATUS: dict[str, int] = {
     #: means the client's audio path died. It has to be *reported*, not
     #: silently dropped, or the client goes on showing "listening" (docs/06 #4).
     "idle_timeout": 408,
+    #: Opt-in translation provider (docs/04「翻譯（opt-in）」). Translation
+    #: failures never become ASR failures: `translation_failed` and
+    #: `translation_timeout` only ever arrive inside a `translation.error`
+    #: event, and `translation_unavailable` only rejects a session.start that
+    #: explicitly asked for translation.
+    "translation_unavailable": 503,
+    "translation_failed": 500,
+    "translation_timeout": 504,
 }
 
 #: Close codes for session-level failures. Anything not listed keeps the
@@ -69,6 +77,11 @@ ERROR_WS_CLOSE: dict[str, int] = {
     #: close or a backpressure drop, because only this one means the client's
     #: own capture stopped.
     "idle_timeout": 4408,
+    #: A session.start asked for translation the server cannot give right now
+    #: (disabled model path, SSD unplugged, still loading, or in use by another
+    #: session). Private-use like 4029: the client must be able to tell this
+    #: apart from an ASR-side refusal and retry without translation.
+    "translation_unavailable": 4503,
 }
 
 RETRYABLE_CODES = frozenset(

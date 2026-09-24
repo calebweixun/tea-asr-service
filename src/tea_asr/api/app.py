@@ -23,12 +23,20 @@ from tea_asr.api.stream import (
     private_use_warnings,
     run_stream,
 )
-from tea_asr.config import AppPaths, ServiceConfig, TokenAuthenticator
+from tea_asr.config import (
+    AppPaths,
+    ServiceConfig,
+    TokenAuthenticator,
+    validate_translation_or_raise,
+)
 from tea_asr.errors import ApiError
 from tea_asr.logs import MAX_LOG_EVENTS, event, read_recent_events, split_log_payload
 from tea_asr.model_spec import TEA_ASR_1_1_MLX_4BIT
 from tea_asr.rate_limit import AuthRateLimiter
 from tea_asr.scheduler import Scheduler
+from tea_asr.translation.session import MAX_PENDING_SEGMENTS
+from tea_asr.translation.simt import LATENCY_MODES, VERIFIED_DIRECTIONS
+from tea_asr.translation.supervisor import TranslationSupervisor
 from tea_asr.vad import VAD_SHA256, SileroVad, locate_vad
 from tea_asr.wire import (
     MAX_UTTERANCE_PCM_BYTES,
@@ -42,6 +50,7 @@ from tea_asr.wire import (
     Segment,
     StatusResponse,
     TranscriptionResponse,
+    TranslationCapability,
     make_host_allowlist,
     make_origin_allowlist,
 )
@@ -134,6 +143,8 @@ class InsecureLanWarningMiddleware:
 
 #: Sentinel so a caller can say "no VAD" (tests) instead of "load the default".
 _AUTO_VAD: Any = object()
+#: Sentinel: build the translation provider from `ServiceConfig` (tests inject one).
+_AUTO_TRANSLATION: Any = object()
 
 
 def _load_vad() -> SileroVad | None:
@@ -212,6 +223,7 @@ def create_app(
     token_authenticator: TokenAuthenticator | None = None,
     rate_limiter: AuthRateLimiter | None = None,
     paths: AppPaths | None = None,
+    translation_provider: Any = _AUTO_TRANSLATION,
 ) -> FastAPI:
     # A fixed `token` string (tests, `export-schemas`) is checked with a
     # constant-time comparison and never touches the filesystem. Otherwise a
@@ -236,6 +248,17 @@ def create_app(
         allow_lan=settings.allow_lan, extra_hosts=frozenset(settings.extra_allowed_hosts)
     )
     worker = supervisor or WorkerSupervisor(model_path)
+    #: Opt-in, separate translation provider (docs/06 #2). `None` when off,
+    #: which leaves every ASR code path exactly as it was.
+    validate_translation_or_raise(settings)
+    translation: Any = None
+    if translation_provider is not _AUTO_TRANSLATION:
+        translation = translation_provider
+    elif settings.translation_enabled:
+        translation = TranslationSupervisor(
+            Path(settings.translation_model_path).expanduser(),
+            max_memory_gib=settings.translation_max_memory_gib,
+        )
     scheduler = Scheduler(worker)
     vad = _load_vad() if vad_model is _AUTO_VAD else vad_model
     activity = Activity()
@@ -331,8 +354,14 @@ def create_app(
                 warning=INSECURE_LAN_WARNING,
                 extra_allowed_hosts=list(settings.extra_allowed_hosts),
             )
+        if translation is not None:
+            # In the background: a 7.7 GiB load (or a missing SSD) must not
+            # hold up ASR start-up.
+            translation.start_in_background()
         event(logger, "service.started", model_state=worker.state, continuous=vad is not None)
         yield
+        if translation is not None:
+            await translation.close()
         sleep_watcher.cancel()
         watcher.cancel()
         # Stop admitting work, then let what is already running finish.
@@ -403,7 +432,11 @@ def create_app(
             content={"status": "ready" if ready else worker.state},
         )
 
-    @app.get("/v1/capabilities", dependencies=[Depends(authorize)])
+    # exclude_none: without translation the body is byte-for-byte what it was
+    # before the `translation` block existed.
+    @app.get(
+        "/v1/capabilities", dependencies=[Depends(authorize)], response_model_exclude_none=True
+    )
     async def capabilities() -> Capabilities:
         return Capabilities(
             protocol_version=settings.protocol_version,
@@ -411,10 +444,26 @@ def create_app(
             features=CapabilityFeatures(
                 # Only flip these once the matching acceptance in docs/05 passes.
                 partial_transcripts=settings.revisable_preview,
+                translation=translation is not None and translation.state == "ready",
             ),
             limits=CapabilityLimits(
                 max_continuous_sessions=settings.max_continuous_sessions if vad is not None else 0,
                 max_total_connections=settings.max_total_connections,
+            ),
+            translation=(
+                TranslationCapability(
+                    state=translation.state,
+                    model=translation.model,
+                    model_revision=translation.model_revision,
+                    directions=list(VERIFIED_DIRECTIONS),
+                    latency_modes=list(LATENCY_MODES),
+                    max_sessions=1,
+                    max_pending_segments=MAX_PENDING_SEGMENTS,
+                    request_timeout_ms=round(translation.task_timeout_s * 1000),
+                    last_error=translation.last_error,
+                )
+                if translation is not None
+                else None
             ),
         )
 
@@ -505,6 +554,7 @@ def create_app(
                 registry=sessions,
                 continuous_admission=continuous_admission,
                 connection_admission=connection_admission,
+                translation=translation,
             )
         finally:
             activity.sessions -= 1

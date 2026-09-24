@@ -718,6 +718,17 @@
             "title": "Transcript Mode",
             "type": "string"
           },
+          "translation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/models/TranslationOptions"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "type": {
             "const": "session.start",
             "title": "Type",
@@ -1091,6 +1102,214 @@
         ],
         "title": "TranscriptPartial",
         "type": "object"
+      },
+      "TranslationError": {
+        "additionalProperties": false,
+        "description": "These finals got no translation; `stopped=true` means none will follow.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "source_segment_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Segment Ids",
+            "type": "array"
+          },
+          "stopped": {
+            "default": false,
+            "title": "Stopped",
+            "type": "boolean"
+          },
+          "type": {
+            "const": "translation.error",
+            "default": "translation.error",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "code",
+          "message",
+          "retryable",
+          "source_segment_ids"
+        ],
+        "title": "TranslationError",
+        "type": "object"
+      },
+      "TranslationOptions": {
+        "additionalProperties": false,
+        "description": "Opt-in translation of this session's finals by the separate provider.",
+        "properties": {
+          "direction": {
+            "const": "zh2en",
+            "title": "Direction",
+            "type": "string"
+          },
+          "latency_mode": {
+            "default": "native",
+            "enum": [
+              "low",
+              "native",
+              "high"
+            ],
+            "title": "Latency Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "direction"
+        ],
+        "title": "TranslationOptions",
+        "type": "object"
+      },
+      "TranslationSegment": {
+        "additionalProperties": false,
+        "description": "One committed, append-only piece of translation.\n\nIt never replaces or edits a `transcript.final`: the finals it covers are\nnamed by `source_segment_ids` and keep their own text, samples and IDs.\n`translation_index` counts up from 0 per session and is never reused or\nrevised.",
+        "properties": {
+          "direction": {
+            "title": "Direction",
+            "type": "string"
+          },
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "forced": {
+            "title": "Forced",
+            "type": "boolean"
+          },
+          "inference_ms": {
+            "title": "Inference Ms",
+            "type": "integer"
+          },
+          "latency_mode": {
+            "title": "Latency Mode",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "source_segment_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Segment Ids",
+            "type": "array"
+          },
+          "source_text": {
+            "title": "Source Text",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "translation_index": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Translation Index",
+            "type": "integer"
+          },
+          "type": {
+            "const": "translation.segment",
+            "default": "translation.segment",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "translation_index",
+          "source_segment_ids",
+          "source_text",
+          "text",
+          "direction",
+          "latency_mode",
+          "forced",
+          "inference_ms"
+        ],
+        "title": "TranslationSegment",
+        "type": "object"
+      },
+      "TranslationStarted": {
+        "additionalProperties": false,
+        "description": "Translation was accepted for this session; sent right after session.started.",
+        "properties": {
+          "direction": {
+            "title": "Direction",
+            "type": "string"
+          },
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "latency_mode": {
+            "title": "Latency Mode",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "model_revision": {
+            "title": "Model Revision",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "translation.started",
+            "default": "translation.started",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "request_id",
+          "direction",
+          "latency_mode",
+          "model",
+          "model_revision"
+        ],
+        "title": "TranslationStarted",
+        "type": "object"
       }
     },
     "server_event": {
@@ -1110,7 +1329,10 @@
           "session.stopped": "#/$defs/models/SessionStopped",
           "speech.started": "#/$defs/models/SpeechStarted",
           "transcript.final": "#/$defs/models/TranscriptFinal",
-          "transcript.partial": "#/$defs/models/TranscriptPartial"
+          "transcript.partial": "#/$defs/models/TranscriptPartial",
+          "translation.error": "#/$defs/models/TranslationError",
+          "translation.segment": "#/$defs/models/TranslationSegment",
+          "translation.started": "#/$defs/models/TranslationStarted"
         },
         "propertyName": "type"
       },
@@ -1159,6 +1381,15 @@
         },
         {
           "$ref": "#/$defs/models/ErrorEvent"
+        },
+        {
+          "$ref": "#/$defs/models/TranslationStarted"
+        },
+        {
+          "$ref": "#/$defs/models/TranslationSegment"
+        },
+        {
+          "$ref": "#/$defs/models/TranslationError"
         }
       ],
       "title": "Event"

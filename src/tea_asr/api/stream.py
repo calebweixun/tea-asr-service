@@ -19,6 +19,7 @@ from tea_asr.errors import ApiError
 from tea_asr.logs import event as log_event
 from tea_asr.rate_limit import AuthRateLimiter
 from tea_asr.segmenter import ContinuousSegmenter, SegmentClosed, SegmenterConfig, SpeechStarted
+from tea_asr.translation.session import SessionTranslator
 from tea_asr.vad import SileroVad
 from tea_asr.wire import (
     ALLOWED_WS_ORIGINS,
@@ -44,6 +45,7 @@ from tea_asr.wire import (
     SessionStopped,
     TranscriptFinal,
     TranscriptPartial,
+    TranslationStarted,
 )
 from tea_asr.wire import SpeechStarted as SpeechStartedEvent
 
@@ -95,6 +97,22 @@ class StreamScheduler(Protocol):
     async def transcribe(
         self, pcm: bytes, *, language: str = "Chinese", kind: str = "interactive"
     ) -> tuple[dict[str, Any], int]: ...
+
+
+class StreamTranslationProvider(Protocol):
+    """The separate translation provider (`tea_asr.translation.supervisor`)."""
+
+    state: str
+    generation: int
+    task_timeout_s: float
+    model: str
+    model_revision: str
+
+    def availability_error(self) -> ApiError | None: ...
+    def try_acquire(self, owner: object) -> bool: ...
+    def release(self, owner: object) -> None: ...
+    async def start_session(self, direction: str, latency_mode: str) -> int: ...
+    async def translate(self, text: str, *, force: bool) -> dict[str, Any]: ...
 
 
 def _is_private_use_codepoint(codepoint: int) -> bool:
@@ -234,6 +252,7 @@ class StreamSession:
         vad: SileroVad | None = None,
         registry: set[StreamSession] | None = None,
         continuous_admission: ContinuousSessionAdmission | None = None,
+        translation: StreamTranslationProvider | None = None,
     ) -> None:
         self._websocket = websocket
         self._scheduler = scheduler
@@ -259,6 +278,11 @@ class StreamSession:
         self._preview_pending = False
         self._preview_last_started = 0.0
         self._control_acks: dict[str, str] = {}
+        #: Opt-in translation (docs/04「翻譯（opt-in）」). `None` unless the
+        #: server enabled a provider *and* this session asked for it.
+        self._translation_provider = translation
+        self._translation_reserved = False
+        self._translator: SessionTranslator | None = None
 
     # -- handshake -----------------------------------------------------------
 
@@ -298,7 +322,33 @@ class StreamSession:
                 "model_loading" if self._model_state == "loading" else "model_unavailable",
                 f"模型目前狀態為 {self._model_state}。",
             )
+        if start.translation is not None:
+            self._admit_translation()
         return start
+
+    def _admit_translation(self) -> None:
+        """Reserve the translation provider or refuse the session.start.
+
+        A session that asked for translation and cannot have it is told so
+        up front; it is never started as a silent ASR-only session.
+        """
+
+        provider = self._translation_provider
+        if provider is None:
+            raise ApiError(
+                "unsupported_option",
+                "這個服務沒有啟用翻譯 provider（translation_enabled=false）。",
+            )
+        error = provider.availability_error()
+        if error is not None:
+            raise error
+        if not provider.try_acquire(self):
+            raise ApiError(
+                "translation_unavailable",
+                "翻譯 provider 一次只服務一個 session，目前已有其他 session 在使用。",
+                retryable=True,
+            )
+        self._translation_reserved = True
 
     def _preview_policy(self) -> PreviewPolicy | None:
         if self._transcript_mode != "revisable":
@@ -497,6 +547,10 @@ class StreamSession:
                 warnings=warnings,
             )
         )
+        if self._translator is not None:
+            # After the final is queued, never instead of it: translation only
+            # reads the text the client already has (docs/06 #5).
+            self._translator.submit(segment.segment_id, text)
 
     # -- audio ---------------------------------------------------------------
 
@@ -780,6 +834,26 @@ class StreamSession:
                 preview_policy=self._preview_policy(),
             )
         )
+        if start.translation is not None and self._translation_provider is not None:
+            self._translator = SessionTranslator(
+                self._translation_provider,
+                self._writer.emit,
+                session_id=self._state.session_id,
+                direction=start.translation.direction,
+                latency_mode=start.translation.latency_mode,
+            )
+            self._writer.emit(
+                TranslationStarted(
+                    session_id=self._state.session_id,
+                    event_id=0,
+                    request_id=start.request_id,
+                    direction=start.translation.direction,
+                    latency_mode=start.translation.latency_mode,
+                    model=self._translation_provider.model,
+                    model_revision=self._translation_provider.model_revision,
+                )
+            )
+            self._translator.start()
 
         while True:
             try:
@@ -869,6 +943,8 @@ class StreamSession:
                         )
                     )
                     self._pending.task_done()
+            if self._translator is not None:
+                await self._translator.drain()
             self._writer.emit(
                 SessionStopped(
                     session_id=state.session_id,
@@ -887,6 +963,7 @@ class StreamSession:
             if state.segment is not None:
                 state.segment.terminal = True
             await self._settle_preview()
+            await self._close_translation()
             self._writer.emit(
                 SessionCancelled(
                     session_id=state.session_id, event_id=0, request_id=control.request_id
@@ -902,6 +979,7 @@ class StreamSession:
         if self._state.segment is not None:
             self._state.segment.terminal = True
         await self._settle_preview()
+        await self._close_translation()
         try:
             self._writer.emit(
                 ErrorEvent(
@@ -928,7 +1006,24 @@ class StreamSession:
 
         await self.fail(ApiError("timeline_gap", reason))
 
+    async def _close_translation(self) -> None:
+        if self._translator is not None:
+            await self._translator.close()
+
+    def release_translation(self) -> None:
+        """Hand the translation provider back for the next session."""
+
+        if self._translation_reserved and self._translation_provider is not None:
+            self._translation_provider.release(self)
+        self._translation_reserved = False
+
     async def shutdown(self) -> None:
+        try:
+            await self._close_translation()
+        finally:
+            # Only after the translator task is gone, so the next session
+            # cannot interleave with this one's last request.
+            self.release_translation()
         for task in (self._consumer, self._preview_task):
             if task is not None:
                 task.cancel()
@@ -1001,6 +1096,7 @@ async def run_stream(
     registry: set[StreamSession] | None = None,
     continuous_admission: ContinuousSessionAdmission | None = None,
     connection_admission: ContinuousSessionAdmission | None = None,
+    translation: StreamTranslationProvider | None = None,
 ) -> None:
     """Authenticate and admit one `/v1/stream` connection.
 
@@ -1081,6 +1177,7 @@ async def run_stream(
         vad=vad,
         registry=registry,
         continuous_admission=continuous_admission,
+        translation=translation,
     )
     if registry is not None:
         registry.add(session)

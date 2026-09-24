@@ -29,5 +29,42 @@
     "files": {
       "onnx/model.onnx": "a4a068cd6cf1ea8355b84327595838ca748ec29a25bc91fc82e6c299ccdc5808"
     }
+  },
+  "translation": {
+    "repo_id": "netease-youdao/Confucius4-T3PO",
+    "revision": "446e5dcca080740f2c2dc9d06a91ed66a9920410",
+    "license": "Apache-2.0",
+    "optional": true,
+    "source_files": {
+      "config.json": "e1ba05e4e9a98b3931e62d9e4a885bc00c082203aebf4f4646bd1a8c99e77786",
+      "generation_config.json": "80b8ec6e7991b64763e4ff29b59a9cd2968b390d0736e0dc586585da04bad013",
+      "model.safetensors.index.json": "7b4b616a213f09ae889be05d1b135198589496e817d793e2605d5c5b1fe3ae5d",
+      "tokenizer.json": "9c5ae00e602b8860cbd784ba82a8aa14e8feecec692e7076590d014d7b7fdafa",
+      "tokenizer_config.json": "36353867830ff7e79fdce19840f53fccb5683fe2122cbe4fea5d5f792e898f97",
+      "model-00001-of-00008.safetensors": "2e83d88937bc50a7c2ca2db6a88f1fe77499561db3b67cc32e3ea463400ddd39",
+      "model-00002-of-00008.safetensors": "d3246d5c3d1153795f781315308034efd25c424debb31d17dd2978bd36cd6b16",
+      "model-00003-of-00008.safetensors": "87cffe062e6fa4158b69da9570f35659f41feff00c0fe0772eb219233bd95d0b",
+      "model-00004-of-00008.safetensors": "bc9895b460a333bf32bdd1ddce3877f36579e6468341e34e4845d9f0ad4ad7da",
+      "model-00005-of-00008.safetensors": "f72628fa48d6b5ed3bcda41585205f8b2c1934d6786deb6f4d5198283009b5a6",
+      "model-00006-of-00008.safetensors": "d06a4348652a929d12cf5311c681672463ce82c0d1f1560d1eef917789e548a9",
+      "model-00007-of-00008.safetensors": "57a42f2464a3d9ebffa55db8368e4bb4331ae80030e88bca3b71f0d8dc5320a4",
+      "model-00008-of-00008.safetensors": "5a18f14830c94df280a543c4e486656cb2f2f015890810af6a4b0a5759a4abf9"
+    },
+    "local_build": {
+      "tool": "mlx-lm 0.31.3 (mlx 0.32.2)",
+      "command": "python -m mlx_lm convert --hf-path <bf16 snapshot> --mlx-path <out> -q --q-bits 4 --q-group-size 64 --q-mode affine",
+      "bits_per_weight": 4.501,
+      "note": "Local conversion is deterministic in content but not guaranteed byte-identical across mlx versions; the hashes below are what was benchmarked in docs/benchmarks/t3po-eval-report.md.",
+      "files": {
+        "config.json": "3ecc5b56ea8da551e4bedaae0441cffe941a75101252029ca8d856ff3879d3f7",
+        "chat_template.jinja": "e187bfdc80c84e1a951e74d76368da6c603a74a3e45a44685b12bc46ee7540a7",
+        "generation_config.json": "80b8ec6e7991b64763e4ff29b59a9cd2968b390d0736e0dc586585da04bad013",
+        "model-00001-of-00002.safetensors": "ae7b1711e99b604b07ce5fd9600dde4bf41e3e09f57ce892339f9e21f00909c8",
+        "model-00002-of-00002.safetensors": "c56d18e1aa7d76faaf326a6256f2f4b553b8e4aa6d0d43c2cfd0ad3dc9021f4e",
+        "model.safetensors.index.json": "433ce75b2149d2b23b047b70dc8b05416345373147e4e473facb7bb4abffd36a",
+        "tokenizer.json": "3fd169731d2cbde95e10bf356d66d5997fd885dd8dbb6fb4684da3f23b2585d8",
+        "tokenizer_config.json": "8f5085a5703220031e631066f463e2fea68247ea09b0348f8ae47be591ae7165"
+      }
+    }
   }
 }

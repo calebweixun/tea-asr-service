@@ -197,12 +197,33 @@ class CapabilityLimits(ServerModel):
     max_total_connections: int = 4
 
 
+class TranslationCapability(ServerModel):
+    """The opt-in translation provider (docs/04「翻譯（opt-in）」).
+
+    Present only when the server was started with translation enabled; the
+    capabilities route omits it otherwise, so a server without translation
+    answers exactly as before.
+    """
+
+    state: str
+    model: str
+    model_revision: str
+    #: Only directions that were actually exercised (docs/06 #6).
+    directions: list[str]
+    latency_modes: list[str]
+    max_sessions: int
+    max_pending_segments: int
+    request_timeout_ms: int
+    last_error: str | None = None
+
+
 class Capabilities(ServerModel):
     protocol_version: str
     audio: CapabilityAudio = Field(default_factory=CapabilityAudio)
     profiles: list[str]
     features: CapabilityFeatures
     limits: CapabilityLimits
+    translation: TranslationCapability | None = None
 
 
 class StatusResponse(ServerModel):
@@ -249,6 +270,13 @@ class LogsResponse(ServerModel):
 # --- WebSocket: client control events ---------------------------------------
 
 
+class TranslationOptions(ClientModel):
+    """Opt-in translation of this session's finals by the separate provider."""
+
+    direction: Literal["zh2en"]
+    latency_mode: Literal["low", "native", "high"] = "native"
+
+
 class SessionStart(ClientModel):
     type: Literal["session.start"]
     request_id: str = Field(min_length=1, max_length=64)
@@ -257,6 +285,7 @@ class SessionStart(ClientModel):
     language: str = "Chinese"
     durable: bool = False
     transcript_mode: Literal["final_only", "revisable"] = "final_only"
+    translation: TranslationOptions | None = None
 
 
 class AudioCommit(ClientModel):
@@ -439,6 +468,48 @@ class ErrorEvent(SessionEvent):
     request_id: str | None = None
 
 
+class TranslationStarted(SessionEvent):
+    """Translation was accepted for this session; sent right after session.started."""
+
+    type: Literal["translation.started"] = "translation.started"
+    request_id: str
+    direction: str
+    latency_mode: str
+    model: str
+    model_revision: str
+
+
+class TranslationSegment(SessionEvent):
+    """One committed, append-only piece of translation.
+
+    It never replaces or edits a `transcript.final`: the finals it covers are
+    named by `source_segment_ids` and keep their own text, samples and IDs.
+    `translation_index` counts up from 0 per session and is never reused or
+    revised.
+    """
+
+    type: Literal["translation.segment"] = "translation.segment"
+    translation_index: int = Field(ge=0, le=MAX_SAFE_INT)
+    source_segment_ids: list[str]
+    source_text: str
+    text: str
+    direction: str
+    latency_mode: str
+    forced: bool
+    inference_ms: int
+
+
+class TranslationError(SessionEvent):
+    """These finals got no translation; `stopped=true` means none will follow."""
+
+    type: Literal["translation.error"] = "translation.error"
+    code: str
+    message: str
+    retryable: bool
+    source_segment_ids: list[str]
+    stopped: bool = False
+
+
 ServerEvent = Annotated[
     SessionStarted
     | AudioAck
@@ -454,7 +525,10 @@ ServerEvent = Annotated[
     | SessionStopped
     | SessionCancelled
     | Pong
-    | ErrorEvent,
+    | ErrorEvent
+    | TranslationStarted
+    | TranslationSegment
+    | TranslationError,
     Field(discriminator="type"),
 ]
 
