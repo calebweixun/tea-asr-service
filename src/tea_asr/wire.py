@@ -46,6 +46,43 @@ _TRUSTED_LAN_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
 )
 
 
+def parse_host_header(value: str) -> str:
+    """Strip an optional ``:port`` suffix from a raw ``Host`` header value.
+
+    Handles every shape the header can take: bracketed IPv6 with or without a
+    port (``[::1]:8327`` / ``[::1]`` / ``[fd00::1]:8327``), a hostname or IPv4
+    literal with or without a port (``localhost:8327`` / ``127.0.0.1``).
+
+    A naive ``value.split(":")[0]`` (the historic bug here) turns
+    ``[::1]:8327`` into ``"["`` — IPv6 addresses contain colons themselves, so
+    splitting on the first one truncates the whole header instead of removing
+    the port. That silently rejected every IPv6 Host, including the IPv6 ULA
+    addresses W9's LAN mode is supposed to allow.
+
+    This only strips the port; it does not decide whether the resulting host
+    is *allowed* — `make_host_allowlist` still rejects anything not on the
+    allowlist, bracket-stripped or not. Shared by the HTTP `Host` check
+    (`HostValidationMiddleware`); the WS `Origin` check does not need this
+    helper because `urlsplit(origin).hostname` already strips IPv6 brackets
+    and the port correctly on its own.
+    """
+
+    if value.startswith("["):
+        end = value.find("]")
+        # No closing bracket: malformed input, not a real bracketed IPv6
+        # host. Return it unchanged so the allowlist check rejects it below
+        # rather than this function guessing at a repair.
+        return value[1:end] if end != -1 else value
+    if value.count(":") == 1:
+        # Exactly one colon: an ordinary "host:port" or "ipv4:port". A bare
+        # (unbracketed) IPv6 literal has two or more colons and falls
+        # through unchanged instead, since a real Host header always
+        # brackets IPv6 (RFC 3986 §3.2.2) — anything else is malformed and
+        # should be left intact for the allowlist to reject.
+        return value.rsplit(":", 1)[0]
+    return value
+
+
 def is_trusted_lan_address(host: str) -> bool:
     """True if `host` (no port, no brackets) parses as a private/Tailscale IP.
 

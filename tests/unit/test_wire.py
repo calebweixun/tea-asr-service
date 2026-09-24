@@ -9,6 +9,7 @@ from tea_asr.wire import (
     is_trusted_lan_address,
     make_host_allowlist,
     make_origin_allowlist,
+    parse_host_header,
     ws_event_schema,
 )
 
@@ -105,6 +106,35 @@ def test_host_allowlist_accepts_explicit_extra_hosts_only_when_opted_in() -> Non
     assert opened(hostname) is True
     assert opened(hostname.upper()) is True  # case-insensitive
     assert opened("other.tailnet.ts.net") is False
+
+
+# --- `parse_host_header`: the `[::1]:8327` -> "[" bug -----------------------
+#
+# `Headers.get("host", "").split(":")[0]` truncated any bracketed IPv6 Host
+# down to just "[" because IPv6 addresses contain colons themselves; the
+# first colon it hit was inside the address, not before the port.
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("[::1]:8327", "::1"),
+        ("[::1]", "::1"),
+        ("[fd00::1]:8327", "fd00::1"),
+        ("localhost:8327", "localhost"),
+        ("127.0.0.1", "127.0.0.1"),
+        ("127.0.0.1:8327", "127.0.0.1"),
+    ],
+)
+def test_parse_host_header_strips_the_port(raw: str, expected: str) -> None:
+    assert parse_host_header(raw) == expected
+
+
+def test_parse_host_header_leaves_a_missing_closing_bracket_untouched() -> None:
+    """Not a valid bracketed IPv6 literal; left as-is so the allowlist check
+    rejects it outright instead of this function guessing at a repair."""
+
+    assert parse_host_header("[::1") == "[::1"
 
 
 def test_origin_allowlist_default_matches_the_historic_exact_match() -> None:

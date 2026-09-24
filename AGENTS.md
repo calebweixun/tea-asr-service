@@ -38,6 +38,7 @@ agy --model gemini-3.8-flash-high --mode accept-edits -p="<派工內容>"
 - **實作交給 `gpt-5.6-luna`（codex，max reasoning）或 `gemini-3.8-flash`（agy）。**
 - 選誰：需要推理的（診斷 bug、架構取捨、需求有歧義）給 luna max；模式已知的機械修改（改名、套用既有慣例、批次調整）給 gemini flash。
 - 驗收一律由派工方自己重跑 build／test／截圖確認，不直接採信實作方的回報。
+- **只有 root agent 可以派工。被派出來的 subagent 必須自己實作，不得再用 `codex exec`、`agy` 或任何 CLI 往下委派。** 巢狀派工會變成上游看不到、也控制不了的工作：2026-09-24 發生過一次，subagent 讀到上面「實作交給 luna」就自己派了 codex 任務，而 codex 額度早已用完，任務一啟動就失敗，subagent 卻一直等一個不存在的結果，worktree 什麼都沒改。派工單裡要明寫這一條。
 
 ### 派工一律在獨立 worktree + 分支上進行
 
