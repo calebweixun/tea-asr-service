@@ -4,6 +4,7 @@ import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+import pytest
 from fastapi.testclient import TestClient
 
 from tea_asr.rate_limit import AuthRateLimiter
@@ -68,6 +69,38 @@ def test_lan_mode_accepts_a_trusted_lan_host(supervisor: FakeSupervisor) -> None
     with build_client(supervisor, allow_lan=True) as http:
         response = http.get("/healthz", headers={"Host": "192.168.1.5"})
         assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "[::1]:8327",  # bracketed IPv6 loopback + port
+        "[::1]",  # bracketed IPv6 loopback, no port
+        "[fd00::1]:8327",  # IPv6 ULA (Tailscale range) + port
+    ],
+)
+def test_lan_mode_accepts_ipv6_hosts_once_the_port_is_correctly_stripped(
+    supervisor: FakeSupervisor, host: str
+) -> None:
+    """The real bug (`src/tea_asr/api/app.py`'s old `host.split(":")[0]`)
+    turned every bracketed IPv6 Host into the literal string "[", which is
+    never on any allowlist. Fixed parsing (`parse_host_header` in
+    `tea_asr/wire.py`) extracts the real address so W9's LAN-mode IPv6 ULA
+    allowance (docs/04-api.md) actually takes effect."""
+
+    with build_client(supervisor, allow_lan=True) as http:
+        response = http.get("/healthz", headers={"Host": host})
+        assert response.status_code == 200
+
+
+def test_lan_mode_still_rejects_a_public_ipv6_host(supervisor: FakeSupervisor) -> None:
+    """LAN mode widens the allowlist to IPv6 ULA/loopback, not to any IPv6
+    address — a public IPv6 literal must still be rejected."""
+
+    with build_client(supervisor, allow_lan=True) as http:
+        response = http.get("/healthz", headers={"Host": "[2001:db8::1]:8327"})
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "forbidden_origin"
 
 
 def test_lan_mode_still_rejects_a_public_host(supervisor: FakeSupervisor) -> None:

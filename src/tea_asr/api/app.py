@@ -44,6 +44,7 @@ from tea_asr.wire import (
     TranscriptionResponse,
     make_host_allowlist,
     make_origin_allowlist,
+    parse_host_header,
 )
 from tea_asr.worker.supervisor import WorkerSupervisor
 
@@ -53,6 +54,14 @@ from tea_asr.worker.supervisor import WorkerSupervisor
 #: for why this service ships without TLS and what that means for the
 #: operator: encryption and peer identity are delegated to the LAN/Tailscale
 #: transport, not provided by this application.
+#: docs/06-handoff.md 約束1：「測試fake必須明確開啟並在status標示」。一個 fake supervisor 只會透過
+#: `create_app(supervisor=...)` 明確注入（`tests/conftest.py::FakeSupervisor`；正式的 `serve` 路徑
+#: 一律用 `WorkerSupervisor`，見 create_app 下方），所以 `isinstance(worker, WorkerSupervisor)` 就是
+#: 「這是不是真的在跑真模型」的判準，不需要另外加一個旗標。`/v1/status` 用這兩個常數取代真實
+#: `TEA_ASR_1_1_MLX_4BIT` 的 repo_id／revision，避免看到 fake backend 卻誤以為真模型已載入。
+FAKE_BACKEND_MODEL = "fake-backend"
+FAKE_BACKEND_MODEL_REVISION = "test-only"
+
 INSECURE_LAN_WARNING = (
     "TEA ASR 目前以 LAN 模式監聽：連線未加密，token 以明文傳輸；"
     "僅應在受信任的網路（LAN／Tailscale）使用，不得暴露於公開網路。"
@@ -84,7 +93,7 @@ class HostValidationMiddleware:
         if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
-        host = Headers(scope=scope).get("host", "").split(":")[0]
+        host = parse_host_header(Headers(scope=scope).get("host", ""))
         if host and not self._is_allowed(host):
             error = ApiError("forbidden_origin", f"Host 不在允許清單：{host}")
             response = JSONResponse(status_code=error.http_status, content=error.envelope())
@@ -420,10 +429,13 @@ def create_app(
 
     @app.get("/v1/status", dependencies=[Depends(authorize)])
     async def service_status() -> StatusResponse:
+        real_backend = isinstance(worker, WorkerSupervisor)
         return StatusResponse(
             model_state=worker.state,
-            model=TEA_ASR_1_1_MLX_4BIT.repo_id,
-            model_revision=TEA_ASR_1_1_MLX_4BIT.revision,
+            model=TEA_ASR_1_1_MLX_4BIT.repo_id if real_backend else FAKE_BACKEND_MODEL,
+            model_revision=(
+                TEA_ASR_1_1_MLX_4BIT.revision if real_backend else FAKE_BACKEND_MODEL_REVISION
+            ),
             worker_generation=worker.generation,
             worker_load_ms=worker.load_ms,
             last_error=worker.last_error,

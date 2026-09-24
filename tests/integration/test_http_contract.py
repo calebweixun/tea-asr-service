@@ -31,6 +31,20 @@ def test_status_requires_auth(client: TestClient) -> None:
         assert body["queue"]["waiting_tasks"] == 0
 
 
+def test_status_under_a_fake_backend_does_not_claim_the_real_model(client: TestClient) -> None:
+    """docs/06-handoff.md constraint 1: a fake backend must be explicitly
+    opted into (it is here, via `create_app(supervisor=FakeSupervisor())` in
+    `tests/conftest.py::build_client`) and must show up as such in
+    `/v1/status` — it must not report the real model's repo id/revision,
+    which would look like the real model had actually loaded."""
+
+    with client as http:
+        body = http.get("/v1/status", headers=AUTH).json()
+        assert body["model"] != "Alkd/TEA-ASR-1.1-MLX-4bit"
+        assert body["model_revision"] != "caee57a908b6d64be08a6462c7a21ececbd4d7cb"
+        assert "fake" in body["model"].lower()
+
+
 def test_capabilities_do_not_claim_unverified_features(client: TestClient) -> None:
     with client as http:
         body = http.get("/v1/capabilities", headers=AUTH).json()
@@ -211,6 +225,61 @@ def test_requests_with_an_allowed_host_pass_through(client: TestClient, host: st
     with client as http:
         response = http.get("/healthz", headers={"Host": host})
         assert response.status_code == 200
+
+
+# --- Host header port-stripping (the `[::1]:8327` -> "[" bug) ----------------
+#
+# `HostValidationMiddleware` used to do `host.split(":")[0]`, which truncates
+# a bracketed IPv6 Host down to just "[" instead of stripping the port. That
+# rejected every IPv6 Host outright, including `::1` once LAN mode opts it
+# in (see tests/integration/test_lan_mode.py for the LAN-mode acceptances).
+# These cases are the ones a plain loopback (allow_lan=False) deployment must
+# still get right: a `:port` suffix must be stripped, not treated as part of
+# the hostname.
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1:8327", "localhost:8327"])
+def test_requests_with_an_allowed_host_and_port_pass_through(
+    client: TestClient, host: str
+) -> None:
+    with client as http:
+        response = http.get("/healthz", headers={"Host": host})
+        assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "[::1]:8327",  # bracketed IPv6 + port
+        "[::1]",  # bracketed IPv6, no port
+    ],
+)
+def test_ipv6_loopback_host_is_parsed_but_still_rejected_without_lan_mode(
+    client: TestClient, host: str
+) -> None:
+    """`::1` is only on the allowlist once LAN mode opts it in (see
+    tests/integration/test_lan_mode.py); this only asserts that the *parse*
+    now correctly extracts `::1` (not the pre-fix `"["`) so it is evaluated
+    against the allowlist as itself, still ending in the same 403 the
+    allowlist has always given a not-yet-allowed host — never widened."""
+
+    with client as http:
+        response = http.get("/healthz", headers={"Host": host})
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "forbidden_origin"
+
+
+def test_malformed_bracketed_host_is_rejected_not_silently_repaired(
+    client: TestClient,
+) -> None:
+    """A Host header with no closing bracket is not a valid bracketed IPv6
+    literal; `parse_host_header` leaves it untouched rather than guessing,
+    so it is rejected like any other unrecognized host."""
+
+    with client as http:
+        response = http.get("/healthz", headers={"Host": "[::1"})
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "forbidden_origin"
 
 
 def test_host_allowlist_also_covers_unauthenticated_health_endpoints(
