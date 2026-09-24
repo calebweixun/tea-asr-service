@@ -177,6 +177,21 @@ def main() -> int:
         default=None,
         help="寫入 summary.model 的標籤；搭配 --model-path 時預設用該路徑本身",
     )
+    parser.add_argument(
+        "--model-revision",
+        type=str,
+        default=None,
+        help="寫入 summary.model_revision；搭配 --model-path 時預設 local-selfconv",
+    )
+    parser.add_argument(
+        "--system-prompt",
+        type=str,
+        default=None,
+        help=(
+            "實驗用：把這段文字當 Qwen3-ASR 的 system prompt（context）。生產路徑不送"
+            "context；參數其餘與 TeaMlxBackend.transcribe 相同"
+        ),
+    )
     args = parser.parse_args()
 
     samples = load_samples(args.limit)
@@ -184,10 +199,17 @@ def main() -> int:
 
     model_path = args.model_path if args.model_path is not None else locate_prepared_model(TEA_ASR_1_1_MLX_4BIT)
     model_label = args.model_label or (str(args.model_path) if args.model_path is not None else TEA_ASR_1_1_MLX_4BIT.repo_id)
-    model_revision = "local-selfconv" if args.model_path is not None else TEA_ASR_1_1_MLX_4BIT.revision
+    model_revision = args.model_revision or (
+        "local-selfconv" if args.model_path is not None else TEA_ASR_1_1_MLX_4BIT.revision
+    )
+
+    import mlx.core as mx
 
     backend = TeaMlxBackend(model_path)
+    load_started = time.perf_counter()
     backend.load()
+    load_s = time.perf_counter() - load_started
+    mx.reset_peak_memory()
 
     report = Report()
     rtfs: list[float] = []
@@ -196,12 +218,25 @@ def main() -> int:
     for index, sample in enumerate(samples, start=1):
         audio = decode_mp3(sample.audio)
         started = time.perf_counter()
-        result = backend.transcribe(audio)
+        if args.system_prompt is None:
+            hypothesis = backend.transcribe(audio).text
+        else:
+            hypothesis = str(
+                backend._model.generate(
+                    audio,
+                    language="Chinese",
+                    temperature=0.0,
+                    batch_size=1,
+                    max_tokens=512,
+                    min_chunk_duration=1.0,
+                    verbose=False,
+                    system_prompt=args.system_prompt,
+                ).text
+            ).strip()
         elapsed = time.perf_counter() - started
         duration = audio.size / 16_000
         rtfs.append(elapsed / duration if duration else 0.0)
 
-        hypothesis = result.text
         if PRIVATE_USE.search(hypothesis):
             leaks += 1
 
@@ -238,6 +273,7 @@ def main() -> int:
         "model": model_label,
         "model_revision": model_revision,
         "samples": len(samples),
+        "system_prompt": args.system_prompt,
         "raw_mer": round(report.raw_mer.rate, 4),
         "normalized_mer": round(report.norm_mer.rate, 4),
         "cer": round(report.cer.rate, 4),
@@ -246,6 +282,12 @@ def main() -> int:
         "private_use_rate": round(leaks / len(samples), 4) if samples else 0.0,
         "rtf_p50": round(statistics.median(rtfs), 4) if rtfs else None,
         "rtf_p95": round(sorted(rtfs)[int(len(rtfs) * 0.95)], 4) if len(rtfs) > 1 else None,
+        "rtf_mean": round(statistics.fmean(rtfs), 4) if rtfs else None,
+        "load_s": round(load_s, 2),
+        # MLX 自己配置的記憶體（權重＋推論期間 Metal buffer）的峰值；進程整體
+        # peak RSS 請搭配 `/usr/bin/time -l` 另外看。
+        "mlx_active_memory_gib": round(mx.get_active_memory() / 2**30, 3),
+        "mlx_peak_memory_gib": round(mx.get_peak_memory() / 2**30, 3),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
