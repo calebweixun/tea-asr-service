@@ -29,6 +29,8 @@ TERMINAL_TYPES = frozenset(
         "translation.started",
         "translation.segment",
         "translation.error",
+        # Only its closing event (state != "open"); open ones coalesce per segment.
+        "transcript.stable",
     }
 )
 
@@ -45,8 +47,8 @@ class EventWriter:
     """Bounded outgoing event queue with a single writer task.
 
     `event_id` is assigned at write time so it stays monotonic even when a
-    pending event is merged away, which docs/04-api.md permits for flow, ACK and
-    partial events but forbids for finals.
+    pending event is merged away, which docs/04-api.md permits for flow, ACK,
+    partial and open stable events but forbids for finals.
     """
 
     def __init__(
@@ -83,6 +85,8 @@ class EventWriter:
             self._replace(event_type, payload)
         elif event_type == "transcript.partial":
             self._replace_partial(payload)
+        elif event_type == "transcript.stable":
+            self._emit_stable(payload)
         else:
             self._append(payload)
         if event_type in {"transcript.final", "segment.skipped", "segment.error"}:
@@ -115,6 +119,39 @@ class EventWriter:
                 self._bytes += self._size(payload) - self._size(pending)
                 self._queue[index] = payload
                 return
+        self._append(payload)
+
+    def _emit_stable(self, payload: dict[str, Any]) -> None:
+        """`transcript.stable` carries the whole committed text, so a newer one
+        for the same segment supersedes an unsent older one without losing
+        anything. The closing one (state != "open") is never replaced or dropped.
+        """
+
+        segment_id = payload["segment_id"]
+        if payload["state"] == "open":
+            for index, pending in enumerate(self._queue):
+                if (
+                    pending["type"] == "transcript.stable"
+                    and pending["segment_id"] == segment_id
+                    and pending["state"] == "open"
+                ):
+                    self._bytes += self._size(payload) - self._size(pending)
+                    self._queue[index] = payload
+                    return
+            self._append(payload)
+            return
+        kept = deque(
+            item
+            for item in self._queue
+            if not (
+                item["type"] == "transcript.stable"
+                and item["segment_id"] == segment_id
+                and item["state"] == "open"
+            )
+        )
+        if len(kept) != len(self._queue):
+            self._queue = kept
+            self._bytes = sum(self._size(item) for item in self._queue)
         self._append(payload)
 
     def _drop_partials(self, segment_id: str) -> None:

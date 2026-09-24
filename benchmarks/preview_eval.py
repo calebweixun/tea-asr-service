@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import itertools
 import json
 import statistics
 import struct
@@ -42,6 +43,8 @@ class Segment:
     final: str | None = None
     final_at: float | None = None
     final_end_sample: int = 0
+    #: `transcript.stable` (opt-in): (arrival, text, state) in arrival order.
+    stable: list[tuple[float, str, str]] = field(default_factory=list)
 
 
 def read_wav(path: Path) -> bytes:
@@ -51,8 +54,14 @@ def read_wav(path: Path) -> bytes:
         return wav.readframes(wav.getnframes())
 
 
-async def run_session(pcm: bytes, url: str, revisable: bool) -> tuple[list[Segment], str]:
-    token = AppPaths.macos_default().token_file.read_text().strip()
+async def run_session(
+    pcm: bytes,
+    url: str,
+    revisable: bool,
+    stable: int | None = None,
+    token_file: Path | None = None,
+) -> tuple[list[Segment], str]:
+    token = (token_file or AppPaths.macos_default().token_file).read_text().strip()
     segments: dict[int, Segment] = {}
     protocol = "?"
 
@@ -69,6 +78,7 @@ async def run_session(pcm: bytes, url: str, revisable: bool) -> tuple[list[Segme
                     "language": "Chinese",
                     "durable": False,
                     "transcript_mode": "revisable" if revisable else "final_only",
+                    **({"stable": {"agreement": stable}} if stable else {}),
                 }
             )
         )
@@ -100,6 +110,10 @@ async def run_session(pcm: bytes, url: str, revisable: bool) -> tuple[list[Segme
                     if item.first_partial_at is None:
                         item.first_partial_at = now
                     item.partials.append((now, event["text"]))
+                elif kind == "transcript.stable":
+                    segment(event["segment_index"]).stable.append(
+                        (now, event["text"], event["state"])
+                    )
                 elif kind == "transcript.final":
                     item = segment(event["segment_index"])
                     item.final = event["text"]
@@ -150,14 +164,25 @@ def main() -> int:
     parser.add_argument("--wav", type=Path, required=True)
     parser.add_argument("--url", default="ws://127.0.0.1:8327/v1/stream")
     parser.add_argument("--out", type=Path, default=Path("benchmarks/results/preview.json"))
+    parser.add_argument(
+        "--stable",
+        type=int,
+        choices=(2, 3),
+        help="同時要求 transcript.stable（LocalAgreement-n），並檢查只增不改",
+    )
+    parser.add_argument("--token-file", type=Path, help="省略時用本機服務的 token 檔")
     args = parser.parse_args()
 
     pcm = read_wav(args.wav)
     print("=== revisable ===")
-    revisable, protocol = asyncio.run(run_session(pcm, args.url, revisable=True))
+    revisable, protocol = asyncio.run(
+        run_session(pcm, args.url, revisable=True, stable=args.stable, token_file=args.token_file)
+    )
     print(f"protocol_version={protocol}")
     print("\n=== final_only 對照 ===")
-    baseline, _ = asyncio.run(run_session(pcm, args.url, revisable=False))
+    baseline, _ = asyncio.run(
+        run_session(pcm, args.url, revisable=False, token_file=args.token_file)
+    )
 
     first_latency: list[float] = []
     revisions: list[int] = []
@@ -201,6 +226,32 @@ def main() -> int:
             f"修訂 {len(item.partials)}  {item.final}"
         )
 
+    stable_summary = None
+    if args.stable:
+        violations = diverged = closed = events = 0
+        for item in revisable:
+            events += len(item.stable)
+            texts = [text for _, text, _ in item.stable]
+            violations += sum(
+                not newer.startswith(older) for older, newer in itertools.pairwise(texts)
+            )
+            if item.stable and item.stable[-1][2] != "open":
+                closed += 1
+                diverged += item.stable[-1][2] == "diverged"
+                if item.stable[-1][2] == "final" and item.stable[-1][1] != item.final:
+                    violations += 1
+        stable_summary = {
+            "agreement": args.stable,
+            "events": events,
+            "segments_closed": closed,
+            "segments_with_final": sum(item.final is not None for item in revisable),
+            "diverged": diverged,
+            "append_only_violations": violations,
+        }
+        for row, item in zip(rows, [i for i in revisable if i.final is not None], strict=True):
+            row["stable"] = [[round(at - (item.spoke_at or at), 3), text, state]
+                             for at, text, state in item.stable]
+
     finals_match = [a.final for a in revisable] == [b.final for b in baseline]
     summary = {
         "protocol_version": protocol,
@@ -216,6 +267,7 @@ def main() -> int:
         "revision_regressed": regressed,
         "revision_unchanged": unchanged,
         "finals_identical_to_final_only": finals_match,
+        "stable": stable_summary,
         "baseline_finals": [item.final for item in baseline],
     }
     print("\n" + json.dumps(summary, ensure_ascii=False, indent=2))

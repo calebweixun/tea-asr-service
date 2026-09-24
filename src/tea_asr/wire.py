@@ -218,6 +218,11 @@ class CapabilityFeatures(ServerModel):
     diarization: bool = False
     hotwords: bool = False
     context_biasing: bool = False
+    #: Opt-in append-only `transcript.stable` (docs/07「只增不改的穩定前綴」).
+    #: Derived from revisable partials, so it is only offered with them. `None`
+    #: is left out of the response (exclude_none), so a server without
+    #: revisable preview answers byte-for-byte as before this field existed.
+    stable_transcripts: bool | None = None
     durable_sessions: bool = False
     durable_revisable: bool = False
     batch_jobs: bool = False
@@ -314,6 +319,17 @@ class TranslationOptions(ClientModel):
     latency_mode: Literal["low", "native", "high"] = "native"
 
 
+class StableOptions(ClientModel):
+    """Opt-in append-only subtitle stream (`transcript.stable`).
+
+    `agreement` is LocalAgreement-n: how many consecutive partials must share a
+    prefix before it is committed. Both values were measured
+    (docs/benchmarks/stable-prefix-report.md).
+    """
+
+    agreement: Literal[2, 3] = 2
+
+
 class SessionStart(ClientModel):
     type: Literal["session.start"]
     request_id: str = Field(min_length=1, max_length=64)
@@ -323,6 +339,8 @@ class SessionStart(ClientModel):
     durable: bool = False
     transcript_mode: Literal["final_only", "revisable"] = "final_only"
     translation: TranslationOptions | None = None
+    #: Needs `transcript_mode="revisable"`; omitted means no `transcript.stable`.
+    stable: StableOptions | None = None
 
 
 class AudioCommit(ClientModel):
@@ -451,6 +469,35 @@ class TranscriptFinal(SessionEvent):
     warnings: list[str] = Field(default_factory=list)
 
 
+StableState = Literal["open", "final", "diverged", "abandoned"]
+
+
+class TranscriptStable(SessionEvent):
+    """Append-only view of one segment for live subtitles (opt-in).
+
+    `text` is the segment's whole committed text, never a delta: every event
+    for a `segment_id` has a `text` that starts with the previous one's, cut
+    only at grapheme-cluster boundaries. `state="open"` may be followed by more;
+    any other state is the segment's last `transcript.stable`. It never
+    replaces `transcript.partial` or `transcript.final`: the transcript, exports
+    and translation keep using `transcript.final`.
+    """
+
+    type: Literal["transcript.stable"] = "transcript.stable"
+    segment_id: str
+    segment_index: int
+    #: 1, 2, ... per segment; separate from the partial/final `revision`.
+    stable_revision: int = Field(ge=1, le=MAX_SAFE_INT)
+    #: `revision` of the partial or final this value was derived from.
+    source_revision: int = Field(ge=0, le=MAX_SAFE_INT)
+    start_sample: int
+    end_sample: int
+    text: str
+    state: StableState
+    #: Committed characters the final disagrees with; non-zero only if diverged.
+    diverged_chars: int = Field(default=0, ge=0)
+
+
 class SegmentSkipped(SessionEvent):
     type: Literal["segment.skipped"] = "segment.skipped"
     segment_id: str
@@ -555,6 +602,7 @@ ServerEvent = Annotated[
     | SegmentQueued
     | TranscriptPartial
     | TranscriptFinal
+    | TranscriptStable
     | SegmentSkipped
     | SegmentError
     | FlowControl

@@ -19,6 +19,7 @@ from tea_asr.errors import ApiError
 from tea_asr.logs import event as log_event
 from tea_asr.rate_limit import AuthRateLimiter
 from tea_asr.segmenter import ContinuousSegmenter, SegmentClosed, SegmenterConfig, SpeechStarted
+from tea_asr.stable import StablePrefixTracker, StableUpdate
 from tea_asr.translation.session import SessionTranslator
 from tea_asr.vad import SileroVad
 from tea_asr.wire import (
@@ -45,6 +46,7 @@ from tea_asr.wire import (
     SessionStopped,
     TranscriptFinal,
     TranscriptPartial,
+    TranscriptStable,
     TranslationStarted,
 )
 from tea_asr.wire import SpeechStarted as SpeechStartedEvent
@@ -166,6 +168,10 @@ class Segment:
     revision: int = 0
     published_preview_end: int = 0
     terminal: bool = False
+    #: Opt-in append-only subtitle state; `None` unless session.start asked.
+    stable: StablePrefixTracker | None = None
+    stable_revision: int = 0
+    stable_end_sample: int = 0
 
 
 @dataclass(slots=True)
@@ -283,6 +289,8 @@ class StreamSession:
         self._translation_provider = translation
         self._translation_reserved = False
         self._translator: SessionTranslator | None = None
+        #: LocalAgreement-n for `transcript.stable`; `None` means never sent.
+        self._stable_agreement: int | None = None
 
     # -- handshake -----------------------------------------------------------
 
@@ -316,6 +324,11 @@ class StreamSession:
             raise ApiError(
                 "unsupported_option",
                 "revisable 預覽尚未通過 P2a 驗收，請以 final_only 建立 session。",
+            )
+        if start.stable is not None and start.transcript_mode != "revisable":
+            raise ApiError(
+                "unsupported_option",
+                "stable 由 revisable 預覽推導，需要 transcript_mode=revisable。",
             )
         if self._model_state != "ready":
             raise ApiError(
@@ -400,6 +413,8 @@ class StreamSession:
             index=self._state.next_index,
             start_sample=start_sample,
         )
+        if self._stable_agreement is not None:
+            segment.stable = StablePrefixTracker(self._stable_agreement)
         self._state.next_index += 1
         self._state.segment = segment
         return segment
@@ -447,6 +462,7 @@ class StreamSession:
                         retryable=False,
                     )
                 )
+                self._abandon_stable(closed.segment)
             finally:
                 self._pending.task_done()
 
@@ -497,6 +513,7 @@ class StreamSession:
                     retryable=exc.retryable,
                 )
             )
+            self._abandon_stable(segment)
             return
         if state.cancelled:
             return
@@ -511,6 +528,7 @@ class StreamSession:
                     reason="no_speech",
                 )
             )
+            self._abandon_stable(segment)
             return
         warnings = private_use_warnings(raw_text)
         text = self._apply_pua_filter(raw_text, segment=segment, kind="final")
@@ -529,6 +547,7 @@ class StreamSession:
                     reason="empty",
                 )
             )
+            self._abandon_stable(segment)
             return
         self._writer.emit(
             TranscriptFinal(
@@ -547,6 +566,14 @@ class StreamSession:
                 warnings=warnings,
             )
         )
+        if segment.stable is not None:
+            # Right after the final, never instead of it (docs/06 #5).
+            self._emit_stable(
+                segment,
+                segment.stable.finalize(text),
+                source_revision=segment.revision + 1,
+                end_sample=closed.end_sample,
+            )
         if self._translator is not None:
             # After the final is queued, never instead of it: translation only
             # reads the text the client already has (docs/06 #5).
@@ -704,6 +731,12 @@ class StreamSession:
                     text=text,
                 )
             )
+            if segment.stable is not None:
+                update = segment.stable.observe(text)
+                if update is not None:
+                    self._emit_stable(
+                        segment, update, source_revision=segment.revision, end_sample=end_sample
+                    )
         except ApiError as exc:
             if not segment.terminal:
                 self._writer.emit(
@@ -729,6 +762,49 @@ class StreamSession:
             if self._preview_pending and not segment.terminal:
                 self._preview_pending = False
                 self._maybe_schedule_preview()
+
+    # -- stable prefix (opt-in) ------------------------------------------------
+
+    def _emit_stable(
+        self, segment: Segment, update: StableUpdate, *, source_revision: int, end_sample: int
+    ) -> None:
+        segment.stable_revision += 1
+        segment.stable_end_sample = end_sample
+        self._writer.emit(
+            TranscriptStable(
+                session_id=self._state.session_id,
+                event_id=0,
+                segment_id=segment.segment_id,
+                segment_index=segment.index,
+                stable_revision=segment.stable_revision,
+                source_revision=source_revision,
+                start_sample=segment.start_sample,
+                end_sample=end_sample,
+                text=update.text,
+                state=update.state,
+                diverged_chars=update.diverged_chars,
+            )
+        )
+
+    def _abandon_stable(self, segment: Segment) -> None:
+        """Close a segment's stable line when it ends without a final.
+
+        Only a segment whose stable text was already shown needs closing; one
+        that never committed anything stays silent, like before.
+        """
+
+        tracker = segment.stable
+        if tracker is None or tracker.closed:
+            return
+        update = tracker.abandon()
+        if segment.stable_revision == 0:
+            return
+        self._emit_stable(
+            segment,
+            update,
+            source_revision=segment.revision,
+            end_sample=segment.stable_end_sample,
+        )
 
     def _settle_preview_soon(self, segment: Segment) -> None:
         """Mark the segment closed so an in-flight preview discards its result."""
@@ -809,6 +885,8 @@ class StreamSession:
         self._profile = start.profile
         self._transcript_mode = start.transcript_mode
         self._language = start.language
+        if start.stable is not None:
+            self._stable_agreement = start.stable.agreement
         self._control_acks[start.request_id] = "session.start:"
         if self._profile == "continuous":
             assert self._vad is not None
@@ -942,6 +1020,7 @@ class StreamSession:
                             retryable=True,
                         )
                     )
+                    self._abandon_stable(pending.segment)
                     self._pending.task_done()
             if self._translator is not None:
                 await self._translator.drain()
