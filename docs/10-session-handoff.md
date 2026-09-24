@@ -14,7 +14,9 @@
 |---|---|
 | Server（`src/tea_asr/`） | P0–P3、P2a 完成並實測；全 Unicode PUA 過濾與兩個實測競態修復完成。143 個測試通過（`uv run pytest tests/unit tests/integration -q`） |
 | Mac client（`clients/macos/`） | 可用：聽寫、會議記錄、選單列狀態、服務啟停。P5a 的收音裝置／聲道、可設定快捷鍵／PTT、feedback、non-activating overlay 與 deterministic 後處理都已實作。主視窗已做過一輪原生 macOS 設計整理（拿掉每頁大標與描邊卡片、設定頁走 NSGridView、間距收斂成 Metrics 常數），右欄改為 build-once + update 閉包、不再每次狀態更新重建整欄，側欄固定寬度不可收折。「權限」已併入「診斷與權限」頁；macOS 26 起的「裝置控制和資料取用」改名已依 runtime 版本處理。輸入裝置改為嚴格依 UID 路由並 read-back 驗證，附獨立於 session 的電平監看元件。`swift build` 無 warning、93 個 client 測試通過。**仍待實機驗收**：overlay 焦點、跨 app key-up、熱鍵衝突、實際收音品質。P5b 尚未開始 |
-| OBS 外掛（另一個倉庫） | Phase A 完成：錯誤與連線狀態只在 Tools／設定診斷，不進字幕畫布；新 source 預設 Fixed 960px，舊 source migration 保留 Auto；CJK effective defaults 已修復。strict two-line layout 延至 Phase B |
+| OBS 外掛（`calebweixun/tea-live-subtitle`，本機 `~/Codes/obs-plugins/tea-live-subtitle`） | **2026-09-25 可接目前的 server 提供 live subtitle。** 相容性修正（tea-live-subtitle#1）：帶 token 的 preflight、退避上限且每來源每 60 秒最多 2 次認證失敗（低於 server 的 10 次門檻）、server 重啟後會重連；原版 partial 永遠不出現、token 錯 5 秒自鎖、重啟後不再重連，e2e 僅 1/11。穩定字幕（tea-live-subtitle#2）：使用 server 的 `transcript.stable`，預設開啟，畫面只增不改，斷線凍結 10 秒。e2e 17/17、CI 三平台建置通過。**尚未在真實 OBS 裡實機驗收**；本機 Xcode 27 的 `cmake --preset macos` 無法 configure，正式 bundle 請用 CI artifact。設定標籤仍是英文 fallback |
+| 穩定字幕流（server） | `transcript.stable`（opt-in，LocalAgreement-2）：只增不改，鎖定延遲 p95 1.70 s，字幕準確度與 final 無顯著差異。現況 partial 有 78.8% 會改掉已顯示的字。見 `docs/benchmarks/stable-prefix-report.md` |
+| 同步翻譯 | T3PO zh→en（opt-in，預設關閉），開啟時 ASR final 延遲 p95 約多 0.2–0.3 s。見 `docs/benchmarks/t3po-eval-report.md` |
 | P4 長檔案與保存 | 未開始，`/v1/jobs` 回 404 |
 
 ### 目前在途（2026-09-20）
