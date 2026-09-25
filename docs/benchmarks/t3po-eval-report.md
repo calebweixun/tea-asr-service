@@ -25,7 +25,7 @@
   bf16 8 個 shard 共 29.5 GB，逐一核對 sha256 後轉換。
 - 量化：`python -m mlx_lm convert -q --q-bits 4 --q-group-size 64 --q-mode affine`（全部線性層與 embedding 4bit、
   group 64、affine；mlx-lm 回報 4.501 bits/weight）。轉換 38 秒。輸出 8,142,716 KiB（7.77 GiB，2 個 shard），sha256 在 `models.lock.json` 的 `translation.local_build`。
-- 位置：模型只放外接 SSD `/Volumes/DigiFusion/tea-asr-models/t3po-mlx-4bit`。bf16 確認 4bit 可用（production worker 實際翻譯成功）後已移到該磁碟的垃圾桶。
+- 位置：模型只放外接 SSD `/Volumes/P3PLUS1T_APFS/tea-asr-models/t3po-mlx-4bit`。bf16 確認 4bit 可用（production worker 實際翻譯成功）後已移到該磁碟的垃圾桶。
 - 協定：照官方 repo `netease-youdao/Confucius4-T3PO` commit `4827f02b7b344d9ab5af95ad484fd64b6682cb85` 的
   `inference/prompts.py`（長版任務提示，不是模型卡的短版）、`translation.py`、`latency.py` 移植，沒有引入 vLLM／PyTorch／CUDA。
   三個檔位＝對兩個停止 token（151643、151645）加 logit bias `-tau*scale`（tau：low 0.9375、native 0、high −0.39），
@@ -208,7 +208,7 @@ T3PO 權重為 Apache-2.0。轉換成 4bit 屬衍生作品；本輪只在本機�
 ## 重跑
 
 ```bash
-M=/Volumes/DigiFusion/tea-asr-models
+M=/Volumes/P3PLUS1T_APFS/tea-asr-models
 # 0. 下載（需使用者同意；bf16 29.5 GB）與轉換
 HF_HOME=$M/hf-cache hf download netease-youdao/Confucius4-T3PO \
   --revision 446e5dcca080740f2c2dc9d06a91ed66a9920410 --local-dir $M/t3po-bf16

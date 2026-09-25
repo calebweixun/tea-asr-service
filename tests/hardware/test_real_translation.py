@@ -1,6 +1,6 @@
 """Real Confucius4-T3PO MLX 4bit through the production translation worker.
 
-    TEA_ASR_TRANSLATION_MODEL_PATH=/Volumes/DigiFusion/tea-asr-models/t3po-mlx-4bit \\
+    TEA_ASR_TRANSLATION_MODEL_PATH=/Volumes/P3PLUS1T_APFS/tea-asr-models/t3po-mlx-4bit \\
         uv run pytest -m hardware tests/hardware/test_real_translation.py
 """
 

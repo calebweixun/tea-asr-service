@@ -180,7 +180,7 @@ def test_unverified_direction_is_refused(direction: str) -> None:
 
 
 def test_unplugged_model_disk_fails_loudly_and_asr_still_works(tmp_path: Path) -> None:
-    missing = tmp_path / "DigiFusion" / "t3po-mlx-4bit"
+    missing = tmp_path / "P3PLUS1T_APFS" / "t3po-mlx-4bit"
     translation = TranslationSupervisor(missing, max_memory_gib=12)
     with build(translation) as http:
         for _ in range(100):

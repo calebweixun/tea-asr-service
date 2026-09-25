@@ -8,7 +8,7 @@
 - en→zh 回譯：把上面 20 句英文譯文當英文原文，每次送 2 個詞、句尾 flush。repo 內沒有英文
   語料，這只用來看輸出字形（簡／繁）與是否產出中文，**不是品質評估**。
 
-    uv run python benchmarks/t3po_gate1.py --model /Volumes/DigiFusion/tea-asr-models/t3po-mlx-4bit \\
+    uv run python benchmarks/t3po_gate1.py --model /Volumes/P3PLUS1T_APFS/tea-asr-models/t3po-mlx-4bit \\
         --hyp benchmarks/results/t3po_asr_hyp_200.json --out benchmarks/results/t3po_gate1.json
 """
 

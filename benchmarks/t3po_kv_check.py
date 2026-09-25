@@ -5,7 +5,7 @@
 比較每一步的 READ/WRITE 決策與譯文是否逐步相同，以及每步延遲與 prefill token 數。
 另跑一遍官方逐對滑動的 history（keep=None）量「窗口滿了之後」重用率掉多少。
 
-    uv run python benchmarks/t3po_kv_check.py --model /Volumes/DigiFusion/tea-asr-models/t3po-mlx-4bit \\
+    uv run python benchmarks/t3po_kv_check.py --model /Volumes/P3PLUS1T_APFS/tea-asr-models/t3po-mlx-4bit \\
         --hyp benchmarks/results/t3po_asr_hyp_200.json --out benchmarks/results/t3po_kv_check.json
 """
 

@@ -15,7 +15,7 @@
 `--clock virtual` 用虛擬時鐘（閒置時直接跳到下一個到達時間，服務時間是真實量到的），
 `--clock wall` 用牆鐘即時重播，給 GPU 爭用實驗與 ASR 負載程序同時跑。
 
-    uv run python benchmarks/t3po_replay.py --model /Volumes/DigiFusion/tea-asr-models/t3po-mlx-4bit \\
+    uv run python benchmarks/t3po_replay.py --model /Volumes/P3PLUS1T_APFS/tea-asr-models/t3po-mlx-4bit \\
         --hyp benchmarks/results/t3po_asr_hyp_200.json --mode native --cadence increments
 """
 
