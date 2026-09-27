@@ -11,6 +11,7 @@ from tea_asr.api.app import create_app
 from tea_asr.config import ServiceConfig
 
 AUTH = {"Authorization": "Bearer test-token"}
+_DEFAULTS = ServiceConfig()
 
 
 class FakeSupervisor:
@@ -79,6 +80,9 @@ def build_client(
     rate_limiter: Any = None,
     paths: Any = None,
     log_backup_count: int = 3,
+    preview_min_interval_ms: int = _DEFAULTS.preview_min_interval_ms,
+    preview_min_audio_ms: int = _DEFAULTS.preview_min_audio_ms,
+    preview_load_factor: float = _DEFAULTS.preview_load_factor,
 ) -> TestClient:
     app = create_app(
         Path("unused"),
@@ -92,6 +96,9 @@ def build_client(
             allow_lan=allow_lan,
             extra_allowed_hosts=extra_allowed_hosts,
             log_backup_count=log_backup_count,
+            preview_min_interval_ms=preview_min_interval_ms,
+            preview_min_audio_ms=preview_min_audio_ms,
+            preview_load_factor=preview_load_factor,
         ),
         vad_model=vad,
         rate_limiter=rate_limiter,

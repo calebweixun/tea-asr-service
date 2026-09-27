@@ -18,6 +18,7 @@ from tea_asr.config import ServiceConfig
 from tea_asr.errors import ApiError
 from tea_asr.logs import event as log_event
 from tea_asr.rate_limit import AuthRateLimiter
+from tea_asr.scheduler import StaleTaskDropped
 from tea_asr.segmenter import ContinuousSegmenter, SegmentClosed, SegmenterConfig, SpeechStarted
 from tea_asr.stable import StablePrefixTracker, StableUpdate
 from tea_asr.translation.session import SessionTranslator
@@ -68,9 +69,8 @@ MAX_PENDING_SEGMENTS = 16
 #: Errors that concern one control message, not the session as a whole.
 RECOVERABLE_CODES = frozenset({"conflict", "queue_full", "session_limit"})
 
-#: docs/07: preview waits for 800 ms of new audio before running again.
-PREVIEW_MIN_AUDIO_SAMPLES = 12_800
-PREVIEW_MIN_INTERVAL_S = 0.8
+#: The preview cadence (new-audio threshold, minimum interval, load factor)
+#: is server config: `ServiceConfig.preview_min_audio_ms` and friends.
 
 #: How much audio a single preview may cover. docs/07 proposed 8 s to bound the
 #: cost, but a continuous segment now runs to 14 s, so the preview froze partway
@@ -97,7 +97,12 @@ PRIVATE_USE_RANGES: tuple[tuple[int, int], ...] = (
 
 class StreamScheduler(Protocol):
     async def transcribe(
-        self, pcm: bytes, *, language: str = "Chinese", kind: str = "interactive"
+        self,
+        pcm: bytes,
+        *,
+        language: str = "Chinese",
+        kind: str = "interactive",
+        is_stale: Callable[[], bool] | None = None,
     ) -> tuple[dict[str, Any], int]: ...
 
 
@@ -283,6 +288,16 @@ class StreamSession:
         self._preview_task: asyncio.Task[None] | None = None
         self._preview_pending = False
         self._preview_last_started = 0.0
+        #: Wall time the worker spent on the last preview, excluding queueing;
+        #: feeds the load guard in `_preview_gap_s`.
+        self._preview_last_decode_s = 0.0
+        #: Fires `_maybe_schedule_preview` when the interval gate opens, so the
+        #: cadence does not depend on the client's frame size.
+        self._preview_timer: asyncio.TimerHandle | None = None
+        self._preview_min_audio_samples = config.preview_min_audio_ms * 16
+        self._preview_min_interval_s = config.preview_min_interval_ms / 1000
+        self._preview_load_factor = config.preview_load_factor
+        self._closing = False
         self._control_acks: dict[str, str] = {}
         #: Opt-in translation (docs/04「翻譯（opt-in）」). `None` unless the
         #: server enabled a provider *and* this session asked for it.
@@ -376,8 +391,8 @@ class StreamSession:
             return None
         continuous = self._profile == "continuous"
         return PreviewPolicy(
-            min_audio_ms=PREVIEW_MIN_AUDIO_SAMPLES // 16,
-            min_interval_ms=int(PREVIEW_MIN_INTERVAL_S * 1000),
+            min_audio_ms=self._preview_min_audio_samples // 16,
+            min_interval_ms=round(self._preview_min_interval_s * 1000),
             max_preview_audio_ms=PREVIEW_MAX_AUDIO_SAMPLES // 16,
             endpoint_silence_ms=self._end_silence_ms,
             max_segment_ms=(
@@ -688,8 +703,37 @@ class StreamSession:
             return None
         return bytes(self._state.pcm), self._state.next_sample
 
+    def _preview_gap_s(self) -> float:
+        """Shortest allowed time between two preview starts in this session.
+
+        `k × last decode` keeps one session's previews at most 1/k of the
+        worker's time however long the segment grows; the fixed floor covers
+        the cheap early previews.
+        """
+
+        return max(
+            self._preview_min_interval_s,
+            self._preview_load_factor * self._preview_last_decode_s,
+        )
+
+    def _preview_retry_at(self, delay_s: float) -> None:
+        if self._preview_timer is not None:
+            return
+        loop = asyncio.get_running_loop()
+
+        def fire() -> None:
+            self._preview_timer = None
+            self._maybe_schedule_preview()
+
+        self._preview_timer = loop.call_later(delay_s, fire)
+
+    def _cancel_preview_timer(self) -> None:
+        if self._preview_timer is not None:
+            self._preview_timer.cancel()
+            self._preview_timer = None
+
     def _maybe_schedule_preview(self) -> None:
-        if self._transcript_mode != "revisable":
+        if self._transcript_mode != "revisable" or self._closing or self._state.cancelled:
             return
         segment = self._state.segment
         if segment is None or segment.terminal:
@@ -701,23 +745,35 @@ class StreamSession:
         samples = len(pcm) // 2
         if samples > PREVIEW_MAX_AUDIO_SAMPLES:
             return
-        if samples - segment.published_preview_end < PREVIEW_MIN_AUDIO_SAMPLES:
+        if samples - segment.published_preview_end < self._preview_min_audio_samples:
             return
         if self._preview_task is not None:
             self._preview_pending = True
             return
         loop = asyncio.get_running_loop()
-        if loop.time() - self._preview_last_started < PREVIEW_MIN_INTERVAL_S:
+        wait_s = self._preview_last_started + self._preview_gap_s() - loop.time()
+        if wait_s > 0:
             self._preview_pending = True
+            self._preview_retry_at(wait_s)
             return
+        self._cancel_preview_timer()
         self._preview_last_started = loop.time()
         self._preview_task = asyncio.create_task(self._run_preview(pcm, end_sample, segment))
 
+    def _preview_is_stale(self, segment: Segment) -> bool:
+        return segment.terminal or self._state.cancelled
+
     async def _run_preview(self, snapshot: bytes, end_sample: int, segment: Segment) -> None:
+        loop = asyncio.get_running_loop()
         try:
-            response, _ = await self._scheduler.transcribe(
-                snapshot, language=self._language, kind="preview"
+            started = loop.time()
+            response, queue_ms = await self._scheduler.transcribe(
+                snapshot,
+                language=self._language,
+                kind="preview",
+                is_stale=lambda: self._preview_is_stale(segment),
             )
+            self._preview_last_decode_s = max(0.0, loop.time() - started - queue_ms / 1000)
             if segment.terminal or self._state.cancelled:
                 return
             if end_sample - segment.start_sample <= segment.published_preview_end:
@@ -745,6 +801,10 @@ class StreamSession:
                     self._emit_stable(
                         segment, update, source_revision=segment.revision, end_sample=end_sample
                     )
+        except StaleTaskDropped:
+            # The segment closed while this preview was still queued; its final
+            # is (or will be) ahead of it, so there is nothing to publish.
+            return
         except ApiError as exc:
             if not segment.terminal:
                 self._writer.emit(
@@ -767,7 +827,9 @@ class StreamSession:
                 )
         finally:
             self._preview_task = None
-            if self._preview_pending and not segment.terminal:
+            # Re-check even when this preview's segment has closed: the next
+            # segment may have asked for a preview while this one was running.
+            if self._preview_pending:
                 self._preview_pending = False
                 self._maybe_schedule_preview()
 
@@ -819,9 +881,19 @@ class StreamSession:
 
         segment.terminal = True
         self._preview_pending = False
+        self._drop_stale_previews()
+
+    def _drop_stale_previews(self) -> None:
+        # A preview of a closed segment that is still queued is removed now,
+        # not run after the final (docs/07 step 6).
+        drop = getattr(self._scheduler, "drop_stale", None)
+        if drop is not None:
+            drop()
 
     async def _settle_preview(self) -> None:
         self._preview_pending = False
+        self._cancel_preview_timer()
+        self._drop_stale_previews()
         task = self._preview_task
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
@@ -1107,6 +1179,8 @@ class StreamSession:
             # Only after the translator task is gone, so the next session
             # cannot interleave with this one's last request.
             self.release_translation()
+        self._closing = True
+        self._cancel_preview_timer()
         for task in (self._consumer, self._preview_task):
             if task is not None:
                 task.cancel()

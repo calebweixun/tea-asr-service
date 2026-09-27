@@ -280,7 +280,7 @@ session.start增加可選 `transcript_mode="final_only"|"revisable"`，省略等
 {"type":"session.start","request_id":"start-1","profile":"continuous","audio":{"sample_rate":16000,"channels":1,"format":"pcm_s16le"},"language":"Chinese","durable":false,"transcript_mode":"revisable"}
 ```
 
-session.started增加transcript_mode與 `preview_policy`。**校準後的實際值**：`min_audio_ms=800`、`min_interval_ms=800`、`max_preview_audio_ms=15000`；continuous另有 `endpoint_silence_ms=900`、`max_segment_ms=14000`（12秒上限＋2秒grace）；utterance `max_segment_ms=30000`、`endpoint_silence_ms=null`。這些欄位由server的實際設定產生，client應照收到的值走，不要寫死文件裡的數字。continuous 的 `endpoint_silence_ms` 是**實際生效**的句尾靜音：client 以 `segmentation.end_silence_ms` 指定時回報該值，省略時回報 server 預設（見「切段控制」）。
+session.started增加transcript_mode與 `preview_policy`。**校準後的實際值**：`min_audio_ms=300`、`min_interval_ms=300`（2026-09-27 起，原為800／800，依據見 [預覽節奏報告](benchmarks/preview-cadence-report.md)）、`max_preview_audio_ms=15000`；continuous另有 `endpoint_silence_ms=900`、`max_segment_ms=14000`（12秒上限＋2秒grace）；utterance `max_segment_ms=30000`、`endpoint_silence_ms=null`。這些欄位由server的實際設定產生，client應照收到的值走，不要寫死文件裡的數字。`min_audio_ms`／`min_interval_ms` 是server設定（config.toml 的 `preview_min_audio_ms`／`preview_min_interval_ms`，或 `TEA_ASR_PREVIEW_MIN_AUDIO_MS`／`TEA_ASR_PREVIEW_MIN_INTERVAL_MS`），不能由session要求。`min_interval_ms` 是**下限**：server另有負載保護，實際間隔是 `max(min_interval_ms, preview_load_factor × 上次預覽解碼時間)`（預設factor=2，單一session的預覽最多占worker一半），所以預覽較慢時間隔會自動拉長；client不應把partial的到達間隔當成固定週期。continuous 的 `endpoint_silence_ms` 是**實際生效**的句尾靜音：client 以 `segmentation.end_silence_ms` 指定時回報該值，省略時回報 server 預設（見「切段控制」）。
 
 preview_policy還含 `context_biasing=false`。若啟用獨立實驗，session.start允許 `context={"use_previous_finals":true,"hotwords":["TEA-ASR"]}`，兩欄必填、無其他欄位；僅在context_biasing=true時接受。省略context表示完全不使用文字提示。hotwords上限32詞、每詞32 code points；超限422等價error，內部prompt總token上限與凍結規則依07。`hotwords` feature只有真正驗證後才能true；context中帶非空hotwords而其feature=false時拒絕。
 
@@ -354,7 +354,7 @@ session.start 加可選 `stable`，必須同時 `transcript_mode="revisable"`，
 ## 切段控制（opt-in，2026-09-27）
 
 給需要依真實停頓換行的 client（例如 OBS 字幕）：continuous profile 的句尾靜音可以由 session 指定，
-server 用 Silero VAD 在真實音訊上判斷停頓，client 不必從文字更新的間隔去猜（那些間隔被 800 ms 預覽節奏量化過）。
+server 用 Silero VAD 在真實音訊上判斷停頓，client 不必從文字更新的間隔去猜（那些間隔被預覽節奏量化過，節奏見 `preview_policy`）。
 
 **宣告。** continuous profile 可用時 `capabilities.features.segmentation_control` 出現，值就是 server 實際 enforce 的範圍：
 

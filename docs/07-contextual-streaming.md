@@ -57,7 +57,7 @@ flowchart LR
 ```
 
 1. 首次偵測語音就分配segment ID/index，狀態為open。utterance在第一個非空音訊frame分配；若最後是無聲，仍以skipped結束該ID。
-2. 累積至少800ms新語音後，允許第一次preview。初始更新間隔800ms；這是候選參數，不是延遲承諾。
+2. 累積至少 `preview_min_audio_ms` 新語音後允許下一次preview，間隔下限 `preview_min_interval_ms`。原候選值800ms／800ms，2026-09-27 依量測改為300ms／300ms（見本文「預覽節奏調整」）；這是server設定，不是延遲承諾。
 3. 快照涵蓋片段起點到最新已接收sample，包含pre-roll與中間停頓。每次固定其audio end與context revision；新聲音繼續收進原buffer。
 4. 一個session最多一個執行中preview與一個待跑preview；後者永遠由較新快照替換。全機執行中preview最多一個，不新增模型副本。
 5. 完成的preview若segment仍open、比上一次發布的audio end更新且context版本仍有效，可以發布。收音期間有更新的frame不會使它自動作廢，否則連續說話將永遠看不到preview。落後最新收音超過2秒則丟棄，等下一次快照。
@@ -85,7 +85,7 @@ final-only維持03既有端點設定。啟用revisable時採以下獨立設定�
 
 preview在所有等待中的final之後執行、batch之前；不改既有final公平性規則。final已等待時不啟動新preview。執行中的preview不能安全搶占，其耗時也計入final等待上限。
 
-- 動態間隔 `max(800ms, 最近preview推論耗時×3)`，以完成時間為下一次排程起點；沒有新增音訊或文字沒變就不發無意義更新。
+- 動態間隔 `max(preview_min_interval_ms, 最近preview推論耗時×preview_load_factor)`，從上一次preview**開始**起算（factor=k時單一session的預覽最多占worker 1/k）；原提案為 `max(800ms, 耗時×3)` 且從完成時間起算，實作與量測見「預覽節奏調整」。沒有新增音訊就不排preview。
 - 另設全機preview GPU佔用目標：最近10秒最多3秒推論耗時。根據近期耗時預估先做admission；超支後停preview，不能把這個soft budget說成可中止kernel的硬限制。
 - active buffer與快照副本都計入03記憶體上限；open段最多8秒可preview，不對整場會議越累積越長地重跑。
 - worker壓力、final排隊、預覽過慢時降低頻率或暫停，發 `preview.status`。音訊仍持續接收，已accept的正式工作不能因preview被丟棄。
@@ -146,6 +146,26 @@ P2a ephemeral斷線即清除partial，不承諾恢復。P4 durable整合時：fi
 實測 RTF 約 0.03，15 秒的預覽推論不到半秒，而且預覽排在最低優先序，
 不會排擠正式片段。依據見 [P2 切段報告](benchmarks/p2-segmentation-report.md)
 與 [P2a 預覽報告](benchmarks/p2a-preview-report.md)。
+
+## 預覽節奏調整（2026-09-27）
+
+OBS 字幕在快語速下出字晚、一次跳 4–5 個字；原因是預覽固定 800 ms／800 ms，`transcript.stable` 又要兩版一致。
+離線 RTF 約 0.03，worker 大多閒置，所以改為可設定的節奏加負載保護，[量測](benchmarks/preview-cadence-report.md)後預設：
+
+| server 設定（config.toml `[service]`／環境變數） | 預設 | 範圍 |
+|---|---|---|
+| `preview_min_audio_ms`／`TEA_ASR_PREVIEW_MIN_AUDIO_MS` | 300 | 100–5000 |
+| `preview_min_interval_ms`／`TEA_ASR_PREVIEW_MIN_INTERVAL_MS` | 300 | 100–5000 |
+| `preview_load_factor`／`TEA_ASR_PREVIEW_LOAD_FACTOR` | 2 | 0–10（0＝關閉保護） |
+
+- 下一次預覽要有 `preview_min_audio_ms` 新音訊，且距上一次預覽開始至少 `max(min_interval, k × 上次解碼時間)`；
+  解碼時間是 worker 呼叫的 wall time、不含排隊。間隔未到時以 timer 在門檻打開時重排，不依賴 client 的 frame 大小。
+- 每個 session 仍最多一個執行中預覽、一個待跑重排；`max_preview_audio_ms` 不變。節奏是 server 端設定，client 不能要求更快。
+- 端點封口時，還在排隊的預覽直接從 scheduler 移除（上面流程第 6 步的「移除待跑preview」），不再排在 final 後面白跑一次；
+  已在 worker 上的那一次無法搶占，最多讓 final 多等一次預覽解碼。
+- 結果（單 session）：stable 提交延遲中位數 0.87 → 0.10 秒、每次 stable 增字 p95 7 → 4、首字延遲中位數約 180 → 80 ms；
+  worker 忙碌 0.16 → 0.27，兩個 session 合計 0.49；final 延遲不變。代價是 partial 改寫已提交文字的比例 20–23% → 26–27%、
+  diverged 段 6–8 → 9／25。句首兩字的正確出現時間沒有變快，那是模型收斂速度。
 
 ## 只增不改的穩定前綴（opt-in，2026-09-24）
 

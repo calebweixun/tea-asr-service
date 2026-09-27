@@ -17,6 +17,7 @@
 | OBS 外掛（`calebweixun/tea-live-subtitle`，本機 `~/Codes/obs-plugins/tea-live-subtitle`） | **2026-09-25 可接目前的 server 提供 live subtitle。** 相容性修正（tea-live-subtitle#1）：帶 token 的 preflight、退避上限且每來源每 60 秒最多 2 次認證失敗（低於 server 的 10 次門檻）、server 重啟後會重連；原版 partial 永遠不出現、token 錯 5 秒自鎖、重啟後不再重連，e2e 僅 1/11。穩定字幕（tea-live-subtitle#2）：使用 server 的 `transcript.stable`，預設開啟，畫面只增不改，斷線凍結 10 秒。e2e 17/17、CI 三平台建置通過。**尚未在真實 OBS 裡實機驗收**；本機 Xcode 27 的 `cmake --preset macos` 無法 configure，正式 bundle 請用 CI artifact。設定標籤仍是英文 fallback |
 | 穩定字幕流（server） | `transcript.stable`（opt-in，LocalAgreement-2）：只增不改，鎖定延遲 p95 1.70 s，字幕準確度與 final 無顯著差異。現況 partial 有 78.8% 會改掉已顯示的字。見 `docs/benchmarks/stable-prefix-report.md` |
 | 切段控制（server） | **2026-09-27 已實作**：continuous session 可用 `session.start.segmentation.end_silence_ms`（300–3000）調整 VAD 句尾靜音，給 OBS 字幕依真實停頓換行；`preview_policy.endpoint_silence_ms` 回報實際值，`capabilities.features.segmentation_control` 宣告範圍。只改句尾靜音，其他切段參數不變；只有 500／900 經過真實口語校準。OBS 外掛尚未接上。見 docs/04「切段控制」 |
+| 預覽節奏（server） | **2026-09-27**：預設 300 ms 新音訊／300 ms 間隔（原 800／800），加負載保護（間隔 ≥ 2×上次預覽解碼時間）；封口時排隊中的預覽直接丟棄。可在 config.toml 調整，client 不能要求。stable 提交延遲中位數 0.87→0.10 秒、final 不變；只用拼接朗讀句量過，真實 OBS 畫面未驗收。見 `docs/benchmarks/preview-cadence-report.md` |
 | 同步翻譯 | T3PO zh→en（opt-in，預設關閉），開啟時 ASR final 延遲 p95 約多 0.2–0.3 s。見 `docs/benchmarks/t3po-eval-report.md` |
 | P4 長檔案與保存 | 未開始，`/v1/jobs` 回 404 |
 

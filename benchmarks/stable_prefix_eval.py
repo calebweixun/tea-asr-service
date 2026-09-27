@@ -52,7 +52,7 @@ from quality_eval import (
 from tea_asr.api.stream import filter_private_use_characters
 from tea_asr.stable import StablePrefixTracker, common_prefix_length
 
-STEP_SAMPLES = 12_800  # docs/07 / stream.py PREVIEW_MIN_AUDIO_SAMPLES
+STEP_SAMPLES = 12_800  # the 800 ms preview step in effect before 2026-09-27
 ENDPOINT_WAIT_S = 0.9  # stream.py REVISABLE_END_SILENCE_MS
 GAP_SAMPLES = 4_800  # 300 ms between concatenated clips: below the 500 ms endpoint
 MAX_JOINED_SAMPLES = 14 * 16_000  # continuous segment cap (12 s + 2 s grace)

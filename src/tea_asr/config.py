@@ -255,6 +255,18 @@ class ServiceConfig:
     #: Refuse to keep the translation worker if the loaded model occupies more
     #: than this much Metal memory. Measured peak is ~8.5 GiB.
     translation_max_memory_gib: float = 12.0
+    #: Revisable-preview cadence (docs/07「輕量化與排程」). A preview may start
+    #: once `preview_min_audio_ms` of new audio has arrived since the last
+    #: published one, and no sooner than
+    #: `max(preview_min_interval_ms, preview_load_factor × last preview decode
+    #: time)` after the previous preview started. With factor k, one session's
+    #: previews keep the single worker at most 1/k busy; 0 turns the load guard
+    #: off. Defaults are measured, see docs/benchmarks/preview-cadence-report.md.
+    #: Server-wide on purpose: a client cannot ask for a faster cadence and
+    #: starve another session.
+    preview_min_interval_ms: int = 300
+    preview_min_audio_ms: int = 300
+    preview_load_factor: float = 2.0
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> ServiceConfig:
@@ -340,7 +352,38 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
     translation_path = get("TEA_ASR_TRANSLATION_MODEL_PATH")
     if translation_path is not None:
         config = replace(config, translation_model_path=translation_path.strip())
+    min_interval = get("TEA_ASR_PREVIEW_MIN_INTERVAL_MS")
+    if min_interval is not None:
+        config = replace(config, preview_min_interval_ms=int(min_interval))
+    min_audio = get("TEA_ASR_PREVIEW_MIN_AUDIO_MS")
+    if min_audio is not None:
+        config = replace(config, preview_min_audio_ms=int(min_audio))
+    load_factor = get("TEA_ASR_PREVIEW_LOAD_FACTOR")
+    if load_factor is not None:
+        config = replace(config, preview_load_factor=float(load_factor))
     return config
+
+
+#: Bounds for the preview cadence (docs/06 #4: every knob has a ceiling). Below
+#: 100 ms a preview would re-run on almost every 100 ms frame; above 5 s the
+#: "preview" is slower than the final it is meant to precede.
+PREVIEW_CADENCE_MS_RANGE = (100, 5000)
+PREVIEW_LOAD_FACTOR_MAX = 10.0
+
+
+def validate_preview_cadence_or_raise(config: ServiceConfig) -> None:
+    """Refuse a preview cadence outside the range the server can honour."""
+
+    low, high = PREVIEW_CADENCE_MS_RANGE
+    for name in ("preview_min_interval_ms", "preview_min_audio_ms"):
+        value = getattr(config, name)
+        if not (low <= value <= high):
+            raise RuntimeError(f"{name}={value} 超出範圍（必須介於 {low} 與 {high} ms 之間）。")
+    if not (0 <= config.preview_load_factor <= PREVIEW_LOAD_FACTOR_MAX):
+        raise RuntimeError(
+            f"preview_load_factor={config.preview_load_factor} 超出範圍"
+            f"（必須介於 0 與 {PREVIEW_LOAD_FACTOR_MAX:g} 之間，0 表示關閉負載保護）。"
+        )
 
 
 def validate_translation_or_raise(config: ServiceConfig) -> None:

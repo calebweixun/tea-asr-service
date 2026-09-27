@@ -40,7 +40,7 @@ SCRIPT = [
 @pytest.fixture(autouse=True)
 def no_preview_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
     # Wall-clock throttling would make the number of partials depend on test speed.
-    monkeypatch.setattr("tea_asr.api.stream.PREVIEW_MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr("tea_asr.api.stream.StreamSession._preview_gap_s", lambda self: 0.0)
 
 
 def receive_until(socket: Any, event_type: str, into: list[dict[str, Any]]) -> dict[str, Any]:
@@ -55,7 +55,9 @@ def dialogue(script: list[tuple[int, str]], start: dict[str, Any]) -> list[dict[
     """Three 800 ms previews, 400 ms more, commit, stop; every event received."""
 
     events: list[dict[str, Any]] = []
-    with build_client(ScriptedSupervisor(script), revisable_preview=True) as http, (
+    with build_client(
+        ScriptedSupervisor(script), revisable_preview=True, preview_min_audio_ms=800
+    ) as http, (
         http.websocket_connect("/v1/stream", headers=AUTH)
     ) as socket:
         socket.receive_json()
