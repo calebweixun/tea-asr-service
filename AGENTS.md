@@ -63,7 +63,7 @@ git worktree remove ../tea-asr-wt/<task>
 git branch -d agent/<task>
 ```
 
-Claude 自己的 subagent 用 Agent 工具的 `isolation: "worktree"` 即可，不必手動開。
+Claude 自己的 subagent **不要**用 Agent 工具的 `isolation: "worktree"`：它的 base 是 session 開始時的 commit，不是最新的 `main`。要手動開 `git worktree add ../tea-asr-wt/<task> -b agent/<task> origin/main`（先 `git fetch`），並在派工單裡叫 agent 先 `cd` 過去、用 `git log --oneline -1` 確認 base。合併一律走 PR：push 分支 → `gh pr create` → CI 綠 → `gh pr merge --merge` → 在 `main` 上再確認一次 CI。
 
 這樣換來的好處：agent 之間不可能互相覆蓋；衝突從「靜默競爭」變成「合併衝突」，看得見也審得了；每一路的 diff 天然乾淨，`git diff main...agent/<task>` 就是它的全部產出；出事直接砍分支，不必一個檔案一個檔案還原。
 
@@ -154,6 +154,25 @@ The project owner has ADHD. Keep plans, progress updates, blockers, and handoffs
 | 需要真實模型的行為 | `uv run pytest -m hardware`（預設不跑，Apple Silicon 才有意義） |
 
 沒有測試涵蓋你改的行為時，先補一個最小煙霧測試再改，不要靠人工目視當作驗證。
+
+### 推 PR 前先過 CI 會跑的東西（2026-09 的 CI 失敗紀錄）
+
+每次 CI 紅燈，使用者都會收到 GitHub 失敗通知。下面每一條都真的紅過，而且全都能在本機先抓到：
+
+| 發生過的失敗 | 原因 | 本機怎麼先抓到 |
+|---|---|---|
+| tea-asr-service `main` 連續 8 次 push 紅燈（PR #7 前就開始） | `clients/macos/tools/test_make_menubar_icon.py` 有一個 ruff I001。CI 的 lint 在 test 之前，lint 一紅 pytest 就沒跑，等於 CI 形同虛設 | `uv run ruff check .` 要跑**整個 repo**，不是只看自己改的檔。既有錯誤也要順手修掉，不能以「不是我造成的」放著 |
+| OBS plugin Linux：`implicit declaration of function 'strdup'` | CI 用 `-std=c11 -Werror`，POSIX 的 `strdup` 不在 C11 標準裡 | 用 OBS 的 `bstrdup` / `bmem`。照下面第 1 條，用 CI 的原始指令在本機跑 |
+| OBS plugin Linux：`obs_properties_add_button is deprecated` | Linux 的 plugin build 開了 `-Werror`，deprecated API 直接變成錯誤；macOS 本機沒開，所以沒看到 | 改用 `obs_properties_add_button2`。本機編譯 plugin 時加 `-Werror -Werror=deprecated-declarations` |
+| OBS plugin Windows：`C7555 designated initializers requires /std:c++20` | `.h` 裡用了 C 的 `{ .field = ... }`，而這個 header 也被 `.cpp` include。MSVC 的 C++17 不接受 | 共用的 `.h` 不要用 designated initializer，改成逐欄指定。用 `c++ -std=c++17 -Wpedantic -Wc++20-designator -fsyntax-only` 編一個只 include 該 header 的 `.cpp` |
+
+固定做法：
+
+1. **CI 指令從 workflow yaml 原樣抽出來跑**，不要自己憑印象重寫。例：`sed -n '<起>,<迄>p' .github/workflows/protocol-tests.yaml | sed 's/^ *//' > ci.sh`，再 `RUNNER_TEMP=<scratch> bash -e ci.sh`。沒設 `RUNNER_TEMP` 會寫到 `/`，然後出現誤導性的 linker 錯誤。
+2. **CI 有但本機沒有的平台**（Linux gcc、Windows MSVC），就用最接近的方式模擬：gcc 當 `cc`/`c++`、`-Werror`、`-std=c11`、`-std=c++17 -Wpedantic`。模擬不了的，要在回報裡寫明「只有 CI 驗過」。
+3. **merge 前也看 base branch 的 CI**。如果 `main` 本來就是紅的，先修好讓它變綠，否則 PR 的綠燈沒有意義。
+4. **`gh pr checks` 在 push 後立刻跑會回 "no checks reported"**，這不代表通過。要等到出現 pending 再 `--watch`，而且 `--watch` 結束後還要再讀一次結論（fail 的時候它的 exit code 不一定可靠）。
+5. **CI 紅了先讀 log 再改**：`gh run view <id> --log-failed | grep -E 'error|warning'`。修完把原因補進上面的表。
 
 ### 驗收：什麼叫做完成
 
