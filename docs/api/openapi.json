@@ -109,6 +109,16 @@
             "title": "Partial Transcripts",
             "type": "boolean"
           },
+          "segmentation_control": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SegmentationControl"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "stable_transcripts": {
             "anyOf": [
               {
@@ -159,6 +169,35 @@
           }
         },
         "title": "CapabilityLimits",
+        "type": "object"
+      },
+      "EndSilenceRange": {
+        "additionalProperties": false,
+        "properties": {
+          "default": {
+            "title": "Default",
+            "type": "integer"
+          },
+          "default_final_only": {
+            "title": "Default Final Only",
+            "type": "integer"
+          },
+          "max": {
+            "default": 3000,
+            "title": "Max",
+            "type": "integer"
+          },
+          "min": {
+            "default": 300,
+            "title": "Min",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "default",
+          "default_final_only"
+        ],
+        "title": "EndSilenceRange",
         "type": "object"
       },
       "ErrorBody": {
@@ -341,6 +380,20 @@
           "text"
         ],
         "title": "Segment",
+        "type": "object"
+      },
+      "SegmentationControl": {
+        "additionalProperties": false,
+        "description": "What `session.start.segmentation` accepts (continuous profile only).",
+        "properties": {
+          "end_silence_ms": {
+            "$ref": "#/components/schemas/EndSilenceRange"
+          }
+        },
+        "required": [
+          "end_silence_ms"
+        ],
+        "title": "SegmentationControl",
         "type": "object"
       },
       "StatusResponse": {

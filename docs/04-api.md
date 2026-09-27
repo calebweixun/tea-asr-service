@@ -16,7 +16,7 @@
 - **WS Origin allowlist**：`/v1/stream` upgrade 驗證 `Origin` 僅限 `http://127.0.0.1`／`http://localhost`；省略 Origin（native client）視為合法；不符時在 `accept()` 之前拒絕，網路上實際收到的是空 body 的 HTTP 403，不是 WS close 1008（`src/tea_asr/api/stream.py::run_stream`；細節見下方「`accept()` 之前的拒絕」）。這與上一條 Host 檢查是兩段獨立程式碼，不是同一個中介層。
 - **`limits.max_continuous_sessions`**：伺服器實際 enforce，預設2，只算 `profile=continuous`；超過回 `concurrent_session_limit`，close 4029（`ContinuousSessionAdmission`）。
 - **`limits.max_total_connections`**：伺服器實際 enforce，預設4，涵蓋 `/v1/stream` 所有 profile 的連線總數；超過在 `accept()` 之前拒絕，網路上實際收到的是空 body 的 HTTP 403（不是 WS close 1013；收不到 `hello`；細節見下方「`accept()` 之前的拒絕」）（`ContinuousSessionAdmission` 重用於 `connection_admission`）。
-- **capabilities.features**：固定輸出10個布林欄位（含 `context_biasing`、`durable_revisable`），只有實際驗收過的功能才是 `true`；`partial_transcripts` 依 `TEA_ASR_REVISABLE_PREVIEW` 可能為 `true`；`translation` 只有在明確啟用翻譯 provider（預設關閉）且其模型已 ready 時才是 `true`（見下方「翻譯（opt-in）」）；其餘一律 `false`（`src/tea_asr/wire.py::CapabilityFeatures`）。翻譯關閉時 capabilities 回應與加入翻譯前逐欄相同（`tests/integration/test_translation_disabled.py`）。另有可選的第11個欄位 `stable_transcripts`：只在 revisable 預覽開啟時出現且為 `true`，關閉時整個欄位不出現（見下方「只增不改的穩定字幕流」）。
+- **capabilities.features**：固定輸出10個布林欄位（含 `context_biasing`、`durable_revisable`），只有實際驗收過的功能才是 `true`；`partial_transcripts` 依 `TEA_ASR_REVISABLE_PREVIEW` 可能為 `true`；`translation` 只有在明確啟用翻譯 provider（預設關閉）且其模型已 ready 時才是 `true`（見下方「翻譯（opt-in）」）；其餘一律 `false`（`src/tea_asr/wire.py::CapabilityFeatures`）。翻譯關閉時 capabilities 回應與加入翻譯前逐欄相同（`tests/integration/test_translation_disabled.py`）。另有可選的第11個欄位 `stable_transcripts`：只在 revisable 預覽開啟時出現且為 `true`，關閉時整個欄位不出現（見下方「只增不改的穩定字幕流」）。以及可選的物件欄位 `segmentation_control`：只在 continuous profile 可用（VAD 資產已載入）時出現，內容是 server 實際 enforce 的 `session.start.segmentation` 範圍，沒有 VAD 時整個欄位不出現（見下方「切段控制」）。
 - **flow.control 節奏**：只在流控窗口實際往前推進時送出，不是固定週期輪詢（`src/tea_asr/api/stream.py::_handle_frame`）。
 - **WS 心跳**：server 每15秒送 WS-layer ping，30秒未收到 pong 判定斷線（`uvicorn.run(..., ws_ping_interval=15, ws_ping_timeout=30)`，`src/tea_asr/cli.py`）。
 - **v0.2 端點**：`/v1/jobs*` 未實作，一律404，不回假 202（`tests/integration/test_schema_export.py::test_v0_2_endpoints_are_absent_not_faked`）。
@@ -171,7 +171,7 @@ continuous 靜音也照送，VAD 才能維持來源時間。若 client 擷取中
 
 | type | 欄位／語意 |
 |---|---|
-| `session.start` | 上述欄位；同連線只能一次 |
+| `session.start` | 上述欄位；同連線只能一次。可選 `transcript_mode`（見「P2a／v0.1.1：可修訂預覽擴充」）、`stable`（見「只增不改的穩定字幕流」）、`segmentation`（只限 continuous，見「切段控制」）、`translation`（見「翻譯」） |
 | `audio.commit` | `request_id`、`through_seq`；utterance 將目前已收音訊提交一段，不關 session |
 | `session.stop` | `request_id`、`through_seq`；最後 frame seq，尚無音訊可為null；flush VAD 殘留並等所有 final |
 | `session.cancel` | `request_id`；放棄未完成 segment，不再發其 final |
@@ -280,7 +280,7 @@ session.start增加可選 `transcript_mode="final_only"|"revisable"`，省略等
 {"type":"session.start","request_id":"start-1","profile":"continuous","audio":{"sample_rate":16000,"channels":1,"format":"pcm_s16le"},"language":"Chinese","durable":false,"transcript_mode":"revisable"}
 ```
 
-session.started增加transcript_mode與 `preview_policy`。**校準後的實際值**：`min_audio_ms=800`、`min_interval_ms=800`、`max_preview_audio_ms=15000`；continuous另有 `endpoint_silence_ms=900`、`max_segment_ms=14000`（12秒上限＋2秒grace）；utterance `max_segment_ms=30000`、`endpoint_silence_ms=null`。這些欄位由server的實際設定產生，client應照收到的值走，不要寫死文件裡的數字。
+session.started增加transcript_mode與 `preview_policy`。**校準後的實際值**：`min_audio_ms=800`、`min_interval_ms=800`、`max_preview_audio_ms=15000`；continuous另有 `endpoint_silence_ms=900`、`max_segment_ms=14000`（12秒上限＋2秒grace）；utterance `max_segment_ms=30000`、`endpoint_silence_ms=null`。這些欄位由server的實際設定產生，client應照收到的值走，不要寫死文件裡的數字。continuous 的 `endpoint_silence_ms` 是**實際生效**的句尾靜音：client 以 `segmentation.end_silence_ms` 指定時回報該值，省略時回報 server 預設（見「切段控制」）。
 
 preview_policy還含 `context_biasing=false`。若啟用獨立實驗，session.start允許 `context={"use_previous_finals":true,"hotwords":["TEA-ASR"]}`，兩欄必填、無其他欄位；僅在context_biasing=true時接受。省略context表示完全不使用文字提示。hotwords上限32詞、每詞32 code points；超限422等價error，內部prompt總token上限與凍結規則依07。`hotwords` feature只有真正驗證後才能true；context中帶非空hotwords而其feature=false時拒絕。
 
@@ -350,6 +350,36 @@ session.start 加可選 `stable`，必須同時 `transcript_mode="revisable"`，
 - **合併**：outgoing queue 可把同段尚未送出的 `open` 合併成最新值（新值包含舊值，不會少字）；收尾事件不合併、不丟棄，
   並取代同段尚未送出的 `open`。client 不能要求每個 `stable_revision` 都收到。
 - **權威**：`transcript.stable` 只供顯示。貼入、匯出、存檔、翻譯與去重只認 `transcript.final`；翻譯仍只吃 final。
+
+## 切段控制（opt-in，2026-09-27）
+
+給需要依真實停頓換行的 client（例如 OBS 字幕）：continuous profile 的句尾靜音可以由 session 指定，
+server 用 Silero VAD 在真實音訊上判斷停頓，client 不必從文字更新的間隔去猜（那些間隔被 800 ms 預覽節奏量化過）。
+
+**宣告。** continuous profile 可用時 `capabilities.features.segmentation_control` 出現，值就是 server 實際 enforce 的範圍：
+
+```json
+{"end_silence_ms":{"min":300,"max":3000,"default":900,"default_final_only":500}}
+```
+
+`default` 是 `transcript_mode="revisable"` 省略 `segmentation` 時的值，`default_final_only` 是 final_only 的值。
+
+**要求。** session.start 加可選 `segmentation`，必須同時 `profile="continuous"`：
+
+```json
+{"type":"session.start","request_id":"start-1","profile":"continuous","audio":{"sample_rate":16000,"channels":1,"format":"pcm_s16le"},"language":"Chinese","durable":false,"transcript_mode":"revisable","stable":{"agreement":2},"segmentation":{"end_silence_ms":1200}}
+```
+
+- `end_silence_ms`：必填整數，300–3000（含）。連續這麼久的 VAD 靜音就關閉目前 segment（`segment.queued.boundary="silence"`）。
+- **只改這一個值**。最短語音 160 ms、pre-roll 600 ms、12 秒上限＋2 秒 grace 與找安靜點切分的邏輯都不變，`preview_policy.max_segment_ms` 也不變。
+- 回報：revisable 時 `session.started.preview_policy.endpoint_silence_ms` 是實際生效的值；final_only 沒有 `preview_policy`，server 照要求的值執行，不另送確認事件。
+- 省略 `segmentation`：行為與加入此欄位前完全相同（revisable 900 ms、final_only 500 ms），`session.started` 逐欄不變。
+- 拒絕（皆 close 1008，session 不會建立）：
+  - `profile="utterance"` 帶 `segmentation` → `unsupported_option`（utterance 由 client `audio.commit` 切段，沒有 VAD 可調）。
+  - 超出範圍、缺 `end_silence_ms`、非整數（含 `"900"`、`900.5`、`true`）→ `unsupported_option`。
+  - `segmentation` 內有其他欄位 → `protocol_error`（與任何未知 client 欄位相同）。
+- 舊 server 不認得 `segmentation` 會回 `protocol_error`，client 可據此不帶此欄位重建 session。
+- **範圍不是品質保證**：只有 500 與 900 經過真實口語校準（[P2切段報告](benchmarks/p2-segmentation-report.md)）；其他值是 client 的取捨，太短會把句中停頓切開、太長則更常撞到 12 秒上限。
 
 ## 翻譯（opt-in，預設關閉）
 

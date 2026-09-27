@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 #: docs/04-api.md keeps every sample/seq integer inside the JavaScript safe range.
 MAX_SAFE_INT = (2**53) - 1
@@ -14,6 +14,12 @@ SAMPLE_RATE = 16_000
 MAX_UTTERANCE_MS = 30_000
 MAX_UTTERANCE_PCM_BYTES = 960_000
 MAX_FRAME_PCM_BYTES = 6_400
+#: Range a client may request for the continuous segmenter's end-of-segment
+#: silence (`session.start.segmentation.end_silence_ms`). This is an input
+#: bound, not a quality claim: only 500 (final_only) and 900 (revisable) were
+#: calibrated (docs/benchmarks/p2-segmentation-report.md).
+SEGMENTATION_END_SILENCE_MIN_MS = 300
+SEGMENTATION_END_SILENCE_MAX_MS = 3_000
 FRAME_HEADER_BYTES = 16
 INITIAL_FLOW_WINDOW_SAMPLES = 80_000
 
@@ -210,6 +216,22 @@ class CapabilityAudio(ServerModel):
     format: str = "pcm_s16le"
 
 
+class EndSilenceRange(ServerModel):
+    min: int = SEGMENTATION_END_SILENCE_MIN_MS
+    max: int = SEGMENTATION_END_SILENCE_MAX_MS
+    #: What a `transcript_mode="revisable"` continuous session uses when
+    #: `segmentation` is omitted.
+    default: int
+    #: The same for `transcript_mode="final_only"`.
+    default_final_only: int
+
+
+class SegmentationControl(ServerModel):
+    """What `session.start.segmentation` accepts (continuous profile only)."""
+
+    end_silence_ms: EndSilenceRange
+
+
 class CapabilityFeatures(ServerModel):
     native_audio_streaming: bool = False
     partial_transcripts: bool = False
@@ -223,6 +245,10 @@ class CapabilityFeatures(ServerModel):
     #: is left out of the response (exclude_none), so a server without
     #: revisable preview answers byte-for-byte as before this field existed.
     stable_transcripts: bool | None = None
+    #: Client-tunable continuous segmentation (docs/04「切段控制」). Present only
+    #: when the continuous profile is (a VAD asset is loaded); `None` is left
+    #: out of the response, so a server without it answers as before.
+    segmentation_control: SegmentationControl | None = None
     durable_sessions: bool = False
     durable_revisable: bool = False
     batch_jobs: bool = False
@@ -330,6 +356,18 @@ class StableOptions(ClientModel):
     agreement: Literal[2, 3] = 2
 
 
+class SegmentationOptions(ClientModel):
+    """Opt-in override of the continuous segmenter (docs/04「切段控制」).
+
+    Only the silence that closes a segment is tunable; minimum speech,
+    pre-roll, the 12 s cap and the split search stay server-owned.
+    """
+
+    end_silence_ms: StrictInt = Field(
+        ge=SEGMENTATION_END_SILENCE_MIN_MS, le=SEGMENTATION_END_SILENCE_MAX_MS
+    )
+
+
 class SessionStart(ClientModel):
     type: Literal["session.start"]
     request_id: str = Field(min_length=1, max_length=64)
@@ -341,6 +379,8 @@ class SessionStart(ClientModel):
     translation: TranslationOptions | None = None
     #: Needs `transcript_mode="revisable"`; omitted means no `transcript.stable`.
     stable: StableOptions | None = None
+    #: Needs `profile="continuous"`; omitted keeps the server's end silence.
+    segmentation: SegmentationOptions | None = None
 
 
 class AudioCommit(ClientModel):

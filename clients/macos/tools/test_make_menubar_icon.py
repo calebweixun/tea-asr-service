@@ -16,7 +16,6 @@ from pathlib import Path
 
 from PIL import Image, ImageChops
 
-
 MACOS_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = MACOS_ROOT / "tools" / "make-menubar-icon.py"
 SOURCE_PATH = MACOS_ROOT / "tools" / "source-menubar.png"

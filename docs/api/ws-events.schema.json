@@ -625,6 +625,23 @@
         "title": "SegmentSkipped",
         "type": "object"
       },
+      "SegmentationOptions": {
+        "additionalProperties": false,
+        "description": "Opt-in override of the continuous segmenter (docs/04「切段控制」).\n\nOnly the silence that closes a segment is tunable; minimum speech,\npre-roll, the 12 s cap and the split search stay server-owned.",
+        "properties": {
+          "end_silence_ms": {
+            "maximum": 3000,
+            "minimum": 300,
+            "title": "End Silence Ms",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "end_silence_ms"
+        ],
+        "title": "SegmentationOptions",
+        "type": "object"
+      },
       "SessionCancel": {
         "additionalProperties": false,
         "properties": {
@@ -708,6 +725,17 @@
             "minLength": 1,
             "title": "Request Id",
             "type": "string"
+          },
+          "segmentation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/models/SegmentationOptions"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "stable": {
             "anyOf": [
