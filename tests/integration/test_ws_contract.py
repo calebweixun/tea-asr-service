@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from tea_asr.config import ServiceConfig
 from tea_asr.worker.supervisor import WorkerError
 from tests.conftest import AUTH, FakeSupervisor, FakeVad, build_client
 
@@ -401,7 +402,12 @@ def test_preview_replaces_text_and_final_wins(preview_client: TestClient) -> Non
         socket.send_json({**START, "transcript_mode": "revisable"})
         started = socket.receive_json()
         assert started["transcript_mode"] == "revisable"
-        assert started["preview_policy"]["min_audio_ms"] == 800
+        # Whatever the server is configured with, not a number fixed in docs.
+        assert started["preview_policy"]["min_audio_ms"] == ServiceConfig().preview_min_audio_ms
+        assert (
+            started["preview_policy"]["min_interval_ms"]
+            == ServiceConfig().preview_min_interval_ms
+        )
         assert started["preview_policy"]["context_biasing"] is False
 
         for seq in range(10):
@@ -415,6 +421,27 @@ def test_preview_replaces_text_and_final_wins(preview_client: TestClient) -> Non
         assert final["segment_id"] == partial["segment_id"]
         assert final["revision"] > partial["revision"]
         assert final["end_sample"] == 16_000
+
+
+def test_preview_policy_echoes_the_configured_cadence(supervisor: FakeSupervisor) -> None:
+    """docs/06 #6: session.started reports the cadence actually in effect."""
+
+    with build_client(
+        supervisor,
+        revisable_preview=True,
+        vad=FakeVad(),
+        preview_min_interval_ms=450,
+        preview_min_audio_ms=350,
+    ) as http:
+        for start in ({**START, "transcript_mode": "revisable"},
+                      {**CONTINUOUS, "transcript_mode": "revisable"}):
+            with http.websocket_connect("/v1/stream", headers=AUTH) as socket:
+                socket.receive_json()
+                socket.send_json(start)
+                policy = socket.receive_json()["preview_policy"]
+                assert policy["min_interval_ms"] == 450
+                assert policy["min_audio_ms"] == 350
+                assert policy["max_preview_audio_ms"] == 15_000
 
 
 def test_partial_preview_is_also_filtered_of_pua(supervisor: FakeSupervisor) -> None:

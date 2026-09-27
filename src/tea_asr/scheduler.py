@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -12,6 +13,16 @@ from .wire import SAMPLE_RATE
 #: docs/03-architecture.md: interactive first, then realtime, then preview work.
 #: Preview never delays a caller that is already waiting for an immutable final.
 PRIORITY = {"interactive": 0, "realtime": 1, "preview": 2}
+
+
+class StaleTaskDropped(Exception):
+    """A queued task whose result nobody can use any more was never run.
+
+    docs/07: at an endpoint the pending preview is removed, not left to run
+    after the final. A preview that stays queued still costs one worker call,
+    and that call cannot be pre-empted once it starts: it would delay the next
+    final of this session and every other session's final behind it.
+    """
 
 
 class InferenceWorker(Protocol):
@@ -26,6 +37,8 @@ class _Waiter:
     ticket: int
     samples: int
     future: asyncio.Future[None] = field(repr=False)
+    is_stale: Callable[[], bool] | None = field(default=None, repr=False)
+    dropped: bool = False
 
 
 class Scheduler:
@@ -66,8 +79,28 @@ class Scheduler:
         if self.waiting_samples + samples > self.max_waiting_samples:
             raise ApiError("queue_full", "等待中的音訊已達上限，請稍後重試。")
 
+    def drop_stale(self) -> None:
+        """Fail every waiting task that reports itself stale, without running it.
+
+        Only waiting tasks are touched; the one already on the worker cannot be
+        interrupted (a Metal kernel is not pre-emptible) and simply finishes.
+        """
+
+        kept: list[_Waiter] = []
+        for waiter in self._waiters:
+            if waiter.is_stale is not None and waiter.is_stale():
+                waiter.dropped = True
+                if not waiter.future.done():
+                    waiter.future.set_exception(StaleTaskDropped())
+            else:
+                kept.append(waiter)
+        self._waiters = kept
+
     def _wake_next(self) -> None:
         if self._running or not self._waiters:
+            return
+        self.drop_stale()
+        if not self._waiters:
             return
         self._waiters.sort(key=lambda waiter: (waiter.priority, waiter.ticket))
         waiter = self._waiters.pop(0)
@@ -81,7 +114,15 @@ class Scheduler:
         *,
         language: str = "Chinese",
         kind: str = "interactive",
+        is_stale: Callable[[], bool] | None = None,
     ) -> tuple[dict[str, Any], int]:
+        """Run one inference in priority order.
+
+        `is_stale` is checked each time the worker frees up and on
+        `drop_stale()`; once it returns True while the task is still waiting,
+        the call raises `StaleTaskDropped` instead of running.
+        """
+
         samples = len(pcm) // 2
         self._admit(samples)
         waiter = _Waiter(
@@ -89,6 +130,7 @@ class Scheduler:
             ticket=next(self._tickets),
             samples=samples,
             future=asyncio.get_running_loop().create_future(),
+            is_stale=is_stale,
         )
         self._waiters.append(waiter)
         queued_at = time.perf_counter()
@@ -98,7 +140,8 @@ class Scheduler:
         except asyncio.CancelledError:
             if waiter in self._waiters:
                 self._waiters.remove(waiter)
-            else:
+            elif not waiter.dropped:
+                # It had been handed the worker; a dropped one never was.
                 self._release()
             raise
         queue_ms = round((time.perf_counter() - queued_at) * 1000)

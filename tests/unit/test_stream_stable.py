@@ -19,7 +19,12 @@ class ScriptedScheduler:
         self.texts = deque(texts)
 
     async def transcribe(
-        self, pcm: bytes, *, language: str = "Chinese", kind: str = "interactive"
+        self,
+        pcm: bytes,
+        *,
+        language: str = "Chinese",
+        kind: str = "interactive",
+        is_stale: Any = None,
     ) -> tuple[dict[str, Any], int]:
         return {"text": self.texts.popleft(), "total_time_s": 0.01}, 0
 

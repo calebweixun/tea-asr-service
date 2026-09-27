@@ -28,6 +28,7 @@ from tea_asr.config import (
     AppPaths,
     ServiceConfig,
     TokenAuthenticator,
+    validate_preview_cadence_or_raise,
     validate_translation_or_raise,
 )
 from tea_asr.errors import ApiError
@@ -264,6 +265,7 @@ def create_app(
     #: Opt-in, separate translation provider (docs/06 #2). `None` when off,
     #: which leaves every ASR code path exactly as it was.
     validate_translation_or_raise(settings)
+    validate_preview_cadence_or_raise(settings)
     translation: Any = None
     if translation_provider is not _AUTO_TRANSLATION:
         translation = translation_provider

@@ -92,6 +92,7 @@ tea-asr-service/
 final 與 final-only 模式完全一致、混合負載下 23/23 HTTP 辨識成功且 10 段 final 全數產生。
 `TEA_ASR_REVISABLE_PREVIEW=0` 或 config.toml 可關閉，關閉時 revisable 請求回 `unsupported_option` 而非靜默降級。
 未涵蓋：單一語者與單一機器、預覽降級路徑未在真實過載下觸發。
+**2026-09-27：** 預覽節奏改為 server 設定 `preview_min_audio_ms`／`preview_min_interval_ms`（預設 300／300，原固定 800／800）加負載保護 `preview_load_factor`（預設 2，間隔至少 2×上次解碼時間）；封口時排隊中的預覽直接從 scheduler 移除，不再排在 final 後面跑。`preview_policy` 回報實際值，wire 欄位不變。實測（[預覽節奏報告](benchmarks/preview-cadence-report.md)）stable 提交延遲中位數 0.87→0.10 秒、兩 session 合計 worker 忙碌 0.49、final 延遲不變；partial 改寫率 20–23%→26–27%。語料是拼接的朗讀句，自然快語速與真實 OBS 畫面未驗證。
 
 **完成條件：** 能呈現「先出字→後文修正→定稿」；partial不重複append、不改已final內容；重跑總RTF與品質、延遲符合07或有明確未達標報告；preview超載不阻塞收音與正式排程。測試同音詞、數字、否定詞、中英混用與cancel/final競態。
 
