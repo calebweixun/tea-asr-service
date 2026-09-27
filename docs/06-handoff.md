@@ -74,6 +74,7 @@ tea-asr-service/
 **工作：** WS狀態機、binary seq header、sample clock、utterance commit、continuous VAD、排程、公平性、flow window、取消與slow reader。建立 `stream_wav.py` 以真實時間送frame，不需先取得麥克風權限。
 
 **狀態：已實作，長跑與併發容量測試完成。** WS狀態機、binary seq header、sample clock、flow window、commit/stop/cancel、audio.ack、segment終局事件、bounded outgoing queue與慢client偵測已完成。Silero VAD以ONNX Runtime接上（每session獨立recurrent state，不引進Torch），`models.lock.json` 已固定 revision 與 sha256。continuous profile由VAD切段，pre-roll 600 ms、句尾靜音 500 ms（revisable 900 ms）、最短語音 160 ms、12秒上限＋2秒grace（校準依據見 [P2切段報告](benchmarks/p2-segmentation-report.md)）；片段經有限佇列交給單一consumer依序處理，推論不阻塞收音。
+**2026-09-27：** continuous session 可在 `session.start.segmentation.end_silence_ms`（300–3000 ms）指定句尾靜音，省略時維持上述預設；`preview_policy.endpoint_silence_ms` 回報實際生效值，`capabilities.features.segmentation_control` 只在 continuous 可用時宣告範圍（docs/04「切段控制」）。只有句尾靜音可調，pre-roll、最短語音、上限與切分邏輯不變；500／900 以外的值沒有校準過。
 **一小時長跑已通過**（386段0錯誤、延遲p95 0.57秒、記憶體平穩，見 [長跑報告](benchmarks/p2-soak-report.md)），VAD參數也已用真實口語校準。
 **併發容量：** 已測試 N=1..4；預設 `max_continuous_sessions=2`，以實測結果作為 continuous 的預設上限。
 

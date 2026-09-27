@@ -291,6 +291,9 @@ class StreamSession:
         self._translator: SessionTranslator | None = None
         #: LocalAgreement-n for `transcript.stable`; `None` means never sent.
         self._stable_agreement: int | None = None
+        #: The continuous segmenter's end-of-segment silence actually in
+        #: effect; `None` for utterance sessions, which have no segmenter.
+        self._end_silence_ms: int | None = None
 
     # -- handshake -----------------------------------------------------------
 
@@ -329,6 +332,11 @@ class StreamSession:
             raise ApiError(
                 "unsupported_option",
                 "stable 由 revisable 預覽推導，需要 transcript_mode=revisable。",
+            )
+        if start.segmentation is not None and start.profile != "continuous":
+            raise ApiError(
+                "unsupported_option",
+                "segmentation 只調整 VAD 切段，需要 profile=continuous。",
             )
         if self._model_state != "ready":
             raise ApiError(
@@ -371,7 +379,7 @@ class StreamSession:
             min_audio_ms=PREVIEW_MIN_AUDIO_SAMPLES // 16,
             min_interval_ms=int(PREVIEW_MIN_INTERVAL_S * 1000),
             max_preview_audio_ms=PREVIEW_MAX_AUDIO_SAMPLES // 16,
-            endpoint_silence_ms=REVISABLE_END_SILENCE_MS if continuous else None,
+            endpoint_silence_ms=self._end_silence_ms,
             max_segment_ms=(
                 SegmenterConfig().hard_cap_ms
                 if continuous
@@ -890,13 +898,9 @@ class StreamSession:
         self._control_acks[start.request_id] = "session.start:"
         if self._profile == "continuous":
             assert self._vad is not None
-            end_silence = (
-                REVISABLE_END_SILENCE_MS
-                if self._transcript_mode == "revisable"
-                else SegmenterConfig().end_silence_ms
-            )
+            self._end_silence_ms = _end_silence_ms(start)
             self._segmenter = ContinuousSegmenter(
-                self._vad, SegmenterConfig(end_silence_ms=end_silence)
+                self._vad, SegmenterConfig(end_silence_ms=self._end_silence_ms)
             )
         self._consumer = asyncio.create_task(self._consume())
         self._writer.emit(
@@ -1133,6 +1137,20 @@ class StreamSession:
         """
 
         return self._profile == "continuous"
+
+
+def _end_silence_ms(start: SessionStart) -> int:
+    """End-of-segment silence for a continuous session.
+
+    Only this one segmenter field is client-tunable; everything else keeps the
+    `SegmenterConfig` defaults.
+    """
+
+    if start.segmentation is not None:
+        return start.segmentation.end_silence_ms
+    if start.transcript_mode == "revisable":
+        return REVISABLE_END_SILENCE_MS
+    return SegmenterConfig().end_silence_ms
 
 
 _KNOWN_TYPES = {"session.start", "audio.commit", "session.stop", "session.cancel", "ping"}

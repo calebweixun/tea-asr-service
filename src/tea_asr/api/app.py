@@ -17,6 +17,7 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from tea_asr.api.stream import (
+    REVISABLE_END_SILENCE_MS,
     ContinuousSessionAdmission,
     StreamSession,
     filter_private_use_characters,
@@ -34,6 +35,7 @@ from tea_asr.logs import MAX_LOG_EVENTS, event, read_recent_events, split_log_pa
 from tea_asr.model_spec import TEA_ASR_1_1_MLX_4BIT
 from tea_asr.rate_limit import AuthRateLimiter
 from tea_asr.scheduler import Scheduler
+from tea_asr.segmenter import SegmenterConfig
 from tea_asr.translation.session import MAX_PENDING_SEGMENTS
 from tea_asr.translation.simt import LATENCY_MODES, VERIFIED_DIRECTIONS
 from tea_asr.translation.supervisor import TranslationSupervisor
@@ -43,11 +45,13 @@ from tea_asr.wire import (
     Capabilities,
     CapabilityFeatures,
     CapabilityLimits,
+    EndSilenceRange,
     ErrorEnvelope,
     LogEntry,
     LogsResponse,
     QueueStatus,
     Segment,
+    SegmentationControl,
     StatusResponse,
     TranscriptionResponse,
     TranslationCapability,
@@ -454,6 +458,16 @@ def create_app(
                 # Only flip these once the matching acceptance in docs/05 passes.
                 partial_transcripts=settings.revisable_preview,
                 stable_transcripts=True if settings.revisable_preview else None,
+                segmentation_control=(
+                    SegmentationControl(
+                        end_silence_ms=EndSilenceRange(
+                            default=REVISABLE_END_SILENCE_MS,
+                            default_final_only=SegmenterConfig().end_silence_ms,
+                        )
+                    )
+                    if vad is not None
+                    else None
+                ),
                 translation=translation is not None and translation.state == "ready",
             ),
             limits=CapabilityLimits(
