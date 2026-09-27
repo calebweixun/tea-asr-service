@@ -120,3 +120,8 @@ tail -200 ~/Library/Logs/TEA\ ASR/service.log > service-log.txt
 
 如果是辨識品質問題，加上用 `--save-wav` 錄下的那段音訊與它的 `.events.jsonl`，
 這樣同一個情境可以被重現與反覆測試。
+
+即時字幕整段沒有字時，先看那段時間的 `stream.heartbeat` 與 `stream.audio_*`／`stream.vad_no_speech`
+警告，對照 [04「怎麼診斷『沒有字幕』」](04-api.md#怎麼診斷沒有字幕) 的表。要重現同一段聲音，
+暫時用 `TEA_ASR_DEBUG_CAPTURE_AUDIO=1` 啟動服務（會把串流進來的聲音存到
+`~/Library/Logs/TEA ASR/captures/`，查完請關掉並刪除）。

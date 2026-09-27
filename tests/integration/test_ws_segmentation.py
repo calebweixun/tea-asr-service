@@ -94,9 +94,9 @@ def test_only_end_silence_reaches_the_segmenter(
     seen: list[SegmenterConfig] = []
     real = stream.ContinuousSegmenter
 
-    def recording(vad: Any, config: SegmenterConfig) -> Any:
+    def recording(vad: Any, config: SegmenterConfig, **hooks: Any) -> Any:
         seen.append(config)
-        return real(vad, config)
+        return real(vad, config, **hooks)
 
     monkeypatch.setattr(stream, "ContinuousSegmenter", recording)
     started_event(start)

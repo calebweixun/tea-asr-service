@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -83,8 +84,12 @@ class ContinuousSegmenter:
         config: SegmenterConfig | None = None,
         *,
         start_sample: int = 0,
+        on_window: Callable[[np.ndarray, float], None] | None = None,
     ) -> None:
         self._vad = vad
+        #: Diagnostics hook: sees every analysed window and the probability the
+        #: VAD already returned for it, so observing costs no extra model call.
+        self._on_window = on_window
         self._vad_session = VadSession.new()
         self._config = config or SegmenterConfig()
         self._buffer = bytearray()
@@ -109,6 +114,12 @@ class ContinuousSegmenter:
     @property
     def in_speech(self) -> bool:
         return self._state == "speech"
+
+    @property
+    def state(self) -> str:
+        """`silence`, `pending` (candidate below min_speech_ms) or `speech`."""
+
+        return self._state
 
     def open_segment_audio(self) -> tuple[int, bytes] | None:
         """Audio of the segment currently being spoken, for streaming preview.
@@ -138,6 +149,8 @@ class ContinuousSegmenter:
                 self._buffer[offset : offset + VAD_WINDOW_SAMPLES * 2], dtype="<i2"
             ).astype(np.float32) / 32768.0
             probability = self._vad.probability(window, self._vad_session)
+            if self._on_window is not None:
+                self._on_window(window, probability)
             self._recent.append((self._cursor, probability))
             events.extend(self._step(probability, self._cursor, self._cursor + VAD_WINDOW_SAMPLES))
             self._cursor += VAD_WINDOW_SAMPLES

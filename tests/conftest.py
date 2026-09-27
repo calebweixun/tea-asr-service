@@ -83,6 +83,7 @@ def build_client(
     preview_min_interval_ms: int = _DEFAULTS.preview_min_interval_ms,
     preview_min_audio_ms: int = _DEFAULTS.preview_min_audio_ms,
     preview_load_factor: float = _DEFAULTS.preview_load_factor,
+    debug_capture_audio: bool = False,
 ) -> TestClient:
     app = create_app(
         Path("unused"),
@@ -99,6 +100,7 @@ def build_client(
             preview_min_interval_ms=preview_min_interval_ms,
             preview_min_audio_ms=preview_min_audio_ms,
             preview_load_factor=preview_load_factor,
+            debug_capture_audio=debug_capture_audio,
         ),
         vad_model=vad,
         rate_limiter=rate_limiter,

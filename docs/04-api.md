@@ -141,6 +141,84 @@ feature 只有完成該功能驗收才變 true；即使 mock mode 也不能假�
 - v0.1 **不提供** `before`／`since` 或跨越 rotation 家族之外的歷史分頁——這只是「近期發生了什麼」的即時視圖，不是完整歷史日誌瀏覽器；掃描範圍固定在 `service.log` 目前檔案＋其 `log_backup_count` 份備份，本身就是有界的。
 - 檔案讀取在背景執行緒進行（`asyncio.to_thread`），不會阻塞事件迴圈或其他並行的 HTTP／WS 請求。
 
+## W11｜串流診斷日誌（`tea_asr.stream`，2026-09-27）
+
+目的：OBS 即時字幕有時整段沒有字，使用者看不出是「音訊沒送到」「音訊太小聲」還是「VAD 判定不是語音」。每條 `/v1/stream` session 都寫進同一份 `service.log`（`tea_asr.logs.event()`，JSON lines、同樣的 `FORBIDDEN_KEYS` 過濾），`GET /v1/logs` 與 Mac app 的日誌頁不需任何改動就看得到。**不記錄任何辨識文字**，只記字數；不額外呼叫任何模型，VAD 統計直接沿用 segmenter 已算出的機率。實作在 `src/tea_asr/diagnostics.py`。
+
+每行都有 `session_id`，用它把同一條 session 的所有行串起來。
+
+| message | 等級 | 何時 | 主要欄位 |
+|---|---|---|---|
+| `stream.session_started` | INFO | `session.started` 送出後 | `profile`、`transcript_mode`、`language`、`stable_agreement`、`end_silence_ms`（實際生效值）、`preview_min_audio_ms`／`preview_min_interval_ms`／`preview_load_factor`（僅 revisable）、`translation`、`user_agent`（前 80 字元）、`capture_dir`／`capture_max_mb`（僅開啟錄音時） |
+| `stream.speech_started` | INFO | 開新片段 | `segment_index`、`start_sample`、`cause`（`vad`＝VAD 判定開始說話、`split`＝`max_duration` 切段後接續、`utterance`＝utterance profile 第一個 frame） |
+| `stream.segment_closed` | INFO | 片段封口（與 `segment.queued` 同時） | `segment_index`、`boundary`（`silence`／`max_duration`／`stop`／`manual`）、`start_sample`、`end_sample`、`audio_ms` |
+| `stream.segment_done` | INFO | 片段的終局事件送出時 | `outcome`（`final`／`no_speech`／`empty`／`error`）、`latency_ms`（封口到終局）、`queue_ms`、`inference_ms`、`chars`（字數，不是文字）、`stable_state`（`final`／`diverged`／`abandoned`，未開 stable 為 null）、`code`（error 時） |
+| `stream.heartbeat` | INFO | 每條進行中的 session 每 5 秒一行 | 見下表 |
+| `stream.preview` | DEBUG | 每次預覽 | `outcome`（`published`／`stale`＝跑完但片段已封口或已被較新結果取代／`dropped`＝排隊中被 scheduler 丟掉／`failed`／`deferred`＝被負載保護延後）、`decode_ms`、`audio_ms`、`queue_ms`、`wait_ms`／`gap_ms`（deferred） |
+| `stream.session_ended` | INFO | session 結束（teardown 時） | `reason`（`stopped`／`cancelled`／`client_disconnect`＋`close_code`／`error:<code>`，例如 `error:idle_timeout`、`error:timeline_gap`／`connection_closed`）、`duration_s`、`frames`、`audio_s`、`speech_started`、`segments_closed`、`boundaries`、`finals`、`skipped`、`failed`、`preview_*` 總數、`warnings`、`warnings_suppressed`、`capture_dropped_frames` |
+| `stream.session_rejected` | INFO | 連線已 accept 但 session 沒有開始 | `reason`（例如 `error:unsupported_option`、`error:concurrent_session_limit`、`error:model_loading`） |
+| `stream.connection_rejected` | INFO | `accept()` 之前拒絕 | `reason`（`unauthenticated`／`rate_limited`／`forbidden_origin`／`session_limit`）、`client`（來源位址）、`suppressed`；每種 reason 全服務每 30 秒最多一行 |
+
+**`stream.heartbeat` 欄位**（都是「這 5 秒」的值，下一行重新計算）：
+
+| 欄位 | 意義 |
+|---|---|
+| `window_ms` | 這個窗口的實際長度 |
+| `frames`、`samples` | 這 5 秒收到的 binary frame 數與 sample 數。1x 即時送 100 ms frame 時約 50／80000 |
+| `max_gap_ms` | 相鄰兩個 frame 之間最長的收件間隔（含窗口結束時仍在進行的空檔）。正常約 100 |
+| `rms_dbfs`、`peak_dbfs` | 收到音訊的 RMS 與峰值（dBFS）。數位靜音記為 `-120.0`；沒有收到任何 frame 時為 null |
+| `vad_windows` | VAD 評分的 512-sample 窗數（continuous 才有） |
+| `vad_max`、`vad_mean` | Silero 語音機率的最大值與平均 |
+| `vad_speech_frac` | 機率 ≥ 語音門檻（0.5）的窗口比例 |
+| `seg_state` | segmenter 狀態：`silence`／`pending`（候選但未滿 `min_speech_ms`）／`speech`；utterance 為 null |
+| `segment_open`、`pending_segments` | 目前是否有片段開著、有幾段在等辨識 |
+| `preview_run`／`preview_published`／`preview_dropped`／`preview_deferred`／`preview_failed`、`preview_decode_ms` | 這 5 秒的預覽帳：跑了幾次（published＋stale）、真的送出幾次、被丟掉（stale＋dropped）、被負載保護延後、失敗；預覽解碼總毫秒數 |
+| `worker_busy` | 這 5 秒單一 MLX worker 被佔用的比例（全服務，所有 session 合計） |
+
+**WARNING**（同時寫入 `service.log` 與長保存的 `service.error.log`）。每種警告每條 session 每 30 秒最多一行，中間被略過的次數記在下一行的 `suppressed`：
+
+| message | 條件 | 主要欄位 | 一次「偵測」 |
+|---|---|---|---|
+| `stream.audio_stalled` | session 進行中超過 3 秒沒收到任何 frame（`session.stop` 之後不算） | `gap_ms`、`frames_total` | 每秒檢查一次 |
+| `stream.audio_quiet` | 最近 10 秒收到音訊的 RMS < -60 dBFS（以 1 秒為單位滑動） | `quiet_s`、`rms_dbfs`、`peak_dbfs` | 每 10 秒 |
+| `stream.vad_no_speech` | 累計 10 秒 ≥ -40 dBFS 的音訊，期間沒有任何 VAD 窗口達到語音門檻；中間若有連續 2 秒較小聲的音訊就重新計算 | `loud_s`、`vad_max`（這段期間的最高機率）、`threshold` | 每 10 秒 |
+| `stream.queue_wait_slow` | 預覽或 final 在 scheduler 排隊超過 2 秒；`kind` 分開計 | `kind`（`preview`／`final`）、`queue_ms`、`segment_index` | 每個片段／預覽 |
+
+**量與保存**：實測一條 1x 即時、語音密集的 session（約每 5 秒一段）在 INFO 下 heartbeat 每行約 580 bytes、每段三行 lifecycle 合計約 810 bytes，約 **1.0 MB／小時／session**（heartbeat 0.42 MB＋片段 0.57 MB；沒人說話時只剩 heartbeat 的 0.42 MB）。`service.log` 預設 5 MB × 4 份＝20 MB，一條 session 約保留 20 小時，兩小時直播約 2 MB。警告有速率限制，最壞每小時約 0.15 MB 寫進 `service.error.log`。DEBUG 另加每次預覽一行（約 250 bytes，每小時約 1.5 MB），只在排查時用 `log_level=debug` 打開。
+
+### 選用：除錯錄音（預設關閉）
+
+| 設定 | 預設 | 環境變數 | 說明 |
+|---|---|---|---|
+| `debug_capture_audio` | `false` | `TEA_ASR_DEBUG_CAPTURE_AUDIO=1` | 把每條 `/v1/stream` session **收到的** 16 kHz PCM 存成滾動 WAV |
+| `debug_capture_minutes` | 10 | `TEA_ASR_DEBUG_CAPTURE_MINUTES` | 每條 session 至少保留最近幾分鐘（1–60，超出拒絕啟動） |
+
+檔案在 `~/Library/Logs/TEA ASR/captures/<日期時間>-<session 前 8 碼>/chunk-<起始 sample>.wav`，每檔 60 秒、16 kHz mono s16le；保留 `minutes`＋1 個檔（預設 11 檔、約 21 MB），最舊的在新檔開始時刪除；全服務只保留最近 5 條 session 的資料夾（預設上限約 106 MB）。實際路徑寫在 `stream.session_started.capture_dir`。檔名的起始 sample 對應 session 的 sample clock，除以 16000 就是秒數，可與 heartbeat 與 `speech.started` 對照。寫檔在獨立執行緒，佇列上限 1200 frame，跟不上時丟 frame 並記在 `session_ended.capture_dropped_frames`，不會阻塞收音。重播：
+
+```bash
+uv run python benchmarks/capture_event_trace.py capture --wav "<capture_dir>/chunk-000001920000.wav" \
+    --url ws://127.0.0.1:8399/v1/stream --token-file <token> --out /tmp/replay.jsonl
+```
+
+**隱私**：開啟後服務會把使用者串流進來的**所有聲音**原樣存到磁碟（麥克風、直播或會議的桌面音訊都一樣），包含其他人的聲音。這違反 ephemeral session 預設「不落音訊」的原則（docs/06 #7），所以只在排查時由使用者自己明確開啟，查完就關掉並刪除 `captures/` 資料夾。`GET /v1/logs` 不會回傳這些檔案。
+
+### 怎麼診斷「沒有字幕」
+
+1. 找到那段時間的 session：`stream.session_started`（看 `profile`、`end_silence_ms`、`user_agent`），之後依 `session_id` 過濾。
+2. 看那段時間的 `stream.heartbeat`，依下表判斷：
+
+| heartbeat 看起來像 | 代表 | 通常會同時看到 |
+|---|---|---|
+| `frames` 遠少於 50、`max_gap_ms` 幾千以上 | **音訊沒送到 server**：client 停送、OBS 音源斷了、網路卡住 | `stream.audio_stalled` |
+| `frames≈50`、`rms_dbfs=-120`、`peak_dbfs=-120` | 送到的是**數位靜音**：音源靜音、擷取到錯的裝置、macOS 螢幕擷取沒有聲音 | `stream.audio_quiet`（peak -120） |
+| `frames≈50`、`rms_dbfs` < -60、`vad_max` 很低 | 有聲音但**太小聲**：音源音量或增益太低 | `stream.audio_quiet`（peak 高於 -120） |
+| `frames≈50`、`rms_dbfs` > -40、`vad_max` < 0.5、`vad_speech_frac=0` | **有聲音，但 VAD 不認為是語音**：純音樂、噪音，或人聲被背景音樂蓋過 | `stream.vad_no_speech`（`vad_max` 是那段最高機率） |
+| `vad_speech_frac` 正常、`seg_state=speech`，但沒有 `stream.segment_done` | 有切出語音、但**卡在辨識**：看 `pending_segments`、`worker_busy` | `stream.queue_wait_slow` |
+| `stream.segment_done` 正常且 `outcome=final`、`chars` > 0 | server 有送出字幕：問題在 client 顯示端（OBS 外掛） | — |
+| `outcome=no_speech`／`empty` | 模型沒聽出字或全被 PUA 過濾 | `pua_filtered` |
+
+3. 需要重現時，打開除錯錄音，等問題再出現，用上面的 `capture_event_trace.py` 把 `capture_dir` 裡對應時間的 WAV 重播到測試 server。
+
 ## WebSocket：v0.1
 
 一條連線＝一個 session，避免多路 PCM multiplexing。read loop、event writer、scheduler 獨立執行。server 建立 socket 後送 `hello`（協定版本、model_state），client 在5秒內送 `session.start`；server 只有在模型 ready、容量允許時回 `session.started`。未 started 禁止 binary。

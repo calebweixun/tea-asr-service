@@ -64,6 +64,20 @@ class Scheduler:
         self._running_samples = 0
         self._running = False
         self._tickets = itertools.count()
+        #: Worker time handed out so far, for the stream heartbeat's
+        #: `worker_busy` fraction.
+        self._busy_s = 0.0
+        self._running_since: float | None = None
+
+    @property
+    def busy_seconds(self) -> float:
+        """Cumulative seconds the worker has been handed a task, including
+        the one running now."""
+
+        running = (
+            time.perf_counter() - self._running_since if self._running_since is not None else 0.0
+        )
+        return self._busy_s + running
 
     @property
     def waiting_tasks(self) -> int:
@@ -106,6 +120,7 @@ class Scheduler:
         waiter = self._waiters.pop(0)
         self._running = True
         self._running_samples = waiter.samples
+        self._running_since = time.perf_counter()
         waiter.future.set_result(None)
 
     async def transcribe(
@@ -151,6 +166,9 @@ class Scheduler:
             self._release()
 
     def _release(self) -> None:
+        if self._running_since is not None:
+            self._busy_s += time.perf_counter() - self._running_since
+            self._running_since = None
         self._running = False
         self._running_samples = 0
         self._wake_next()
