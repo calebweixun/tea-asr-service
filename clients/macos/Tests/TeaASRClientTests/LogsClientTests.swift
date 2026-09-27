@@ -108,6 +108,23 @@ final class LogsClientTests: XCTestCase {
         XCTAssertNil(entry.fields)
     }
 
+    /// A `stream.heartbeat` line as the server's `/v1/logs` returns it
+    /// (docs/04「W11」): negative decimals, nulls, booleans and nested
+    /// objects must all survive decoding and render readably on one row.
+    func testStreamHeartbeatEntryDecodesAndRendersReadably() throws {
+        let json = """
+        {"ts":"2026-09-27T23:10:50","level":"INFO","logger":"tea_asr.stream","message":"stream.heartbeat","fields":{"session_id":"68ba433d","frames":50,"max_gap_ms":101,"rms_dbfs":-63.9,"peak_dbfs":-44.6,"vad_max":0.016,"vad_speech_frac":0.0,"seg_state":"silence","segment_open":false,"worker_busy":null,"boundaries":{"silence":31}}}
+        """
+        let entry = try JSONDecoder().decode(LogEntry.self, from: Data(json.utf8))
+        let line = LogsPresentation.line(for: entry)
+        XCTAssertTrue(line.contains("stream.heartbeat"))
+        XCTAssertTrue(line.contains("rms_dbfs=-63.9"))
+        XCTAssertTrue(line.contains("vad_max=0.016"))
+        XCTAssertTrue(line.contains("segment_open=false"))
+        XCTAssertTrue(line.contains("worker_busy=null"))
+        XCTAssertTrue(line.contains("boundaries={silence: 31}"))
+    }
+
     // MARK: - Presentation
 
     func testLineIncludesTimestampLevelLoggerMessageAndSortedFields() {

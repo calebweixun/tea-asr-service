@@ -267,6 +267,15 @@ class ServiceConfig:
     preview_min_interval_ms: int = 300
     preview_min_audio_ms: int = 300
     preview_load_factor: float = 2.0
+    #: Diagnostics only, off by default: keep the most recent
+    #: `debug_capture_minutes` of every `/v1/stream` session's received 16 kHz
+    #: PCM as rolling WAV files under `<logs>/captures/`, so the exact audio
+    #: of a "no captions" moment can be replayed through
+    #: `benchmarks/capture_event_trace.py`. It records whatever the user
+    #: streams (docs/06 #7: ephemeral sessions do not persist audio unless
+    #: this is explicitly turned on). Bounded: see `tea_asr.diagnostics`.
+    debug_capture_audio: bool = False
+    debug_capture_minutes: int = 10
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> ServiceConfig:
@@ -361,6 +370,12 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
     load_factor = get("TEA_ASR_PREVIEW_LOAD_FACTOR")
     if load_factor is not None:
         config = replace(config, preview_load_factor=float(load_factor))
+    capture = get("TEA_ASR_DEBUG_CAPTURE_AUDIO")
+    if capture is not None:
+        config = replace(config, debug_capture_audio=capture not in {"0", "false", "no", ""})
+    capture_minutes = get("TEA_ASR_DEBUG_CAPTURE_MINUTES")
+    if capture_minutes is not None:
+        config = replace(config, debug_capture_minutes=int(capture_minutes))
     return config
 
 
@@ -383,6 +398,21 @@ def validate_preview_cadence_or_raise(config: ServiceConfig) -> None:
         raise RuntimeError(
             f"preview_load_factor={config.preview_load_factor} 超出範圍"
             f"（必須介於 0 與 {PREVIEW_LOAD_FACTOR_MAX:g} 之間，0 表示關閉負載保護）。"
+        )
+
+
+#: Ceiling on `debug_capture_minutes` (docs/06 #4). An hour of 16 kHz PCM is
+#: ~115 MB per session.
+DEBUG_CAPTURE_MINUTES_MAX = 60
+
+
+def validate_debug_capture_or_raise(config: ServiceConfig) -> None:
+    """Refuse a capture window the rolling recorder cannot bound."""
+
+    if not (1 <= config.debug_capture_minutes <= DEBUG_CAPTURE_MINUTES_MAX):
+        raise RuntimeError(
+            f"debug_capture_minutes={config.debug_capture_minutes} 超出範圍"
+            f"（必須介於 1 與 {DEBUG_CAPTURE_MINUTES_MAX} 分鐘之間）。"
         )
 
 
