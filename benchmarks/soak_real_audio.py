@@ -38,6 +38,7 @@ REPLAY_FLAGS = (
     "--comma-min",
     "8",
 )
+REPLAY_ANALYSIS_VERSION = 2
 
 sys.path.insert(0, str(HERE))
 
@@ -315,10 +316,14 @@ def _section_trace_rows(
     ]
 
 
-def _run_replay(binary: Path, trace_path: Path) -> tuple[dict[str, Any], dict[int, dict[str, str]]]:
+def _run_replay(
+    binary: Path,
+    trace_path: Path,
+    rows: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], dict[int, dict[str, str]]]:
     command = [str(binary), str(trace_path), *REPLAY_FLAGS, "--quiet"]
     result = subprocess.run(command, check=True, capture_output=True, text=True, errors="replace")
-    return parse_replay_output(result.stdout)
+    return parse_replay_output(result.stdout, rows if rows is not None else read_jsonl(trace_path))
 
 
 def run_replay(
@@ -333,8 +338,9 @@ def run_replay(
     trace_path = trace_path.expanduser().resolve()
     rows = read_jsonl(trace_path)
     replay_binary = binary or _build_replay(plugin_dir, build_dir)
-    overall, closes = _run_replay(replay_binary, trace_path)
+    overall, closes = _run_replay(replay_binary, trace_path, rows)
     result: dict[str, Any] = {
+        "replay_analysis_version": REPLAY_ANALYSIS_VERSION,
         "trace": str(trace_path),
         "trace_size_bytes": trace_path.stat().st_size,
         "trace_mtime_ns": trace_path.stat().st_mtime_ns,
@@ -356,6 +362,10 @@ def run_replay(
                 "layout_moves": 0,
                 "largest_burst": 0,
                 "duplication_lines": 0,
+                "duplication_total_lines": 0,
+                "duplication_model_lines": 0,
+                "duplication_speech_lines": 0,
+                "duplication_unmapped_lines": 0,
             }
         else:
             with tempfile.TemporaryDirectory(prefix="soak-replay-", dir=SOAK_ROOT) as temp_dir:
@@ -364,13 +374,15 @@ def run_replay(
                     "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in section_rows),
                     encoding="utf-8",
                 )
-                metrics, _ = _run_replay(replay_binary, section_path)
+                metrics, _ = _run_replay(replay_binary, section_path, section_rows)
         result["sections"].append({**section, **metrics})
     return result, closes
 
 
 def _same_trace(saved: dict[str, Any], trace_path: Path) -> bool:
     return (
+        saved.get("replay_analysis_version") == REPLAY_ANALYSIS_VERSION
+        and
         saved.get("trace_size_bytes") == trace_path.stat().st_size
         and saved.get("trace_mtime_ns") == trace_path.stat().st_mtime_ns
     )
@@ -393,6 +405,7 @@ def _analysis_and_replay(
     server_log: Path | None,
     plugin_dir: Path,
     build_dir: Path,
+    replay_binary: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     analysis = analyze_trace(trace_path, manifest, server_log)
     replay_path = _result_path(trace_path, "replay.json")
@@ -402,10 +415,12 @@ def _analysis_and_replay(
         if isinstance(loaded, dict) and _same_trace(loaded, trace_path):
             replay_data = loaded
     if not replay_data:
-        replay_data, _ = run_replay(trace_path, manifest, plugin_dir, build_dir)
+        replay_data, _ = run_replay(
+            trace_path, manifest, plugin_dir, build_dir, binary=replay_binary
+        )
         _save_json(replay_path, replay_data)
     analysis["hard_failures"] = hard_failures(analysis, replay_data)
-    analysis["soft_failures"] = soft_failures(analysis)
+    analysis["soft_failures"] = soft_failures(analysis, replay_data)
     analysis["trace_size_bytes"] = trace_path.stat().st_size
     analysis["trace_mtime_ns"] = trace_path.stat().st_mtime_ns
     _save_json(_result_path(trace_path, "analysis.json"), analysis)
@@ -448,8 +463,8 @@ def write_metric_report(
         "",
         "Times in the distribution columns are seconds (median / p95 / max). Worker busy is a fraction.",
         "",
-        "| Scope | Segments q/f/s/e | Duration s | Speech to first partial s | Stable gap s | Final latency p95 s | Longest speech without text s | Partial rewrites | Stable diverged/abandoned | Worker busy | Warnings | Fade outs | Row losses | Tail retract/rewrite | Layout moves | Burst | Duplications | Status |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Scope | Segments q/f/s/e | Duration s | Speech to first partial s | Stable gap s | Final latency p95 s | Longest speech without text s | Partial rewrites | Stable diverged/abandoned | Worker busy | Warnings | Fade outs | Row losses | Tail retract/rewrite | Layout moves | Burst | Plugin dup | Model dup | Speech dup | Status |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     row_data = _metric_table_rows(analysis, replay)
     for scope, metrics, caption in row_data:
@@ -465,7 +480,7 @@ def write_metric_report(
         lines.append(
             "| {scope} | {counts} | {duration} | {first} | {stable} | {final} | {quiet} | "
             "{rewrites} | {closes} | {busy} | {warnings} | {fade} | {rows} | {tail} | "
-            "{moves} | {burst} | {dups} | {status} |".format(
+            "{moves} | {burst} | {plugin_dups} | {model_dups} | {speech_dups} | {status} |".format(
                 scope=scope,
                 counts=counts,
                 duration=_dist(metrics.get("segment_duration_s", {}), 1.0),
@@ -482,7 +497,9 @@ def write_metric_report(
                 tail=tail,
                 moves=caption.get("layout_moves", 0),
                 burst=caption.get("largest_burst", 0),
-                dups=caption.get("duplication_lines", 0),
+                plugin_dups=caption.get("duplication_lines", 0),
+                model_dups=caption.get("duplication_model_lines", 0),
+                speech_dups=caption.get("duplication_speech_lines", 0),
                 status=status,
             )
         )
@@ -492,7 +509,7 @@ def write_metric_report(
             f"| {scope} | `{json.dumps(metrics.get('errors_by_code', {}), sort_keys=True)}` "
             f"| `{json.dumps(metrics.get('warnings_by_message', {}), sort_keys=True)}` |"
         )
-    lines.extend(["", "## Hard thresholds", "", "| Scope | invalid_ipc=0 | layout moves=0 | mid-speech fades=0 | duplication lines=0 | no-text stretch ≤10s | Status |", "|---|---|---|---|---|---|---|"])
+    lines.extend(["", "## Hard thresholds", "", "| Scope | invalid_ipc=0 | layout moves=0 | mid-speech fades=0 | plugin duplication lines=0 | no-text stretch ≤10s | Status |", "|---|---|---|---|---|---|---|"])
     for scope, metrics, caption in row_data:
         checks = [
             metrics.get("errors_by_code", {}).get("invalid_ipc", 0) == 0,
@@ -509,6 +526,22 @@ def write_metric_report(
     final_p95 = (overall.get("final_latency_ms") or {}).get("p95")
     lines.append(f"| Stable commit gap | {_seconds(stable_p95)} | 3.00s | {'FAIL' if stable_p95 is not None and stable_p95 > 3000 else 'PASS'} |")
     lines.append(f"| Final latency after close | {_seconds(final_p95)} | 1.50s | {'FAIL' if final_p95 is not None and final_p95 > 1500 else 'PASS'} |")
+    lines.extend(
+        [
+            "",
+            "## Soft duplication classifications",
+            "",
+            "Model-origin and speech-origin lines are diagnostic and do not count toward the hard threshold.",
+            "",
+            "| Scope | Model-origin lines | Speech-origin lines |",
+            "|---|---:|---:|",
+        ]
+    )
+    for scope, _, caption in row_data:
+        lines.append(
+            f"| {scope} | {caption.get('duplication_model_lines', 0)} | "
+            f"{caption.get('duplication_speech_lines', 0)} |"
+        )
     if analysis.get("hard_failures"):
         lines.extend(["", "Hard failures: " + "; ".join(analysis["hard_failures"])])
     if analysis.get("soft_failures"):
@@ -589,7 +622,12 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     manifest = args.manifest.expanduser().resolve() if args.manifest else None
     server_log = args.server_log.expanduser().resolve() if args.server_log else None
     analysis, replay = _analysis_and_replay(
-        trace_path, manifest, server_log, args.plugin_dir, args.build_dir
+        trace_path,
+        manifest,
+        server_log,
+        args.plugin_dir,
+        args.build_dir,
+        args.replay_binary,
     )
     print(
         json.dumps(
@@ -608,7 +646,9 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
 def _cmd_replay(args: argparse.Namespace) -> int:
     trace_path = args.trace.expanduser().resolve()
     manifest = args.manifest.expanduser().resolve() if args.manifest else None
-    metrics, _ = run_replay(trace_path, manifest, args.plugin_dir, args.build_dir)
+    metrics, _ = run_replay(
+        trace_path, manifest, args.plugin_dir, args.build_dir, binary=args.replay_binary
+    )
     _save_json(_result_path(trace_path, "replay.json"), metrics)
     print(json.dumps({"overall": metrics["overall"], "sections": metrics["sections"]}, indent=2))
     return 0
@@ -619,13 +659,19 @@ def _cmd_report(args: argparse.Namespace) -> int:
     manifest = args.manifest.expanduser().resolve() if args.manifest else None
     server_log = args.server_log.expanduser().resolve() if args.server_log else None
     analysis, replay = _analysis_and_replay(
-        trace_path, manifest, server_log, args.plugin_dir, args.build_dir
+        trace_path,
+        manifest,
+        server_log,
+        args.plugin_dir,
+        args.build_dir,
+        args.replay_binary,
     )
     _, closes = run_replay(
         trace_path,
         manifest,
         args.plugin_dir,
         args.build_dir,
+        binary=args.replay_binary,
         only_overall=True,
     )
     report_path = args.out or _result_path(trace_path, "md")
@@ -643,6 +689,11 @@ def _add_trace_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--server-log", type=Path)
     parser.add_argument("--plugin-dir", type=Path, default=DEFAULT_PLUGIN)
     parser.add_argument("--build-dir", type=Path, default=SOAK_ROOT / "build")
+    parser.add_argument(
+        "--replay-binary",
+        type=Path,
+        help="use an existing caption-replay binary instead of building one",
+    )
 
 
 def main() -> int:

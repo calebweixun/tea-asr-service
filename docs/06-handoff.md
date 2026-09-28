@@ -92,6 +92,7 @@ tea-asr-service/
 final 與 final-only 模式完全一致、混合負載下 23/23 HTTP 辨識成功且 10 段 final 全數產生。
 `TEA_ASR_REVISABLE_PREVIEW=0` 或 config.toml 可關閉，關閉時 revisable 請求回 `unsupported_option` 而非靜默降級。
 未涵蓋：單一語者與單一機器、預覽降級路徑未在真實過載下觸發。
+**2026-09-28｜重複輸出 guard：**partial/final 的 `text` 預設最多保留三個連續重複單位；單字元與 2–6 字元單位可分別用 `repetition_single_char_limit`／`repetition_multi_char_limit` 及對應的 `TEA_ASR_REPETITION_*_LIMIT` 環境變數調整。標點與空白不會中斷判定；含十進位數字、緊鄰十進位數字或含 CJK 數字字元的重複單位會保留。ASCII 字母單位只在兩側都沒有 ASCII 字母時修剪。final 的 `raw_text` 保持原樣並以 `repetition_trimmed` 警告標記；INFO log 只記 segment index、類型、單位長度與移除字元數。trim 後 partial 若短於已提交 stable 前綴，tracker 會保留原前綴、不發縮短的 stable 更新。單元測試已涵蓋，真實模型品質尚未用新版 server 驗收。
 **2026-09-27：** 預覽節奏改為 server 設定 `preview_min_audio_ms`／`preview_min_interval_ms`（預設 300／300，原固定 800／800）加負載保護 `preview_load_factor`（預設 2，間隔至少 2×上次解碼時間）；封口時排隊中的預覽直接從 scheduler 移除，不再排在 final 後面跑。`preview_policy` 回報實際值，wire 欄位不變。實測（[預覽節奏報告](benchmarks/preview-cadence-report.md)）stable 提交延遲中位數 0.87→0.10 秒、兩 session 合計 worker 忙碌 0.49、final 延遲不變；partial 改寫率 20–23%→26–27%。語料是拼接的朗讀句，自然快語速與真實 OBS 畫面未驗證。
 
 **完成條件：** 能呈現「先出字→後文修正→定稿」；partial不重複append、不改已final內容；重跑總RTF與品質、延遲符合07或有明確未達標報告；preview超載不阻塞收音與正式排程。測試同音詞、數字、否定詞、中英混用與cancel/final競態。
@@ -112,6 +113,7 @@ log 為 JSON lines 並輪替，明確過濾 token、PCM 與逐字稿。關閉時
 **2026-09-28：** 修正 worker IPC 失去同步：session 在預覽推論中途關閉（OBS 改設定後重連）時，被取消的預覽沒讀走自己的 response，之後每個請求都讀到上一個的 response，整個 process 永久回 `invalid_ipc`（實機 heartbeat `preview_failed=16 preview_published=0`）。現在一次寫入＋讀回不受 caller 取消影響（shield，鎖持有到讀完），scheduler 同步到真正結束才放行；另加防線：ID 不符或 frame 壞掉就記 `worker.ipc_desync`、重啟 worker、只讓當下請求失敗。翻譯 worker 同樣補上防線（它原本就有 shield）。已用真實模型在測試 port 以「中途硬斷 A、立刻開 B」重現舊版 bug 並驗證新版不再發生；在使用者真實 OBS 重連流程上未驗證。
 
 **2026-09-28｜real-audio live-subtitle soak harness：** 新增 `benchmarks/soak_real_audio.py` 的 extract/capture/analyze/replay/report，`benchmarks/replay_regression.py` 對保存的 trace 重跑 plugin caption state machine，並加合成 trace 的 metrics／重複字串測試。Replay 會在 `.soak/build/` 編譯 OBS plugin 測試工具；音訊、trace、session log sidecar 與 review 均留在 `.soak/`，metrics report 不包含逐字稿。合成 trace 的 extract 前置、replay、analyze、report、threshold PASS/FAIL 與 regression replay 已執行；live fake-backend capture 嘗試 bind `127.0.0.1:8422` 時收到 `Operation not permitted`，沒有換 port 重試。**真實模型的 300／600 ms 兩次完整 soak 尚未執行，真實音訊品質與 OBS 畫面尚未驗收**；外部可執行命令見 [09 測試指南](09-testing-guide.md#六真實錄音字幕-soak)。
+**2026-09-28｜soak duplication reclassification：**既有 church trace 重新跑 `analyze`／`report`，church-300 的 overall 為 plugin/model/speech 1/1/7，church-600 為 1/3/7；只有 plugin-origin 納入 hard threshold。離線 repetition guard 掃描對 church-300 有4個 trimmed events（3個單位在 final 出現至少兩次），church-600 有22個（20個單位在 final 出現至少兩次）。這些是既有 trace 的離線分析，不代表新版 server 的即時模型品質已驗收；完整 metrics 見 [real-audio soak 報告](benchmarks/soak-real-audio-2026-09-28.md)。
 睡眠偵測比較 wall clock 與 monotonic clock 的差距（Darwin 的 monotonic 在睡眠期間不前進），
 不必為此引進 pyobjc。喚醒後對進行中的 session 送 `timeline_gap` 並 close 1012——v0.1 沒有 resume，
 把缺口兩側的音訊接在同一個 sample clock 上是說謊；接著用一次真實推論探測 worker，

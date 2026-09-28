@@ -296,6 +296,14 @@ commit/stop 的 `through_seq` 必須等於最後已收 seq；WS 有序保證此 
 }
 ```
 
+`text` may be shortened by the server when a 1-character or 2–6-character unit repeats more than three times consecutively;
+punctuation and spaces between copies do not break the run. The defaults are configurable with
+`[service].repetition_single_char_limit` / `[service].repetition_multi_char_limit` or the matching
+`TEA_ASR_REPETITION_SINGLE_CHAR_LIMIT` / `TEA_ASR_REPETITION_MULTI_CHAR_LIMIT` environment variables.
+Units containing decimal digits, runs adjacent to decimal digits, and units containing CJK numerals are preserved. ASCII-letter units are shortened only when no ASCII letter borders the run. This affects both `transcript.partial.text` and `transcript.final.text`. A final keeps the model result in
+`raw_text` unchanged and adds `repetition_trimmed` to `warnings` when trimming occurred. The other final warning
+tag is `private_use_characters`; the one-shot HTTP empty-speech warning is `no_speech`. These tags can coexist.
+
 同 session 的 segment_index 按來源順序由0遞增；final/error/skipped 依此順序交付，一個 segment 恰有一個終局事件。客戶端以 `(session_id, segment_id)` 去重，只有final可正式注入文件。v0.1不送partial；P2a的partial只更新自有預覽或有所有權的組字區，依下列契約。final之後不再改字。
 
 terminal event 送出後正常close1000。client unexpected disconnect：v0.1 丟棄未提交 buffer，取消未開始工作；正在推論可完成但結果丟棄。不得宣稱 resume。15秒 server WS ping，30秒無 pong 切斷；連續120秒沒收到音訊或控制訊息可 idle close。活躍靜音 frame 不算 idle。
@@ -414,6 +422,7 @@ session.start 加可選 `stable`，必須同時 `transcript_mode="revisable"`，
   partial 或 final 的 `revision`。`start_sample`／`end_sample` 同來源事件，sample clock 與 segment ID 沿用、不另分配。
 - **只增不改**：同一 `segment_id` 的後一則 `text` 一定以前一則開頭（也因此 UTF-8 bytes 以前一則 bytes 開頭），
   且結尾落在 grapheme cluster 邊界。client 只需把多出的尾巴接上，不需要也不應該做 diff。
+  partial 進入 stable tracker 前會先套用重複字串 guard；如果後續修訂因此短於已提交前綴，tracker 會保留舊前綴並忽略這次縮短，不重寫已提交的 stable 文字。普通 partial 仍可照常修訂。
 - `state`：`open`＝之後可能還有；其餘三種是該 segment **最後一則** `transcript.stable`：
   - `final`：`text` 與 `transcript.final.text` 完全相同。
   - `diverged`：final 沒有延伸已提交的文字。`text`＝已提交文字＋final 在對齊點之後的部分，**不等於** final；

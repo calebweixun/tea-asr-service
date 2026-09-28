@@ -6,7 +6,10 @@ from pathlib import Path
 from benchmarks.soak_metrics import (
     analyze_trace,
     duplicate_segments_from_trace,
+    hard_failures,
     has_new_repeated_run,
+    parse_replay_output,
+    soft_failures,
 )
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "soak"
@@ -38,6 +41,7 @@ def test_duplication_detector_uses_normalised_non_overlapping_runs() -> None:
     assert has_new_repeated_run("中華民國，中華民國", "中華民國")
     assert not has_new_repeated_run("中華民國，中華民國", "中華民國中華民國")
     assert has_new_repeated_run("Fullwidth ＡＢＣＤ ＡＢＣＤ", "abcd")
+    assert not has_new_repeated_run("ABCD ABCD", "abce,abce")
 
     rows = [
         {"event": {"type": "transcript.partial", "segment_id": "a", "text": "中華民國中華民國"}},
@@ -46,6 +50,61 @@ def test_duplication_detector_uses_normalised_non_overlapping_runs() -> None:
         {"event": {"type": "transcript.final", "segment_id": "b", "text": "中華民國中華民國"}},
     ]
     assert duplicate_segments_from_trace(rows) == ["a"]
+
+
+def test_replay_duplication_lines_are_classified_with_fuzzy_segment_text() -> None:
+    rows = [
+        {"event": {"type": "transcript.partial", "segment_id": "plugin", "text": "one line"}},
+        {"event": {"type": "transcript.final", "segment_id": "plugin", "text": "final1"}},
+        {"event": {"type": "transcript.partial", "segment_id": "model", "text": "ABCDABCD"}},
+        {"event": {"type": "transcript.final", "segment_id": "model", "text": "final2"}},
+        {"event": {"type": "transcript.partial", "segment_id": "speech", "text": "final3"}},
+        {"event": {"type": "transcript.final", "segment_id": "speech", "text": "abceabce"}},
+    ]
+    output = (
+        "# duplication: lines that showed a repeated 4+ character run their final does not have=3\n"
+        "#   dup: ABCDABCD  (final: final1)\n"
+        "#   dup: ABCDABCD  (final: final2)\n"
+        "#   dup: ＡＢＣＤ，ＡＢＣＤ  (final: abceabce)\n"
+    )
+
+    metrics, _ = parse_replay_output(output, rows)
+
+    assert metrics["duplication_total_lines"] == 3
+    assert metrics["duplication_lines"] == 1
+    assert metrics["duplication_model_lines"] == 1
+    assert metrics["duplication_speech_lines"] == 1
+    assert metrics["duplication_unmapped_lines"] == 0
+    analysis = {
+        "overall": {
+            "stable_gap_ms": {"p95": 0},
+            "final_latency_ms": {"p95": 0},
+        },
+        "sections": [{"name": "all", "metrics": {}}],
+    }
+    replay = {
+        "overall": metrics,
+        "sections": [{"name": "all", **metrics}],
+    }
+    assert "overall: duplication_lines=1" in hard_failures(analysis, replay)
+    replay["overall"]["duplication_lines"] = 0
+    replay["sections"][0]["duplication_lines"] = 0
+    assert hard_failures(analysis, replay) == []
+    soft = soft_failures(analysis, replay)
+    assert "overall: model_origin_duplication_lines=1 (soft)" in soft
+    assert "overall: speech_origin_duplication_lines=1 (soft)" in soft
+
+
+def test_unmapped_replay_dup_line_stays_a_hard_plugin_failure() -> None:
+    output = (
+        "# duplication: lines that showed a repeated 4+ character run their final does not have=1\n"
+        "#   dup: ABCDABCD  (final: final1)\n"
+    )
+
+    metrics, _ = parse_replay_output(output, [])
+
+    assert metrics["duplication_lines"] == 1
+    assert metrics["duplication_unmapped_lines"] == 1
 
 
 def test_jsonl_fixture_has_no_external_audio_fields() -> None:

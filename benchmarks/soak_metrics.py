@@ -7,6 +7,7 @@ import json
 import math
 import re
 import statistics
+import unicodedata
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from datetime import datetime
@@ -55,35 +56,11 @@ def distribution(values: Iterable[float]) -> dict[str, float | int | None]:
 
 def _normalise_for_duplicate(text: str) -> tuple[int, ...]:
     out: list[int] = []
-    for char in text:
+    for char in unicodedata.normalize("NFKC", text).casefold():
         code = ord(char)
-        if code <= 0x20 or code == 0x7F:
+        if char.isspace() or unicodedata.category(char).startswith(("P", "Z")):
             continue
-        if code < 0x80:
-            if not ("0" <= char <= "9" or "a" <= char <= "z" or "A" <= char <= "Z"):
-                continue
-            code = ord(char.lower())
-        elif (
-            0x2000 <= code <= 0x206F
-            or 0x3000 <= code <= 0x303F
-            or 0xFE10 <= code <= 0xFE1F
-            or 0xFE30 <= code <= 0xFE6F
-            or 0xFF01 <= code <= 0xFF0F
-            or 0xFF1A <= code <= 0xFF20
-            or 0xFF3B <= code <= 0xFF40
-            or 0xFF5B <= code <= 0xFF65
-            or code in {0x00A0, 0x00B7}
-        ):
-            continue
-        elif 0xFF21 <= code <= 0xFF3A:
-            code = code - 0xFF21 + ord("a")
-        elif 0xFF41 <= code <= 0xFF5A:
-            code = code - 0xFF41 + ord("a")
-        elif 0xFF10 <= code <= 0xFF19:
-            code = code - 0xFF10 + ord("0")
-        else:
-            code = _FOLDS.get(code, code)
-        out.append(code)
+        out.append(_FOLDS.get(code, code))
     return tuple(out)
 
 
@@ -100,17 +77,139 @@ def _non_overlapping_run_count(text: tuple[int, ...], run: tuple[int, ...]) -> i
     return count
 
 
+def _edit_distance_within(
+    left: tuple[int, ...], right: tuple[int, ...], limit: int
+) -> int | None:
+    if abs(len(left) - len(right)) > limit:
+        return None
+    previous = list(range(len(right) + 1))
+    for left_index, left_char in enumerate(left, start=1):
+        current = [left_index]
+        for right_index, right_char in enumerate(right, start=1):
+            current.append(
+                min(
+                    current[-1] + 1,
+                    previous[right_index] + 1,
+                    previous[right_index - 1] + (left_char != right_char),
+                )
+            )
+        if min(current) > limit:
+            return None
+        previous = current
+    distance = previous[-1]
+    return distance if distance <= limit else None
+
+
+def _fuzzy_match_end(
+    text: tuple[int, ...], run: tuple[int, ...], start: int
+) -> int | None:
+    # The replay flags runs of four or more normalized characters. One edit
+    # per four-character window permits a single typo or variant in that run.
+    limit = max(1, len(run) // 4)
+    shortest = max(1, len(run) - limit)
+    longest = min(len(text) - start, len(run) + limit)
+    for width in range(shortest, longest + 1):
+        end = start + width
+        if _edit_distance_within(text[start:end], run, limit) is not None:
+            return end
+    return None
+
+
+def _fuzzy_run_count(text: tuple[int, ...], run: tuple[int, ...]) -> int:
+    count = 0
+    index = 0
+    while index < len(text):
+        end = _fuzzy_match_end(text, run, index)
+        if end is None:
+            index += 1
+        else:
+            count += 1
+            index = end
+    return count
+
+
+def _repeated_windows(text: tuple[int, ...], minimum: int = 4) -> tuple[tuple[int, ...], ...]:
+    if minimum < 1:
+        raise ValueError("minimum repeated run length must be positive")
+    if len(text) < minimum * 2:
+        return ()
+    runs = {
+        text[start : start + minimum]
+        for start in range(len(text) - minimum + 1)
+        if _non_overlapping_run_count(text, text[start : start + minimum]) >= 2
+    }
+    return tuple(sorted(runs))
+
+
 def has_new_repeated_run(display: str, final: str, minimum: int = 4) -> bool:
-    """Mirror the plugin replay guard: a repeated run absent from the final."""
+    """Whether display repeats a four-character run more often than the final."""
     shown = _normalise_for_duplicate(display)
     reference = _normalise_for_duplicate(final)
-    for start in range(max(0, len(shown) - minimum + 1)):
-        run = shown[start : start + minimum]
-        if _non_overlapping_run_count(shown, run) < 2:
-            continue
-        if _non_overlapping_run_count(reference, run) < _non_overlapping_run_count(shown, run):
+    for run in _repeated_windows(shown, minimum):
+        if _fuzzy_run_count(reference, run) < _non_overlapping_run_count(shown, run):
             return True
     return False
+
+
+def classify_duplication_lines(
+    rows: list[dict[str, Any]], duplicates: list[tuple[str, str]]
+) -> dict[str, int]:
+    """Classify replay dup lines against partial/final text from each segment.
+
+    Each duplicate is `(shown_line, replay_final_text)`. Text is normalized for
+    punctuation, spacing, case and compatibility-width variants; matching then
+    allows one edit per four-character repeated-run window.
+    """
+
+    segments: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"partials": [], "finals": []}
+    )
+    for row in rows:
+        event = row.get("event", {})
+        kind = event.get("type")
+        segment_id = event.get("segment_id")
+        if not segment_id or kind not in {"transcript.partial", "transcript.final"}:
+            continue
+        text = str(event.get("text", ""))
+        key = "partials" if kind == "transcript.partial" else "finals"
+        segments[str(segment_id)][key].append(text)
+
+    counts = {"plugin-origin": 0, "model-origin": 0, "speech-origin": 0, "unmapped": 0}
+    for shown, replay_final in duplicates:
+        runs = _repeated_windows(_normalise_for_duplicate(shown))
+        replay_final_key = _normalise_for_duplicate(replay_final)
+        matching_segments = [
+            segment
+            for segment in segments.values()
+            if any(
+                _normalise_for_duplicate(final) == replay_final_key
+                for final in segment["finals"]
+            )
+        ]
+        if not matching_segments:
+            counts["plugin-origin"] += 1
+            counts["unmapped"] += 1
+            continue
+
+        speech_origin = any(
+            _fuzzy_run_count(_normalise_for_duplicate(final), run) >= 2
+            for segment in matching_segments
+            for final in segment["finals"]
+            for run in runs
+        )
+        model_origin = any(
+            _fuzzy_run_count(_normalise_for_duplicate(partial), run) >= 2
+            for segment in matching_segments
+            for partial in segment["partials"]
+            for run in runs
+        )
+        if speech_origin:
+            counts["speech-origin"] += 1
+        elif model_origin:
+            counts["model-origin"] += 1
+        else:
+            counts["plugin-origin"] += 1
+    return counts
 
 
 def duplicate_segments_from_trace(rows: list[dict[str, Any]]) -> list[str]:
@@ -540,7 +639,9 @@ def hard_failures(analysis: dict[str, Any], replay: dict[str, Any]) -> list[str]
     return failures
 
 
-def soft_failures(analysis: dict[str, Any]) -> list[str]:
+def soft_failures(
+    analysis: dict[str, Any], replay: dict[str, Any] | None = None
+) -> list[str]:
     failures = []
     overall = analysis.get("overall", {})
     stable_p95 = (overall.get("stable_gap_ms") or {}).get("p95")
@@ -549,10 +650,27 @@ def soft_failures(analysis: dict[str, Any]) -> list[str]:
         failures.append(f"stable_gap_p95_ms={stable_p95:.1f} (limit 3000)")
     if final_p95 is not None and final_p95 > 1500:
         failures.append(f"final_latency_p95_ms={final_p95:.1f} (limit 1500)")
+    if replay is not None:
+        replay_sections = {item["name"]: item for item in replay.get("sections", [])}
+        scopes = [("overall", replay.get("overall", {}))]
+        scopes.extend(
+            (section["name"], replay_sections.get(section["name"], {}))
+            for section in analysis.get("sections", [])
+        )
+        for name, caption in scopes:
+            model_lines = caption.get("duplication_model_lines", 0)
+            speech_lines = caption.get("duplication_speech_lines", 0)
+            if model_lines:
+                failures.append(f"{name}: model_origin_duplication_lines={model_lines} (soft)")
+            if speech_lines:
+                failures.append(f"{name}: speech_origin_duplication_lines={speech_lines} (soft)")
     return failures
 
 
-def parse_replay_output(output: str) -> tuple[dict[str, Any], dict[int, dict[str, str]]]:
+def parse_replay_output(
+    output: str,
+    rows: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], dict[int, dict[str, str]]]:
     metrics: dict[str, Any] = {
         "mid_speech_fade_outs": 0,
         "row_limit_losses": 0,
@@ -561,6 +679,10 @@ def parse_replay_output(output: str) -> tuple[dict[str, Any], dict[int, dict[str
         "layout_moves": 0,
         "largest_burst": 0,
         "duplication_lines": 0,
+        "duplication_total_lines": 0,
+        "duplication_model_lines": 0,
+        "duplication_speech_lines": 0,
+        "duplication_unmapped_lines": 0,
     }
     closes: dict[int, dict[str, str]] = {}
     summary = re.search(
@@ -578,13 +700,19 @@ def parse_replay_output(output: str) -> tuple[dict[str, Any], dict[int, dict[str
                 "largest_burst": int(summary.group(5)),
             }
         )
-    rows = re.search(r"# rows:.*?layout moves=(\d+)", output)
-    if rows:
-        metrics["layout_moves"] = int(rows.group(1))
+    rows_summary = re.search(r"# rows:.*?layout moves=(\d+)", output)
+    if rows_summary:
+        metrics["layout_moves"] = int(rows_summary.group(1))
     duplication = re.search(r"# duplication:.*?=(\d+)", output)
-    if duplication:
-        metrics["duplication_lines"] = int(duplication.group(1))
+    reported_duplications = int(duplication.group(1)) if duplication else 0
+    duplicate_entries: list[tuple[str, str]] = []
     for line in output.splitlines():
+        if line.startswith("#   dup:"):
+            shown, separator, replay_final = line.removeprefix("#   dup:").strip().rpartition(
+                "  (final: "
+            )
+            if separator and replay_final.endswith(")"):
+                duplicate_entries.append((shown, replay_final[:-1]))
         match = re.search(
             r"CLOSE transcript\.final\s+seg\s+(\d+).*?: shown \[(.*)\] server \[.*\] -> now \[(.*)\]",
             line,
@@ -594,4 +722,18 @@ def parse_replay_output(output: str) -> tuple[dict[str, Any], dict[int, dict[str
                 "shown_before_close": match.group(2),
                 "screen_at_close": match.group(3),
             }
+    classifications = classify_duplication_lines(rows or [], duplicate_entries)
+    total = max(reported_duplications, len(duplicate_entries))
+    missing_entries = max(0, total - len(duplicate_entries))
+    metrics.update(
+        {
+            # Unparsed entries remain hard failures so missing replay details
+            # cannot make the acceptance threshold pass by accident.
+            "duplication_lines": classifications["plugin-origin"] + missing_entries,
+            "duplication_total_lines": total,
+            "duplication_model_lines": classifications["model-origin"],
+            "duplication_speech_lines": classifications["speech-origin"],
+            "duplication_unmapped_lines": classifications["unmapped"] + missing_entries,
+        }
+    )
     return metrics, closes

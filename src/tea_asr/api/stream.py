@@ -21,6 +21,7 @@ from tea_asr.diagnostics import TICK_S, AudioCapture, SessionDiagnostics, Warnin
 from tea_asr.errors import ApiError
 from tea_asr.logs import event as log_event
 from tea_asr.rate_limit import AuthRateLimiter
+from tea_asr.repetition import TrimmedRepetition, trim_repetitions
 from tea_asr.scheduler import StaleTaskDropped
 from tea_asr.segmenter import ContinuousSegmenter, SegmentClosed, SegmenterConfig, SpeechStarted
 from tea_asr.stable import StablePrefixTracker, StableUpdate
@@ -530,8 +531,15 @@ class StreamSession:
             finally:
                 self._pending.task_done()
 
-    def _apply_pua_filter(self, text: str, *, segment: Segment, kind: str) -> str:
-        """Filter PUA characters out of recognized text, per `filter_pua`.
+    def _apply_pua_filter(
+        self,
+        text: str,
+        *,
+        segment: Segment,
+        kind: str,
+        repetition_trims: list[TrimmedRepetition] | None = None,
+    ) -> str:
+        """Apply output filters without changing the preserved raw transcript.
 
         Never logs `text`/`raw_text` (docs/03 forbids transcript content in
         the log; `JsonFormatter` also strips those keys as a second layer).
@@ -539,9 +547,7 @@ class StreamSession:
         monitored without leaking what was said.
         """
 
-        if not self._config.filter_pua:
-            return text
-        filtered = filter_private_use_characters(text)
+        filtered = filter_private_use_characters(text) if self._config.filter_pua else text
         removed = len(text) - len(filtered)
         if removed:
             log_event(
@@ -552,6 +558,24 @@ class StreamSession:
                 segment_index=segment.index,
                 kind=kind,
                 removed_chars=removed,
+            )
+        filtered, trims = trim_repetitions(
+            filtered,
+            single_char_limit=self._config.repetition_single_char_limit,
+            multi_char_limit=self._config.repetition_multi_char_limit,
+        )
+        if repetition_trims is not None:
+            repetition_trims.extend(trims)
+        for trim in trims:
+            log_event(
+                logger,
+                "stream.repetition_trimmed",
+                session_id=self._state.session_id,
+                segment_id=segment.segment_id,
+                segment_index=segment.index,
+                kind=kind,
+                unit_length=trim.unit_length,
+                removed_chars=trim.removed_chars,
             )
         return filtered
 
@@ -598,7 +622,15 @@ class StreamSession:
             )
             return
         warnings = private_use_warnings(raw_text)
-        text = self._apply_pua_filter(raw_text, segment=segment, kind="final")
+        repetition_trims: list[TrimmedRepetition] = []
+        text = self._apply_pua_filter(
+            raw_text,
+            segment=segment,
+            kind="final",
+            repetition_trims=repetition_trims,
+        )
+        if repetition_trims:
+            warnings.append("repetition_trimmed")
         if not text:
             # The whole segment was PUA noise (see filter_private_use_characters):
             # sending an empty final would look like a real, silent recognition
