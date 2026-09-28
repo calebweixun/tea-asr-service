@@ -4,16 +4,17 @@
 
 - For all future development work and file modifications, delegate implementation to a subagent whenever subagent execution is available. The root agent is the high-level technical lead: it owns planning, task decomposition, coordination, review, integration, verification, and status reporting.
 - The root agent may perform read-only inspection and the necessary Git integration steps, including staging, committing, and pushing changes. Implementation changes should be made by the delegated subagent, unless a tool limitation makes that impossible and the user explicitly approves an exception.
-- Prefer delegating implementation to `gpt-5.6-luna` with `max` reasoning when that model/reasoning combination is available. Do not use the Terra model for this project.
+- Prefer delegating implementation to `gpt-6-luna` with `max` reasoning when that model/reasoning combination is available. Do not use the Terra model for this project.
 
-### 怎麼呼叫 gpt-5.6-luna
+### 怎麼呼叫 gpt-6-luna
 
-這台機器裝了 codex CLI（`~/.local/bin/codex`，已用 ChatGPT 登入，預設 `gpt-5.6-sol` / medium）。非互動派工：
+這台機器裝了 codex CLI（`~/.local/bin/codex`，已用 ChatGPT 登入，config 預設 `gpt-6-sol`）。非互動派工：
 
 ```bash
-codex exec -m gpt-5.6-luna -c model_reasoning_effort=max -s workspace-write "<派工內容>"
+codex exec -m gpt-6-luna -c model_reasoning_effort=max -s workspace-write "<派工內容>"
 ```
 
+- **需要 codex-cli ≥ 0.157**：0.146 對 ChatGPT 帳號會回「`gpt-6-*` model is not supported」，只剩 `gpt-5.6-luna` 可用。更新用 `codex update`。這台 Mac 的 `/usr/local/bin/sha256sum` 是 x86 程式、跑不起來，安裝器會卡在 checksum；更新時要在 PATH 前面放一個呼叫 `/usr/bin/shasum -a 256 "$@"` 的 `sha256sum` shim（不要關掉驗證）。
 - `-s read-only` 只讀不改，`-s workspace-write` 可改工作區檔案。不要用 `--dangerously-bypass-approvals-and-sandbox`。
 - 派工內容長的時候寫成檔案再 `- < file.md`，避免 shell 引號問題。
 - 跑很久，用背景執行並把輸出導到檔案。
@@ -35,7 +36,7 @@ agy --model gemini-3.8-flash-high --mode accept-edits -p="<派工內容>"
 ### 誰做什麼
 
 - **高階模型（主對話／orchestrator）負責規劃、派工、驗收、整合、回報，不下場實作。**
-- **實作交給 `gpt-5.6-luna`（codex，max reasoning）或 `gemini-3.8-flash`（agy）。**
+- **實作交給 `gpt-6-luna`（codex，max reasoning）或 `gemini-3.8-flash`（agy）。**
 - 選誰：需要推理的（診斷 bug、架構取捨、需求有歧義）給 luna max；模式已知的機械修改（改名、套用既有慣例、批次調整）給 gemini flash。
 - 驗收一律由派工方自己重跑 build／test／截圖確認，不直接採信實作方的回報。
 - **只有 root agent 可以派工。被派出來的 subagent 必須自己實作，不得再用 `codex exec`、`agy` 或任何 CLI 往下委派。** 巢狀派工會變成上游看不到、也控制不了的工作：2026-09-24 發生過一次，subagent 讀到上面「實作交給 luna」就自己派了 codex 任務，而 codex 額度早已用完，任務一啟動就失敗，subagent 卻一直等一個不存在的結果，worktree 什麼都沒改。派工單裡要明寫這一條。
@@ -51,7 +52,7 @@ agy --model gemini-3.8-flash-high --mode accept-edits -p="<派工內容>"
 git worktree add ../tea-asr-wt/<task> -b agent/<task>
 
 # 2. 派工，cwd 指向那個 worktree
-cd ../tea-asr-wt/<task> && codex exec -m gpt-5.6-luna -c model_reasoning_effort=max -s workspace-write - < task.md
+cd ../tea-asr-wt/<task> && codex exec -m gpt-6-luna -c model_reasoning_effort=max -s workspace-write - < task.md
 cd ../tea-asr-wt/<task> && agy --model gemini-3.8-flash-high --mode accept-edits -p="$(cat task.md)"
 
 # 3. 驗收：上游自己在該 worktree 重跑
@@ -78,7 +79,7 @@ Claude 自己的 subagent **不要**用 Agent 工具的 `isolation: "worktree"`�
 
 | Agent | 實測感受 | 適合 | 不適合 |
 |---|---|---|---|
-| `gpt-5.6-luna`（codex, max） | 診斷能力強，會自己讀第三方開源碼找證據、寫 spike 驗假設。誠實度高：查不到會明說「未證實」而不編造。但**容易越界**，會順手做沒要求的事 | 根因診斷、架構取捨、需求有歧義的實作 | 需要 GUI／螢幕／真實硬體的驗證 |
+| `gpt-6-luna`（codex, max） | 診斷能力強，會自己讀第三方開源碼找證據、寫 spike 驗假設。誠實度高：查不到會明說「未證實」而不編造。但**容易越界**，會順手做沒要求的事 | 根因診斷、架構取捨、需求有歧義的實作 | 需要 GUI／螢幕／真實硬體的驗證 |
 | `gemini-3.8-flash`（agy） | 樣本還少。headless 權限設定繁瑣（見下） | 模式已知的機械修改 | 需要長鏈推理的診斷 |
 
 ### 沙箱是最大的驗證盲區
