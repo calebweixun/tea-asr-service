@@ -41,7 +41,7 @@ def test_a_dead_worker_fails_the_segment_not_the_service(
         await asyncio.sleep(0.05)
         return code, worker.state
 
-    code, state = asyncio.run(scenario())
+    code, state = asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))
     assert code == "inference_failed"
     assert state == "ready", "the worker should have been brought back"
 
@@ -64,7 +64,7 @@ def test_restarts_are_capped_so_a_broken_model_does_not_thrash(
                 break
         return worker
 
-    worker = asyncio.run(scenario())
+    worker = asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))
     assert worker.state == "failed"
     assert worker.last_error is not None
     assert "giving up" in worker.last_error
@@ -89,4 +89,4 @@ def test_an_incompatible_checkpoint_is_not_retried(monkeypatch: pytest.MonkeyPat
         assert len(attempts) == 1, "a wrong checkpoint cannot be fixed by retrying"
         return worker
 
-    assert asyncio.run(scenario()).state == "failed"
+    assert asyncio.run(asyncio.wait_for(scenario(), timeout=4.5)).state == "failed"

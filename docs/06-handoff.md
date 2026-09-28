@@ -94,6 +94,8 @@ final 與 final-only 模式完全一致、混合負載下 23/23 HTTP 辨識成�
 未涵蓋：單一語者與單一機器、預覽降級路徑未在真實過載下觸發。
 **2026-09-27：** 預覽節奏改為 server 設定 `preview_min_audio_ms`／`preview_min_interval_ms`（預設 300／300，原固定 800／800）加負載保護 `preview_load_factor`（預設 2，間隔至少 2×上次解碼時間）；封口時排隊中的預覽直接從 scheduler 移除，不再排在 final 後面跑。`preview_policy` 回報實際值，wire 欄位不變。實測（[預覽節奏報告](benchmarks/preview-cadence-report.md)）stable 提交延遲中位數 0.87→0.10 秒、兩 session 合計 worker 忙碌 0.49、final 延遲不變；partial 改寫率 20–23%→26–27%。語料是拼接的朗讀句，自然快語速與真實 OBS 畫面未驗證。
 
+**已知限制（stable diverged）：** continuous 預覽快照涵蓋最新分析過的 VAD window，包含句尾 grace 期間的靜音；final 片段則依最後語音位置只保留 `tail_ms`。因此預覽確實可能看見比 final 範圍更多的音訊。這符合 partial 的暫定語意：長度隨即時快照前進，final 仍是唯一正式稿。當 length-proportional 假 worker 的預覽文字因此比 final 長，穩定前綴保留已提交內容並以 `diverged` 收尾是正確結果。`tests/unit/test_segmenter.py::test_live_preview_may_include_silence_trimmed_from_the_final_range` 確認此範圍差；`tests/unit/test_scheduler.py::test_next_worker_call_starts_after_finished_result_is_handled` 確認 PR #11 沒有把下一次 worker 呼叫移到前一結果處理之前。真實音訊上的這類差異尚未單獨量測。
+
 **完成條件：** 能呈現「先出字→後文修正→定稿」；partial不重複append、不改已final內容；重跑總RTF與品質、延遲符合07或有明確未達標報告；preview超載不阻塞收音與正式排程。測試同音詞、數字、否定詞、中英混用與cancel/final競態。
 
 **v0.1.1可發行條件：** P2a驗收通過才宣告partial_transcripts=true。未達標可交付研究與改善方案，但不能把需求標成完成或靜默移除。保留final-only模式；P4再驗證durable_revisable。
@@ -110,6 +112,7 @@ singleton 採 flock lock file ＋ port 檢查，第二份實例會被拒絕並�
 log 為 JSON lines 並輪替，明確過濾 token、PCM 與逐字稿。關閉時停止收件並最多 drain 30 秒。
 **2026-09-27：** `/v1/stream` 每條 session 寫診斷日誌（docs/04「W11」）：lifecycle 行、每 5 秒一行音訊／VAD heartbeat（收件數與間隔、RMS／峰值 dBFS、VAD 最大／平均機率、segmenter 狀態、預覽帳、worker 忙碌比例），以及斷流、太小聲、有聲音但 VAD 判定非語音、排隊過久四種 WARNING（每種每 30 秒最多一行）。只記字數不記文字，不額外呼叫模型；INFO 約 1 MB／小時／session。另有預設關閉的除錯錄音 `debug_capture_audio`（滾動 WAV、有上限），開啟時會落音訊，是 #7 的明確例外，只供使用者自己排查。已用真實模型在測試 port 驗證四種情況可區分；在使用者真實 OBS 串流上的效果未驗證。
 **2026-09-28：** 修正 worker IPC 失去同步：session 在預覽推論中途關閉（OBS 改設定後重連）時，被取消的預覽沒讀走自己的 response，之後每個請求都讀到上一個的 response，整個 process 永久回 `invalid_ipc`（實機 heartbeat `preview_failed=16 preview_published=0`）。現在一次寫入＋讀回不受 caller 取消影響（shield，鎖持有到讀完），scheduler 同步到真正結束才放行；另加防線：ID 不符或 frame 壞掉就記 `worker.ipc_desync`、重啟 worker、只讓當下請求失敗。翻譯 worker 同樣補上防線（它原本就有 shield）。已用真實模型在測試 port 以「中途硬斷 A、立刻開 B」重現舊版 bug 並驗證新版不再發生；在使用者真實 OBS 重連流程上未驗證。
+**2026-09-28 follow-up：** supervisor 將並行 `start()` 共用同一個內部啟動 task；`stop()` 只取消並等待 restart／內部啟動 task，並清理由 spawn 中途返回的子程序。被 stop supersede 的 `start()` caller 收到 `model_unavailable`，不會被取消；caller 自己被外部取消時仍收到 `CancelledError`，最後一位 caller 離開會取消並回收尚未完成的 spawn。這避免 wake、reload 與 restart 重複啟動或在 shutdown 留下 pipe transport。推論 timeout 立即 kill hung worker，正常 stop/unload 仍保留 graceful wait。單元測試驗證 lifecycle 與 timeout；真實模型 timeout／睡眠喚醒流程尚未實機驗證。
 睡眠偵測比較 wall clock 與 monotonic clock 的差距（Darwin 的 monotonic 在睡眠期間不前進），
 不必為此引進 pyobjc。喚醒後對進行中的 session 送 `timeline_gap` 並 close 1012——v0.1 沒有 resume，
 把缺口兩側的音訊接在同一個 sample clock 上是說謊；接著用一次真實推論探測 worker，

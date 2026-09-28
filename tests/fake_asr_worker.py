@@ -47,6 +47,9 @@ def main() -> int:
             header, pcm = read_request(stdin)
         except EOFError:
             return 0
+        if os.environ.get("FAKE_ASR_HANG") == "1":
+            while True:
+                time.sleep(1)
         if delay:
             time.sleep(delay)
         samples = len(pcm) // 2

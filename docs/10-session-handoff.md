@@ -19,7 +19,7 @@
 | 切段控制（server） | **2026-09-27 已實作**：continuous session 可用 `session.start.segmentation.end_silence_ms`（300–3000）調整 VAD 句尾靜音，給 OBS 字幕依真實停頓換行；`preview_policy.endpoint_silence_ms` 回報實際值，`capabilities.features.segmentation_control` 宣告範圍。只改句尾靜音，其他切段參數不變；只有 500／900 經過真實口語校準。OBS 外掛尚未接上。見 docs/04「切段控制」 |
 | 預覽節奏（server） | **2026-09-27**：預設 300 ms 新音訊／300 ms 間隔（原 800／800），加負載保護（間隔 ≥ 2×上次預覽解碼時間）；封口時排隊中的預覽直接丟棄。可在 config.toml 調整，client 不能要求。stable 提交延遲中位數 0.87→0.10 秒、final 不變；只用拼接朗讀句量過，真實 OBS 畫面未驗收。見 `docs/benchmarks/preview-cadence-report.md` |
 | 串流診斷日誌（server） | **2026-09-27**：每條 `/v1/stream` session 寫 lifecycle、每 5 秒 heartbeat（收件、dBFS、VAD 機率、segmenter 狀態、預覽帳）與四種限流 WARNING，用來判斷「沒字幕」是斷流、太小聲還是 VAD 判定非語音。選用除錯錄音 `TEA_ASR_DEBUG_CAPTURE_AUDIO=1`（預設關閉，會落音訊）。真實模型在測試 port 驗過四種情況可區分，使用者真實 OBS 串流未驗證。見 docs/04「W11」 |
-| Worker IPC 同步（server） | **2026-09-28**：修正 session 在預覽推論中途關閉後整個 worker 永久回 `invalid_ipc` 的 bug（被取消的 caller 留下未讀 response）。一次寫入＋讀回現在不受取消影響；ID 不符或 frame 壞掉時記 `worker.ipc_desync` 並重啟 worker。真實模型測試 port 驗過，使用者 OBS 重連流程未驗證 |
+| Worker IPC／lifecycle（server） | **2026-09-28**：一次寫入＋讀回不受 caller 取消影響；ID 不符或壞 frame 時記 `worker.ipc_desync` 並重啟。並行 `start()` 共用內部啟動 task；`stop()` 只取消並等待 pending restart／內部啟動，superseded caller 收到 `model_unavailable`，外部取消仍傳出 `CancelledError` 並回收最後一位 caller 的 spawn。推論 timeout 立即 kill hung worker，正常 unload 保持 graceful wait。單元測試覆蓋 spawn/stop、並行 start、外部取消與 hang timeout。真實模型 IPC 曾在測試 port 驗過；timeout、wake/reload lifecycle 與使用者 OBS 流程尚未實機驗證 |
 | 同步翻譯 | T3PO zh→en（opt-in，預設關閉），開啟時 ASR final 延遲 p95 約多 0.2–0.3 s。見 `docs/benchmarks/t3po-eval-report.md` |
 | P4 長檔案與保存 | 未開始，`/v1/jobs` 回 404 |
 

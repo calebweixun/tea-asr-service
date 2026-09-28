@@ -10,7 +10,6 @@ subprocess (`tests/fake_asr_worker.py`) over the real framed pipe.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from collections.abc import Iterator
 from pathlib import Path
@@ -71,16 +70,6 @@ async def until_ready(worker: WorkerSupervisor, generation: int) -> None:
 
 
 async def shutdown(worker: WorkerSupervisor) -> None:
-    """Let a pending restart finish first, so a failing test fails, not hangs.
-
-    Stopping while a restart is still spawning its process leaves asyncio's
-    pipe setup pending, and `asyncio.run` then waits on it forever.
-    """
-
-    recovering = worker._recovering
-    if recovering is not None and not recovering.done():
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(asyncio.shield(recovering), 10)
     await worker.stop()
 
 
@@ -110,7 +99,7 @@ def test_a_caller_cancelled_during_inference_does_not_desync_the_pipe(
         finally:
             await shutdown(worker)
 
-    texts, generation = asyncio.run(scenario())
+    texts, generation = asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))
     assert texts == ["samples=200", "samples=300"], "each request gets its own response"
     assert generation == 1, "a cancelled caller must not cost a worker restart"
 
@@ -135,7 +124,7 @@ def test_a_caller_cancelled_while_its_request_is_still_being_written(
         finally:
             await shutdown(worker)
 
-    unsent, text = asyncio.run(scenario())
+    unsent, text = asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))
     assert unsent > 0, "the test must cancel mid-write to mean anything"
     assert text == "samples=100"
 
@@ -161,7 +150,7 @@ def test_a_mismatched_response_restarts_the_worker_and_the_next_request_succeeds
         finally:
             await shutdown(worker)
 
-    code, texts, generation = asyncio.run(scenario())
+    code, texts, generation = asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))
     assert code == "invalid_ipc", "only the request that saw the mismatch fails"
     assert texts == ["samples=200", "samples=300"]
     assert generation == 2, "exactly one restart"
@@ -191,9 +180,46 @@ def test_the_timeout_still_restarts_a_worker_whose_caller_went_away(
         finally:
             await shutdown(worker)
 
-    replaced, generation = asyncio.run(scenario())
+    replaced, generation = asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))
     # Nothing but the 0.3 s task timeout can have replaced the process here.
     assert replaced and generation == 2
+
+
+def test_inference_timeout_kills_and_reaps_a_hung_worker_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FAKE_ASR_HANG", "1")
+
+    async def scenario() -> None:
+        worker = make(task_timeout_s=0.1)
+        await worker.start()
+        process = worker.process
+        assert process is not None
+        inference = asyncio.create_task(worker.transcribe(pcm(100)))
+        started = asyncio.get_running_loop().time()
+        error: WorkerError | None = None
+        try:
+            try:
+                await asyncio.wait_for(asyncio.shield(inference), 1)
+            except WorkerError as exc:
+                error = exc
+            except TimeoutError as exc:
+                raise AssertionError("hung worker was not reaped within one second") from exc
+            elapsed = asyncio.get_running_loop().time() - started
+
+            assert error is not None and error.code == "inference_timeout"
+            assert elapsed < 1, f"timeout cleanup took {elapsed:.3f}s"
+            assert process.returncode is not None, "the hung child must be reaped before return"
+            assert worker._recovering is not None, "timeout must schedule a restart"
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await asyncio.wait_for(process.wait(), 1)
+            if not inference.done():
+                await asyncio.wait_for(asyncio.gather(inference, return_exceptions=True), 1)
+            await asyncio.wait_for(worker.stop(), 2)
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))
 
 
 def test_stop_waits_for_the_exchange_on_the_pipe(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,6 +233,316 @@ def test_stop_waits_for_the_exchange_on_the_pipe(monkeypatch: pytest.MonkeyPatch
         await worker.stop()  # idle unload, after-wake probe, shutdown
         return (await running)["text"], worker.state
 
-    text, state = asyncio.run(scenario())
+    text, state = asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))
     assert text == "samples=100", "the request on the pipe finishes instead of being cut off"
     assert state == "unprepared"
+
+
+def test_stop_cancels_restart_while_subprocess_spawn_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        worker = make()
+        spawn_entered = asyncio.Event()
+        allow_spawn_return = asyncio.Event()
+        children: list[asyncio.subprocess.Process] = []
+        original_spawn = asyncio.create_subprocess_exec
+
+        async def delayed_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+            child = await original_spawn(*args, **kwargs)  # type: ignore[arg-type]
+            children.append(child)
+            spawn_entered.set()
+            await allow_spawn_return.wait()
+            return child
+
+        monkeypatch.setattr(supervisor_module.asyncio, "create_subprocess_exec", delayed_spawn)
+        worker._schedule_restart()
+        restart = worker._recovering
+        stop_task: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(spawn_entered.wait(), 2)
+            stop_task = asyncio.create_task(worker.stop())
+            await asyncio.sleep(0.02)
+            stop_waited_for_spawn = not stop_task.done()
+            allow_spawn_return.set()
+            await asyncio.wait_for(stop_task, 2)
+            assert restart is not None
+            await asyncio.wait_for(asyncio.gather(restart, return_exceptions=True), 2)
+
+            assert stop_waited_for_spawn, "stop must await and reap a start already spawning"
+            assert restart.cancelled(), "stop must cancel the restart loop"
+            assert worker.process is None
+            assert worker.state in {"unprepared", "failed"}
+            assert children and children[0].returncode is not None
+        finally:
+            allow_spawn_return.set()
+            if restart is not None and not restart.done():
+                restart.cancel()
+                await asyncio.wait_for(asyncio.gather(restart, return_exceptions=True), 2)
+            if stop_task is not None and not stop_task.done():
+                stop_task.cancel()
+                await asyncio.wait_for(asyncio.gather(stop_task, return_exceptions=True), 2)
+            for child in children:
+                if child.returncode is None:
+                    child.kill()
+                await asyncio.wait_for(child.wait(), 2)
+            await asyncio.wait_for(worker.stop(), 2)
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))
+
+
+def test_stop_supersedes_concurrent_start_while_subprocess_spawn_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        worker = make()
+        spawn_entered = asyncio.Event()
+        allow_spawn_return = asyncio.Event()
+        children: list[asyncio.subprocess.Process] = []
+        original_spawn = asyncio.create_subprocess_exec
+
+        async def delayed_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+            child = await original_spawn(*args, **kwargs)  # type: ignore[arg-type]
+            children.append(child)
+            spawn_entered.set()
+            await allow_spawn_return.wait()
+            return child
+
+        monkeypatch.setattr(supervisor_module.asyncio, "create_subprocess_exec", delayed_spawn)
+        starting = asyncio.create_task(worker.start())
+        stopping: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(spawn_entered.wait(), 2)
+            stopping = asyncio.create_task(worker.stop())
+            await asyncio.sleep(0.02)
+            stop_waited_for_spawn = not stopping.done()
+            allow_spawn_return.set()
+            await asyncio.wait_for(stopping, 2)
+            result = await asyncio.wait_for(
+                asyncio.gather(starting, return_exceptions=True), 2
+            )
+
+            assert stop_waited_for_spawn, "stop must await the concurrent start's spawn"
+            assert isinstance(result[0], WorkerError), "superseded start must return WorkerError"
+            assert result[0].code == "model_unavailable"
+            assert not starting.cancelled(), "stop must not cancel the start caller"
+            assert starting.cancelling() == 0
+            assert worker.process is None
+            assert worker.state in {"unprepared", "failed"}
+            assert children and children[0].returncode is not None
+        finally:
+            allow_spawn_return.set()
+            if not starting.done():
+                starting.cancel()
+                await asyncio.wait_for(asyncio.gather(starting, return_exceptions=True), 2)
+            if stopping is not None and not stopping.done():
+                stopping.cancel()
+                await asyncio.wait_for(asyncio.gather(stopping, return_exceptions=True), 2)
+            for child in children:
+                if child.returncode is None:
+                    child.kill()
+                await asyncio.wait_for(child.wait(), 2)
+            await asyncio.wait_for(worker.stop(), 2)
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))
+
+
+def test_external_cancellation_of_start_reaps_pending_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        worker = make()
+        spawn_entered = asyncio.Event()
+        allow_spawn_return = asyncio.Event()
+        children: list[asyncio.subprocess.Process] = []
+        original_spawn = asyncio.create_subprocess_exec
+
+        async def delayed_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+            child = await original_spawn(*args, **kwargs)  # type: ignore[arg-type]
+            children.append(child)
+            spawn_entered.set()
+            await allow_spawn_return.wait()
+            return child
+
+        monkeypatch.setattr(supervisor_module.asyncio, "create_subprocess_exec", delayed_spawn)
+        starting = asyncio.create_task(worker.start())
+        try:
+            await asyncio.wait_for(spawn_entered.wait(), 2)
+            starting.cancel()
+            allow_spawn_return.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(starting, 2)
+
+            assert starting.cancelled()
+            assert worker.process is None
+            assert children and children[0].returncode is not None
+        finally:
+            allow_spawn_return.set()
+            if not starting.done():
+                starting.cancel()
+                await asyncio.wait_for(asyncio.gather(starting, return_exceptions=True), 2)
+            for child in children:
+                if child.returncode is None:
+                    child.kill()
+                await asyncio.wait_for(child.wait(), 2)
+            await asyncio.wait_for(worker.stop(), 2)
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))
+
+
+def test_stop_does_not_interrupt_external_start_spawn_reaping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        worker = make()
+        spawn_entered = asyncio.Event()
+        allow_spawn_return = asyncio.Event()
+        children: list[asyncio.subprocess.Process] = []
+        original_spawn = asyncio.create_subprocess_exec
+
+        async def delayed_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+            child = await original_spawn(*args, **kwargs)  # type: ignore[arg-type]
+            children.append(child)
+            spawn_entered.set()
+            await allow_spawn_return.wait()
+            return child
+
+        monkeypatch.setattr(supervisor_module.asyncio, "create_subprocess_exec", delayed_spawn)
+        starting = asyncio.create_task(worker.start())
+        stopping: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(spawn_entered.wait(), 2)
+            internal = worker._starting_task
+            assert internal is not None
+            starting.cancel()
+            await asyncio.sleep(0)
+            assert internal.cancelling() == 1
+
+            stopping = asyncio.create_task(worker.stop())
+            await asyncio.sleep(0)
+            allow_spawn_return.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(starting, 2)
+            await asyncio.wait_for(stopping, 2)
+
+            assert worker.process is None
+            assert children and children[0].returncode is not None
+        finally:
+            allow_spawn_return.set()
+            if not starting.done():
+                starting.cancel()
+                await asyncio.wait_for(asyncio.gather(starting, return_exceptions=True), 2)
+            if stopping is not None and not stopping.done():
+                stopping.cancel()
+                await asyncio.wait_for(asyncio.gather(stopping, return_exceptions=True), 2)
+            for child in children:
+                if child.returncode is None:
+                    child.kill()
+                await asyncio.wait_for(child.wait(), 2)
+            await asyncio.wait_for(worker.stop(), 2)
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))
+
+
+def test_external_cancellation_while_stop_reaps_spawn_waits_for_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        worker = make()
+        spawn_entered = asyncio.Event()
+        allow_spawn_return = asyncio.Event()
+        children: list[asyncio.subprocess.Process] = []
+        original_spawn = asyncio.create_subprocess_exec
+
+        async def delayed_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+            child = await original_spawn(*args, **kwargs)  # type: ignore[arg-type]
+            children.append(child)
+            spawn_entered.set()
+            await allow_spawn_return.wait()
+            return child
+
+        monkeypatch.setattr(supervisor_module.asyncio, "create_subprocess_exec", delayed_spawn)
+        starting = asyncio.create_task(worker.start())
+        stopping: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(spawn_entered.wait(), 2)
+            internal = worker._starting_task
+            assert internal is not None
+            stopping = asyncio.create_task(worker.stop())
+            await asyncio.sleep(0)
+            assert internal.cancelling() == 1
+
+            starting.cancel()
+            await asyncio.sleep(0)
+            assert not starting.done(), "external cancellation must wait for stop's reap"
+            allow_spawn_return.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(starting, 2)
+            await asyncio.wait_for(stopping, 2)
+
+            assert worker.process is None
+            assert children and children[0].returncode is not None
+        finally:
+            allow_spawn_return.set()
+            if not starting.done():
+                starting.cancel()
+                await asyncio.wait_for(asyncio.gather(starting, return_exceptions=True), 2)
+            if stopping is not None and not stopping.done():
+                stopping.cancel()
+                await asyncio.wait_for(asyncio.gather(stopping, return_exceptions=True), 2)
+            for child in children:
+                if child.returncode is None:
+                    child.kill()
+                await asyncio.wait_for(child.wait(), 2)
+            await asyncio.wait_for(worker.stop(), 2)
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))
+
+
+def test_concurrent_start_calls_spawn_only_one_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        worker = make()
+        first_spawned = asyncio.Event()
+        second_spawned = asyncio.Event()
+        allow_spawn_return = asyncio.Event()
+        children: list[asyncio.subprocess.Process] = []
+        original_spawn = asyncio.create_subprocess_exec
+
+        async def delayed_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+            child = await original_spawn(*args, **kwargs)  # type: ignore[arg-type]
+            children.append(child)
+            (first_spawned if len(children) == 1 else second_spawned).set()
+            await allow_spawn_return.wait()
+            return child
+
+        monkeypatch.setattr(supervisor_module.asyncio, "create_subprocess_exec", delayed_spawn)
+        starts = [asyncio.create_task(worker.start())]
+        try:
+            await asyncio.wait_for(first_spawned.wait(), 2)
+            starts.append(asyncio.create_task(worker.start()))
+            try:
+                await asyncio.wait_for(second_spawned.wait(), 0.05)
+            except TimeoutError:
+                pass
+            spawned_before_release = len(children)
+            allow_spawn_return.set()
+            await asyncio.wait_for(asyncio.gather(*starts), 2)
+
+            assert spawned_before_release == 1, "a concurrent start must share the active spawn"
+            assert len(children) == 1
+            assert worker.generation == 1
+            assert worker.process is children[0]
+        finally:
+            allow_spawn_return.set()
+            if any(not task.done() for task in starts):
+                for task in starts:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.wait_for(asyncio.gather(*starts, return_exceptions=True), 2)
+            for child in children:
+                if child.returncode is None:
+                    child.kill()
+                await asyncio.wait_for(child.wait(), 2)
+            await asyncio.wait_for(worker.stop(), 2)
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))

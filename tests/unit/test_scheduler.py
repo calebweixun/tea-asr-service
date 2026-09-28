@@ -124,3 +124,52 @@ def test_a_cancelled_caller_keeps_the_worker_until_its_call_really_ends() -> Non
     assert started_while_busy == ["pp"], "the final must wait for the abandoned preview"
     assert still_waiting == 2
     assert after == 0
+
+
+def test_next_worker_call_starts_after_finished_result_is_handled() -> None:
+    """The done callback wakes a waiter, but does not run its worker inline."""
+
+    class OrderedWorker:
+        state = "ready"
+
+        def __init__(self) -> None:
+            self.events: list[str] = []
+            self.first_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+
+        async def transcribe(self, pcm: bytes, *, language: str = "Chinese") -> dict[str, str]:
+            name = pcm.decode()
+            self.events.append(f"start:{name}")
+            if name == "final":
+                self.first_started.set()
+                await self.release_first.wait()
+            self.events.append(f"finish:{name}")
+            return {"text": name}
+
+    async def scenario() -> list[str]:
+        worker = OrderedWorker()
+        scheduler = Scheduler(worker)
+
+        async def handle_final() -> None:
+            result, _ = await scheduler.transcribe(b"final", kind="realtime")
+            worker.events.append(f"handled:{result['text']}")
+
+        final = asyncio.create_task(handle_final())
+        try:
+            await asyncio.wait_for(worker.first_started.wait(), 1)
+            preview = asyncio.create_task(scheduler.transcribe(b"preview", kind="preview"))
+            await asyncio.wait_for(_settle(scheduler, 2), 1)
+            worker.release_first.set()
+            await asyncio.wait_for(asyncio.gather(final, preview), 1)
+            return worker.events
+        finally:
+            worker.release_first.set()
+
+    events = asyncio.run(scenario())
+    assert events == [
+        "start:final",
+        "finish:final",
+        "handled:final",
+        "start:preview",
+        "finish:preview",
+    ]
