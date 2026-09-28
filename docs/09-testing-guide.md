@@ -220,6 +220,31 @@ PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
 嘗試 bind `127.0.0.1:8422` 回 `Operation not permitted`，因此此 sandbox 無法驗證 live capture。真模型也
 沒有在此環境啟動；請在可 loopback bind 的終端機照上方命令執行，不要改用 8327。
 
+## 聆聽校稿與 CER 比較
+
+從 soak 音訊與 trace 建立本機校稿頁；沒有下載或連線需求：
+
+```bash
+PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  benchmarks/gold_kit.py build
+```
+
+用 Finder 開啟 `.soak/gold/<set>/index.html`，播放每段並直接修正草稿。頁面會在瀏覽器
+localStorage 自動保存；完成後按「下載答案 JSON」，把檔案放進 `.soak/gold/answers/`。
+每個答案保留 ASR 草稿、校正 reference、音樂干擾與聽不清楚標記。
+
+用校正答案比較 trace 或 `{ "item-id": "辨識文字" }` 格式的 JSON hypothesis：
+
+```bash
+PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  benchmarks/cer_eval.py .soak/gold/answers/speakers-answers.json \
+  .soak/traces/system-a.jsonl .soak/gold/answers/system-b.json
+```
+
+報告包含逐段、每個 set 與整體 CER、替換／刪除／插入數、音樂干擾分組，以及兩個以上
+system 的逐段 paired bootstrap 95% 差異區間。`聽不清楚` 預設排除；只有 venv 已裝
+OpenCC 時才附上簡體轉繁體版本。
+
 ## 七、會遇到的已知狀況
 
 - **辨識結果原本會夾帶看不見的私用區字元，現在預設過濾掉。** 根因是
