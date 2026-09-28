@@ -58,7 +58,7 @@ API 主程序不 import MLX／模型；worker 使用 spawn/subprocess 啟動，�
 
 response 為 4-byte 長度＋JSON，最多 1MiB，含 request ID、worker generation、status、text／error、inference_ms、token 使用量。stdout 專供協定，所有第三方 log／progress 導到 stderr；啟動有 ready 握手。讀寫必須 read-exactly，支援短讀與 timeout。主程序的 async pipe I/O 不阻塞 event loop。
 
-一般取消只丟棄結果，不假裝能中斷 Metal kernel；該 task 完成前 worker 仍忙。超過 task hard timeout 才 terminate，5 秒未退出再 kill，確認退出後才重啟，禁止新舊模型重疊。初始 hard timeout 30 秒／片段，P0 依性能調整；載入 timeout 獨立設為 120 秒。
+一般取消只丟棄結果，不假裝能中斷 Metal kernel；該 task 完成前 worker 仍忙。一次請求的「寫入＋讀回 response」是不可拆的單位：caller 被取消（例如 session 關閉時正在跑的預覽）只讓 caller 立即拿到取消，交換本身在獨立 task 裡跑完、讀掉自己的 response 才釋放 pipe，scheduler 也在它真的結束後才放下一個 task。response ID 不符或 frame 無法解析時視為 pipe 失去同步：記 WARNING `worker.ipc_desync`（兩個 ID）、kill 並重啟 worker，只讓當下那個請求失敗。超過 task hard timeout 才 terminate，5 秒未退出再 kill，確認退出後才重啟，禁止新舊模型重疊。初始 hard timeout 30 秒／片段，P0 依性能調整；載入 timeout 獨立設為 120 秒。
 
 重啟採1/2/4秒退避，60秒內最多3次；超過即failed並對等待工作發明確錯誤，直到使用者重啟服務。模型不相容／缺資產屬不可重試，不進重啟迴圈。
 

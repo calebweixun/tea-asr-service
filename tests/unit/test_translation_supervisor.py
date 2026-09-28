@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
@@ -155,3 +156,49 @@ def test_missing_disk_during_restart_stops_retrying(
     asyncio.run(scenario())
     assert translation.state == "failed"
     assert "外接 SSD" in (translation.last_error or "")
+
+
+def test_a_mismatched_response_restarts_the_worker_and_the_next_call_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same recovery as the ASR worker: a response for another request means
+    the pipe is out of step, and only a new process gets it back in step."""
+
+    monkeypatch.setenv("FAKE_T3PO_MISMATCH_ONCE", str(tmp_path / "mismatched"))
+    monkeypatch.setattr("tea_asr.translation.supervisor.RESTART_BACKOFF_S", (0.01, 0.01, 0.01))
+    translation = supervisor(model_dir(tmp_path))
+    seen: list[logging.LogRecord] = []
+
+    class Keep(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            seen.append(record)
+
+    handler = Keep(logging.DEBUG)
+    logging.getLogger("tea_asr.translation").addHandler(handler)
+
+    async def scenario() -> tuple[ApiError, dict, int]:
+        await translation.start()
+        await translation.start_session("zh2en", "native")
+        with pytest.raises(ApiError) as caught:
+            await translation.translate("你好", force=True)
+        for _ in range(200):
+            if translation.state == "ready" and translation.generation == 2:
+                break
+            await asyncio.sleep(0.02)
+        await translation.start_session("zh2en", "native")
+        result = await translation.translate("再見", force=True)
+        generation = translation.generation
+        await translation.close()
+        return caught.value, result, generation
+
+    try:
+        error, result, generation = asyncio.run(scenario())
+    finally:
+        logging.getLogger("tea_asr.translation").removeHandler(handler)
+    assert error.code == "translation_failed" and error.retryable is True
+    assert result["text"] == "EN(再見)"
+    assert generation == 2
+    desyncs = [record for record in seen if record.getMessage() == "translation.ipc_desync"]
+    assert len(desyncs) == 1 and desyncs[0].levelno == logging.WARNING
+    fields = desyncs[0].fields  # type: ignore[attr-defined]
+    assert fields["got_request_id"] == "not-" + fields["expected_request_id"]

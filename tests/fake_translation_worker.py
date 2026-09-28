@@ -3,7 +3,9 @@
 Speaks the same framed-JSON IPC so `TranslationSupervisor` can be tested for
 start-up, timeouts, crashes and restarts. Behaviour is chosen with
 `FAKE_T3PO`: `ok` (default), `hang` (never answers translate), `crash` (exits
-on the first translate), `refuse` (reports a load failure).
+on the first translate), `refuse` (reports a load failure). With
+`FAKE_T3PO_MISMATCH_ONCE=<path>` the first process (the one that creates
+`<path>`) answers its first translate with a wrong `request_id`.
 """
 
 from __future__ import annotations
@@ -27,6 +29,10 @@ def main() -> int:
     if mode == "refuse":
         _write({"status": "error", "code": "translation_unavailable", "message": "記憶體超過上限"})
         return 1
+    marker = os.environ.get("FAKE_T3PO_MISMATCH_ONCE")
+    mismatch = bool(marker) and not os.path.exists(marker)
+    if mismatch:
+        open(marker, "w").close()
     _write({"status": "ready", "load_ms": 1, "active_memory_bytes": 0})
     stdin = sys.stdin.buffer
     while True:
@@ -41,10 +47,14 @@ def main() -> int:
             time.sleep(60)
         if mode == "crash":
             return 3
+        request_id = request["request_id"]
+        if mismatch:
+            mismatch = False
+            request_id = "not-" + request_id
         _write(
             {
                 "status": "ok",
-                "request_id": request["request_id"],
+                "request_id": request_id,
                 "action": "TRANS",
                 "source": request["text"],
                 "text": f"EN({request['text']})",

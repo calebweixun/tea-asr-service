@@ -109,6 +109,7 @@ singleton 採 flock lock file ＋ port 檢查，第二份實例會被拒絕並�
 並回 503 `model_loading`（已實測，重新載入 1.7 秒、worker generation 遞增）。設定走 TOML，未知欄位直接報錯。
 log 為 JSON lines 並輪替，明確過濾 token、PCM 與逐字稿。關閉時停止收件並最多 drain 30 秒。
 **2026-09-27：** `/v1/stream` 每條 session 寫診斷日誌（docs/04「W11」）：lifecycle 行、每 5 秒一行音訊／VAD heartbeat（收件數與間隔、RMS／峰值 dBFS、VAD 最大／平均機率、segmenter 狀態、預覽帳、worker 忙碌比例），以及斷流、太小聲、有聲音但 VAD 判定非語音、排隊過久四種 WARNING（每種每 30 秒最多一行）。只記字數不記文字，不額外呼叫模型；INFO 約 1 MB／小時／session。另有預設關閉的除錯錄音 `debug_capture_audio`（滾動 WAV、有上限），開啟時會落音訊，是 #7 的明確例外，只供使用者自己排查。已用真實模型在測試 port 驗證四種情況可區分；在使用者真實 OBS 串流上的效果未驗證。
+**2026-09-28：** 修正 worker IPC 失去同步：session 在預覽推論中途關閉（OBS 改設定後重連）時，被取消的預覽沒讀走自己的 response，之後每個請求都讀到上一個的 response，整個 process 永久回 `invalid_ipc`（實機 heartbeat `preview_failed=16 preview_published=0`）。現在一次寫入＋讀回不受 caller 取消影響（shield，鎖持有到讀完），scheduler 同步到真正結束才放行；另加防線：ID 不符或 frame 壞掉就記 `worker.ipc_desync`、重啟 worker、只讓當下請求失敗。翻譯 worker 同樣補上防線（它原本就有 shield）。已用真實模型在測試 port 以「中途硬斷 A、立刻開 B」重現舊版 bug 並驗證新版不再發生；在使用者真實 OBS 重連流程上未驗證。
 睡眠偵測比較 wall clock 與 monotonic clock 的差距（Darwin 的 monotonic 在睡眠期間不前進），
 不必為此引進 pyobjc。喚醒後對進行中的 session 送 `timeline_gap` 並 close 1012——v0.1 沒有 resume，
 把缺口兩側的音訊接在同一個 sample clock 上是說謊；接著用一次真實推論探測 worker，

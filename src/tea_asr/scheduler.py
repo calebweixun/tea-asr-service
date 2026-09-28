@@ -160,10 +160,20 @@ class Scheduler:
                 self._release()
             raise
         queue_ms = round((time.perf_counter() - queued_at) * 1000)
-        try:
-            return await self._worker.transcribe(pcm, language=language), queue_ms
-        finally:
-            self._release()
+        # Once handed the worker, the call runs to the end even if its caller
+        # is cancelled (a session closing mid-preview): the worker cannot drop
+        # a request halfway, so the slot is freed only when it really is free.
+        # Freeing it at the cancel would start the next task behind a worker
+        # that is still busy, with its queue_ms and staleness checked too early.
+        work = asyncio.ensure_future(self._worker.transcribe(pcm, language=language))
+        work.add_done_callback(self._work_done)
+        return await asyncio.shield(work), queue_ms
+
+    def _work_done(self, work: asyncio.Future[dict[str, Any]]) -> None:
+        if not work.cancelled():
+            # Retrieved here too: a caller that went away never reads it.
+            work.exception()
+        self._release()
 
     def _release(self) -> None:
         if self._running_since is not None:
