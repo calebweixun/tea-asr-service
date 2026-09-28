@@ -92,7 +92,13 @@ class WorkerSupervisor:
         self.generation += 1
         self.state = "ready"
 
-    async def transcribe(self, pcm: bytes, *, language: str = "Chinese") -> dict[str, Any]:
+    async def transcribe(
+        self,
+        pcm: bytes,
+        *,
+        language: str = "Chinese",
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
         if len(pcm) > MAX_PCM_BYTES or len(pcm) % 2:
             raise ValueError("PCM must be even-length and no longer than 30 seconds")
         # Waiting for the pipe is the only part a caller may abandon: nothing
@@ -105,7 +111,9 @@ class WorkerSupervisor:
         # every segment after an OBS reconnect).
         await self._lock.acquire()
         try:
-            exchange = asyncio.get_running_loop().create_task(self._exchange(pcm, language))
+            exchange = asyncio.get_running_loop().create_task(
+                self._exchange(pcm, language, system_prompt)
+            )
         except BaseException:
             self._lock.release()
             raise
@@ -118,7 +126,9 @@ class WorkerSupervisor:
             # Retrieved here too: a caller that went away never reads it.
             exchange.exception()
 
-    async def _exchange(self, pcm: bytes, language: str) -> dict[str, Any]:
+    async def _exchange(
+        self, pcm: bytes, language: str, system_prompt: str | None = None
+    ) -> dict[str, Any]:
         """Write one request and read its response; the caller holds the lock."""
 
         process = self.process
@@ -132,17 +142,17 @@ class WorkerSupervisor:
         if not process or self.state != "ready":
             raise WorkerError("model_unavailable", f"ASR worker is {self.state}")
         request_id = str(uuid.uuid4())
-        header = json.dumps(
-            {
-                "ipc_version": 1,
-                "request_id": request_id,
-                "pcm_bytes": len(pcm),
-                "sample_rate": 16_000,
-                "language": language,
-                "max_tokens": 512,
-            },
-            separators=(",", ":"),
-        ).encode()
+        request = {
+            "ipc_version": 1,
+            "request_id": request_id,
+            "pcm_bytes": len(pcm),
+            "sample_rate": 16_000,
+            "language": language,
+            "max_tokens": 512,
+        }
+        if system_prompt is not None:
+            request["system_prompt"] = system_prompt
+        header = json.dumps(request, separators=(",", ":")).encode()
         if len(header) > MAX_HEADER_BYTES:
             raise ValueError("IPC header is too large")
         assert process.stdin is not None and process.stdout is not None

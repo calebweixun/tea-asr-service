@@ -32,6 +32,7 @@ from tea_asr.config import (
     validate_preview_cadence_or_raise,
     validate_translation_or_raise,
 )
+from tea_asr.context import ContextDictionaryStore, InvalidDictionary
 from tea_asr.errors import ApiError
 from tea_asr.logs import MAX_LOG_EVENTS, event, read_recent_events, split_log_payload
 from tea_asr.model_spec import TEA_ASR_1_1_MLX_4BIT
@@ -47,6 +48,8 @@ from tea_asr.wire import (
     Capabilities,
     CapabilityFeatures,
     CapabilityLimits,
+    ContextLimits,
+    DictionarySummary,
     EndSilenceRange,
     ErrorEnvelope,
     LogEntry,
@@ -256,6 +259,7 @@ def create_app(
     limiter = rate_limiter or AuthRateLimiter()
     settings = config or ServiceConfig.from_env()
     log_paths = paths or AppPaths.macos_default()
+    dictionaries = ContextDictionaryStore(log_paths.dictionaries_dir)
     host_allowed = make_host_allowlist(
         allow_lan=settings.allow_lan, extra_hosts=frozenset(settings.extra_allowed_hosts)
     )
@@ -476,6 +480,8 @@ def create_app(
                     else None
                 ),
                 translation=translation is not None and translation.state == "ready",
+                context_biasing=settings.context_hints_enabled,
+                context_limits=ContextLimits() if settings.context_hints_enabled else None,
             ),
             limits=CapabilityLimits(
                 max_continuous_sessions=settings.max_continuous_sessions if vad is not None else 0,
@@ -497,6 +503,18 @@ def create_app(
                 else None
             ),
         )
+
+    @app.get(
+        "/v1/dictionaries",
+        dependencies=[Depends(authorize)],
+        response_model=list[DictionarySummary],
+        response_model_exclude_none=True,
+    )
+    async def dictionaries_list() -> list[DictionarySummary]:
+        try:
+            return [DictionarySummary(**item) for item in dictionaries.summaries()]
+        except InvalidDictionary as exc:
+            raise ApiError("internal_error", "A server dictionary is invalid.") from exc
 
     @app.get("/v1/status", dependencies=[Depends(authorize)])
     async def service_status() -> StatusResponse:
@@ -590,6 +608,7 @@ def create_app(
                 connection_admission=connection_admission,
                 translation=translation,
                 capture_root=capture_root,
+                dictionaries=dictionaries,
             )
         finally:
             activity.sessions -= 1

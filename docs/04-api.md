@@ -368,7 +368,7 @@ session.start增加可選 `transcript_mode="final_only"|"revisable"`，省略等
 
 session.started增加transcript_mode與 `preview_policy`。**校準後的實際值**：`min_audio_ms=300`、`min_interval_ms=300`（2026-09-27 起，原為800／800，依據見 [預覽節奏報告](benchmarks/preview-cadence-report.md)）、`max_preview_audio_ms=15000`；continuous另有 `endpoint_silence_ms=900`、`max_segment_ms=14000`（12秒上限＋2秒grace）；utterance `max_segment_ms=30000`、`endpoint_silence_ms=null`。這些欄位由server的實際設定產生，client應照收到的值走，不要寫死文件裡的數字。`min_audio_ms`／`min_interval_ms` 是server設定（config.toml 的 `preview_min_audio_ms`／`preview_min_interval_ms`，或 `TEA_ASR_PREVIEW_MIN_AUDIO_MS`／`TEA_ASR_PREVIEW_MIN_INTERVAL_MS`），不能由session要求。`min_interval_ms` 是**下限**：server另有負載保護，實際間隔是 `max(min_interval_ms, preview_load_factor × 上次預覽解碼時間)`（預設factor=2，單一session的預覽最多占worker一半），所以預覽較慢時間隔會自動拉長；client不應把partial的到達間隔當成固定週期。continuous 的 `endpoint_silence_ms` 是**實際生效**的句尾靜音：client 以 `segmentation.end_silence_ms` 指定時回報該值，省略時回報 server 預設（見「切段控制」）。
 
-preview_policy還含 `context_biasing=false`。若啟用獨立實驗，session.start允許 `context={"use_previous_finals":true,"hotwords":["TEA-ASR"]}`，兩欄必填、無其他欄位；僅在context_biasing=true時接受。省略context表示完全不使用文字提示。hotwords上限32詞、每詞32 code points；超限422等價error，內部prompt總token上限與凍結規則依07。`hotwords` feature只有真正驗證後才能true；context中帶非空hotwords而其feature=false時拒絕。
+`preview_policy.context_biasing` 表示本session是否有送 recognition context。能力宣告、限制、字典與合併規則見下方「Recognition hints 與 server dictionaries」。
 
 新增事件：
 
@@ -392,6 +392,51 @@ outgoing queue可把同segment尚未送出的partial合併成最新值；final�
 P2a先驗收ephemeral；同時要求durable=true且尚未完成P4整合時回unsupported_option。P4完成後在capabilities另外宣告 `durable_revisable=true`；resume時client清除未final預覽，server不重播舊partial，依07保存revision high-water mark並從音訊重建。final保留原本的持久化、順序與去重保證。
 
 HTTP一次性transcription不提供partial；既有client不選revisable，端點與效能行為保持基線。
+
+## Recognition hints 與 server dictionaries（deterministic replacements；model prompt experimental）
+
+目前實作 domain、hotwords、server dictionaries 與 deterministic replacement。`TEA_ASR_CONTEXT_HINTS=1`（或 `[service] context_hints_enabled = true`）預設關閉；啟用後 `capabilities.features.context_biasing` 才為 true，並附上實際輸入上限。它會啟用字典、profile 與 replacement。Replacement 是審閱後按精確字串套用的 deterministic 後處理，建議優先使用。model prompt 另由 `TEA_ASR_CONTEXT_PROMPT=1` opt-in，只有 context hints 已啟用時才生效；prompt 預設關閉且仍屬 experimental：domain 和 hotwords 一樣驗證並回報，但預設不送給模型。
+
+```json
+"features": {
+  "context_biasing": true,
+  "context_limits": {
+    "max_domain_chars": 300,
+    "max_hotwords": 200,
+    "max_hotword_chars": 32,
+    "max_replacements": 500,
+    "max_replacement_chars": 32
+  }
+}
+```
+
+`session.start.context` 可省略；只接受以下欄位，不接受其他 key：
+
+下面的 replacement 都是待審閱範例，請依自己的錄音確認後再使用。
+
+```json
+{
+  "profile": "church.example",
+  "domain": "基督教會主日講道與禱告，繁體中文。",
+  "hotwords": ["聖經", "禱告", "住棚節", "神的話語"],
+  "replacements": [
+    {"from": "祝棚節", "to": "住棚節"},
+    {"from": "祝鵬節", "to": "住棚節"},
+    {"from": "祝鵬傑", "to": "住棚節"},
+    {"from": "聖家", "to": "聖經"}
+  ]
+}
+```
+
+- `profile` 是 server 字典名稱，不含 `.toml`。未知或格式無效的字典在 `session.start` 回 `unsupported_option`；context 功能關閉時任何 `context`（包含空物件）也回 `unsupported_option`。錯誤依既有慣例以 close 1008 結束；context 內未知 key 回 `protocol_error`。
+- `domain` 最多300 code points；`hotwords` 最多200項，每項1–32 code points；`replacements` 最多500項，`from` 為1–32、`to` 為0–32 code points。空 `to` 可刪除完整命中詞。
+- `GET /v1/dictionaries` 使用與其他 HTTP routes 相同的 bearer auth，valid file 回 `[{"name":"church.example","domain":"...","hotwords_count":34,"replacements_count":4}]`。格式錯誤、無法讀取、超過 1 MiB，或為 symlink 的檔案仍各自列出為 `{"name":"<name>","error":"<short reason>"}`，不帶 domain/counts，不會讓其他字典消失；每個錯誤檔案會寫一筆 `context.dictionary_invalid` WARNING，只含 name 與簡短 reason，不記檔案內容。字典放在 `<support>/dictionaries/<name>.toml`，格式為 `domain = "..."`、`hotwords = [...]` 和可選 `[[replacements]]` 表。每次 session 開始依 mtime 檢查並重新讀取已變動的檔案；更改會套用到下一個 session。範例在 [docs/examples/dictionaries/church.example.toml](examples/dictionaries/church.example.toml)，不會自動安裝。
+- 合併順序是 profile 再 inline：inline `domain` 覆蓋 profile；hotwords 依序 union、去重，合計超過200時截到200並寫 `context.hotwords_truncated` WARNING；inline replacements 依 `from` 覆蓋 profile 規則。
+- model prompt 只使用 domain 與 hotwords；replacement 不進 prompt。每個 segment 開啟時凍結 replacement，且只有 `TEA_ASR_CONTEXT_PROMPT=1` 時才凍結並傳送 prompt。prompt 關閉時，domain/hotwords 仍驗證、仍回報，但不進 model request；request 與無 context 的 request byte-identical。`session.started.context` 回 `prompt_applied`，永遠不含 `prompt_tokens`，因為 prompt 是逐 inference request 組裝；backend 回報的 token 數寫在 `stream.context_prompt_tokens` INFO log。不回傳提示全文。Prompt 合併文字以模型 tokenizer 限在384 tokens。mlx-audio 0.4.5 的 Qwen3-ASR `generate(system_prompt=...)` 會把純文字放進 system turn。
+- 輸出先走 PUA filter 和 repetition trim，再做 replacement，接著進 stable tracker。匹配在原始文字上由左至右、每個位置先選最長且不重疊的 exact substring；不對 replacement 輸出再次掃描。`text` 可改，`raw_text` 保持模型原稿。partial/final 有任何命中時加 `replacements_applied`；`stream.replacements_applied` INFO 只記命中數。
+- Replacement 若和 `transcript.stable` 已提交邊界衝突，stable 不會回刪已送出的字；final stable 保留既有前綴，再依原 tracker 的對齊結果追加尾段。此時 stable 可能短暫呈現舊前綴加修正後文字；`transcript.final` 仍是替換後的完整結果。
+- prompt 明確要求模型只轉錄目前音訊。若 final `raw_text` 含 domain 中至少12個連續原字，final 加 `context_echo`，不會暗中刪除該字串。這是警示 heuristic，可能誤報剛好真的說到該文字，也無法證明音訊沒有說到；評估時要人工檢查。
+- Replacement 和 domain prompt 不特別保護數字或否定詞。四段真實講道音訊的 smoke comparison 中，prompt 約多用150個 prompt tokens，未見改善；一段把正確的「聖經」變成「聖家」，一段失去標點，且「住棚節」的三種常見誤聽未被修正。因此 prompt 維持 experimental 並預設關閉；對已審閱的固定誤聽，建議用 deterministic replacement。CER 評估仍需確認數字、否定詞與錯誤替換風險。
 
 ## 只增不改的穩定字幕流（opt-in，2026-09-24）
 

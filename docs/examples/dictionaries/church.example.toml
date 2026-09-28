@@ -1,0 +1,59 @@
+# Example only. Copy into the service support directory's dictionaries folder
+# after reviewing each term and replacement for your own recordings.
+domain = "基督教會主日講道與禱告，繁體中文。"
+hotwords = [
+  "天父",
+  "耶穌",
+  "基督",
+  "聖靈",
+  "聖經",
+  "禱告",
+  "阿們",
+  "哈利路亞",
+  "以馬內利",
+  "恩典",
+  "福音",
+  "十字架",
+  "弟兄姊妹",
+  "敬拜",
+  "讚美",
+  "牧師",
+  "傳道",
+  "查經",
+  "主日",
+  "奉獻",
+  "救恩",
+  "復活",
+  "聖餐",
+  "詩篇",
+  "箴言",
+  "使徒",
+  "門徒",
+  "天國",
+  "平安",
+  "祝福",
+  "約翰福音",
+  "三位一體",
+  "住棚節",
+  "神的話語",
+]
+
+# Example only: review this replacement against your congregation and recordings.
+[[replacements]]
+from = "祝棚節"
+to = "住棚節"
+
+# Example only: review this replacement against your congregation and recordings.
+[[replacements]]
+from = "祝鵬節"
+to = "住棚節"
+
+# Example only: review this replacement against your congregation and recordings.
+[[replacements]]
+from = "祝鵬傑"
+to = "住棚節"
+
+# Example only: review this replacement against your congregation and recordings.
+[[replacements]]
+from = "聖家"
+to = "聖經"
