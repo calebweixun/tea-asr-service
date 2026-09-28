@@ -29,6 +29,10 @@ class AppPaths:
         return self.support / "config.toml"
 
     @property
+    def dictionaries_dir(self) -> Path:
+        return self.support / "dictionaries"
+
+    @property
     def lock_file(self) -> Path:
         return self.support / "service.lock"
 
@@ -262,6 +266,13 @@ class ServiceConfig:
     #: Refuse to keep the translation worker if the loaded model occupies more
     #: than this much Metal memory. Measured peak is ~8.5 GiB.
     translation_max_memory_gib: float = 12.0
+    #: Enables validated context, server dictionaries, and deterministic
+    #: replacements. Off by default; reviewed exact replacements are safe to
+    #: enable independently of the experimental model prompt below.
+    context_hints_enabled: bool = False
+    #: Experimental prompt to the ASR model. Separate from deterministic
+    #: replacements because the real-sermon smoke run did not show a benefit.
+    context_prompt_enabled: bool = False
     #: Revisable-preview cadence (docs/07「輕量化與排程」). A preview may start
     #: once `preview_min_audio_ms` of new audio has arrived since the last
     #: published one, and no sooner than
@@ -375,6 +386,12 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
     translation = get("TEA_ASR_TRANSLATION")
     if translation is not None:
         config = replace(config, translation_enabled=translation not in {"0", "false", "no", ""})
+    context_hints = get("TEA_ASR_CONTEXT_HINTS")
+    if context_hints is not None:
+        config = replace(config, context_hints_enabled=context_hints == "1")
+    context_prompt = get("TEA_ASR_CONTEXT_PROMPT")
+    if context_prompt is not None:
+        config = replace(config, context_prompt_enabled=context_prompt == "1")
     translation_path = get("TEA_ASR_TRANSLATION_MODEL_PATH")
     if translation_path is not None:
         config = replace(config, translation_model_path=translation_path.strip())

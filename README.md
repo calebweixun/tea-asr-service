@@ -119,6 +119,7 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 | P2 即時音訊 | 已實作、已校準、已長跑 | WS utterance與continuous皆可用：Silero VAD自動斷句、有序片段管線、推論不阻塞收音。真人口語MER 3.97%（[切段報告](docs/benchmarks/p2-segmentation-report.md)）；連續一小時386段0錯誤、延遲p95 0.57秒、記憶體平穩（[長跑報告](docs/benchmarks/p2-soak-report.md)）。多路併發已實測，N=1..4零錯誤，預設上限2（[併發報告](docs/benchmarks/concurrency-report.md)）|
 | P2a 串流修訂 | 已驗收，預設開啟 | 首次可見延遲 p95 0.91 秒、final 與 final-only 完全一致、混合負載不互相阻塞，見 [P2a 報告](docs/benchmarks/p2a-preview-report.md)。`TEA_ASR_REVISABLE_PREVIEW=0` 可關閉 |
 | P3 服務管理 | 完成 | LaunchAgent install/uninstall/status、singleton lock、port 檢查、idle unload 與重新載入、TOML 設定、JSON log 輪替、關閉時 drain、睡眠喚醒偵測與 worker 健康探測 |
+| Recognition hints | 已實作，預設關閉 | `TEA_ASR_CONTEXT_HINTS=1` 開啟 dictionaries、profiles 與 deterministic replacements；`GET /v1/dictionaries` 逐檔回報無效字典而保留有效項目，session start 仍拒絕無效 profile。Model prompt 需另外開啟 `TEA_ASR_CONTEXT_PROMPT=1`，且只有 hints 已開時生效；prompt 預設關閉、仍屬 experimental，prompt token 數只記 server log。4段真實講道音訊 smoke 未見改善。見 [04 API 契約](docs/04-api.md) |
 | P4 長檔案與保存 | 未開始 | `/v1/jobs` 不存在，回404 |
 | P5a Mac client | 可用，未完整驗收 | 選單列 app：聽寫（定稿後貼進前景 app）與會議記錄（即時視窗＋Markdown 匯出），見 [clients/macos](clients/macos/)。P5b 輸入法組字區整合未做 |
 
@@ -134,8 +135,9 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
   機器睡眠醒來後服務會主動送 `timeline_gap` 並關閉連線，而不是把缺口兩側接起來假裝連續。
 - **沒有精準時間戳**：`timestamp_quality` 永遠是 `segment`，只有片段的起迄範圍，
   沒有逐字對齊。字幕可用，但不要拿它做逐字高亮。
-- **沒有翻譯、沒有語者分離、沒有熱詞**：`capabilities` 裡這些 feature 都是 false，
+- **沒有翻譯、沒有語者分離**：`capabilities` 裡這些 feature 都是 false，
   請求相關選項會被拒絕而不是被忽略。
+- **Recognition hints 預設不可用**：需 server 明確設定 `TEA_ASR_CONTEXT_HINTS=1`。Model prompt 還需 `TEA_ASR_CONTEXT_PROMPT=1`；它維持 experimental 並預設關閉，因為4段真實講道音訊 smoke 未見改善。審閱過的 deterministic replacements 是建議工具。
 - **單機單模型**：一台機器一份服務、一個 worker、一份模型。第二個實例會被拒絕。
 
 ## 安裝

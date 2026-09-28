@@ -28,6 +28,7 @@ class FakeSupervisor:
         self.generation = 1
         self.text = text
         self.calls = 0
+        self.system_prompts: list[str] = []
         self.failure: Exception | None = None
         self.delay_s = 0.0
 
@@ -37,8 +38,16 @@ class FakeSupervisor:
     async def stop(self) -> None:
         return None
 
-    async def transcribe(self, pcm: bytes, *, language: str = "Chinese") -> dict[str, Any]:
+    async def transcribe(
+        self,
+        pcm: bytes,
+        *,
+        language: str = "Chinese",
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
         self.calls += 1
+        if system_prompt is not None:
+            self.system_prompts.append(system_prompt)
         if self.delay_s:
             import asyncio
 
@@ -84,6 +93,8 @@ def build_client(
     preview_min_audio_ms: int = _DEFAULTS.preview_min_audio_ms,
     preview_load_factor: float = _DEFAULTS.preview_load_factor,
     debug_capture_audio: bool = False,
+    context_hints_enabled: bool = False,
+    context_prompt_enabled: bool = False,
 ) -> TestClient:
     app = create_app(
         Path("unused"),
@@ -101,6 +112,8 @@ def build_client(
             preview_min_audio_ms=preview_min_audio_ms,
             preview_load_factor=preview_load_factor,
             debug_capture_audio=debug_capture_audio,
+            context_hints_enabled=context_hints_enabled,
+            context_prompt_enabled=context_prompt_enabled,
         ),
         vad_model=vad,
         rate_limiter=rate_limiter,

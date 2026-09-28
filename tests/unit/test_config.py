@@ -34,6 +34,26 @@ def test_defaults_match_what_has_been_accepted() -> None:
     # continuous sessions; ships at 2 for latency-budget reasons on a
     # single-user desktop service, not because more was found unsafe.
     assert config.max_continuous_sessions == 2
+    assert config.context_hints_enabled is False
+
+
+@pytest.mark.parametrize(("value", "enabled"), [("1", True), ("0", False), ("true", False)])
+def test_context_hints_environment_requires_exact_one(value: str, enabled: bool) -> None:
+    config = ServiceConfig.load(env={"TEA_ASR_CONTEXT_HINTS": value})
+    assert config.context_hints_enabled is enabled
+
+
+def test_context_hints_can_be_set_in_config_file(tmp_path: Path) -> None:
+    paths = app_paths(tmp_path)
+    paths.support.mkdir(parents=True)
+    paths.config_file.write_text("[service]\ncontext_hints_enabled = true\n")
+    assert ServiceConfig.load(paths, env={}).context_hints_enabled is True
+
+
+def test_context_prompt_is_off_by_default_and_requires_exact_one() -> None:
+    assert ServiceConfig.load(env={}).context_prompt_enabled is False
+    assert ServiceConfig.load(env={"TEA_ASR_CONTEXT_PROMPT": "1"}).context_prompt_enabled is True
+    assert ServiceConfig.load(env={"TEA_ASR_CONTEXT_PROMPT": "true"}).context_prompt_enabled is False
 
 
 def test_max_continuous_sessions_is_configurable(tmp_path: Path) -> None:

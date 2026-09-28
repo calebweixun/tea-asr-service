@@ -226,6 +226,137 @@
         "title": "AudioFormat",
         "type": "object"
       },
+      "ContextEcho": {
+        "additionalProperties": false,
+        "properties": {
+          "domain_chars": {
+            "title": "Domain Chars",
+            "type": "integer"
+          },
+          "hotwords_count": {
+            "title": "Hotwords Count",
+            "type": "integer"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "prompt_applied": {
+            "title": "Prompt Applied",
+            "type": "boolean"
+          },
+          "replacements_count": {
+            "title": "Replacements Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "domain_chars",
+          "hotwords_count",
+          "replacements_count",
+          "prompt_applied"
+        ],
+        "title": "ContextEcho",
+        "type": "object"
+      },
+      "ContextOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "domain": {
+            "anyOf": [
+              {
+                "maxLength": 300,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Domain"
+          },
+          "hotwords": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 32,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Hotwords"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "replacements": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/models/ContextReplacement"
+                },
+                "maxItems": 500,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Replacements"
+          }
+        },
+        "title": "ContextOptions",
+        "type": "object"
+      },
+      "ContextReplacement": {
+        "additionalProperties": false,
+        "description": "A deterministic exact substring replacement (`from` is a JSON key).",
+        "properties": {
+          "from": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "From",
+            "type": "string"
+          },
+          "to": {
+            "maxLength": 32,
+            "title": "To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "title": "ContextReplacement",
+        "type": "object"
+      },
       "ErrorEvent": {
         "additionalProperties": false,
         "properties": {
@@ -702,6 +833,17 @@
           "audio": {
             "$ref": "#/$defs/models/AudioFormat"
           },
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/models/ContextOptions"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "durable": {
             "default": false,
             "title": "Durable",
@@ -786,6 +928,17 @@
       "SessionStarted": {
         "additionalProperties": false,
         "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/models/ContextEcho"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "event_id": {
             "maximum": 9007199254740991,
             "minimum": 0,
@@ -1144,6 +1297,13 @@
             "default": "transcript.partial",
             "title": "Type",
             "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
           }
         },
         "required": [

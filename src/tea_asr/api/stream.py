@@ -17,6 +17,16 @@ from pydantic import ValidationError
 
 from tea_asr.api.events import EventWriter
 from tea_asr.config import ServiceConfig
+from tea_asr.context import (
+    ContextDictionaryStore,
+    ContextPlan,
+    InvalidDictionary,
+    ReplacementRule,
+    UnknownDictionaryProfile,
+    apply_replacements,
+    contains_context_echo,
+    resolve_context,
+)
 from tea_asr.diagnostics import TICK_S, AudioCapture, SessionDiagnostics, WarningLimiter
 from tea_asr.errors import ApiError
 from tea_asr.logs import event as log_event
@@ -36,6 +46,7 @@ from tea_asr.wire import (
     AudioAck,
     AudioCommitted,
     ClientEnvelope,
+    ContextEcho,
     ErrorEvent,
     FlowControl,
     Hello,
@@ -107,6 +118,7 @@ class StreamScheduler(Protocol):
         language: str = "Chinese",
         kind: str = "interactive",
         is_stale: Callable[[], bool] | None = None,
+        system_prompt: str | None = None,
     ) -> tuple[dict[str, Any], int]: ...
 
 
@@ -181,6 +193,11 @@ class Segment:
     stable: StablePrefixTracker | None = None
     stable_revision: int = 0
     stable_end_sample: int = 0
+    #: Context and replacement rules are copied when the segment opens so all
+    #: previews and its final use one immutable recognition plan.
+    system_prompt: str | None = None
+    context_domain: str | None = None
+    replacements: tuple[ReplacementRule, ...] = ()
 
 
 @dataclass(slots=True)
@@ -271,6 +288,7 @@ class StreamSession:
         continuous_admission: ContinuousSessionAdmission | None = None,
         translation: StreamTranslationProvider | None = None,
         capture_root: Path | None = None,
+        dictionaries: ContextDictionaryStore | None = None,
     ) -> None:
         self._websocket = websocket
         self._scheduler = scheduler
@@ -333,6 +351,9 @@ class StreamSession:
         self._capture_root = capture_root
         self._capture: AudioCapture | None = None
         self._capture_minutes = config.debug_capture_minutes
+        self._dictionaries = dictionaries
+        self._context_plan: ContextPlan | None = None
+        self._context_active = False
         self._end_reason: str | None = None
         self._end_fields: dict[str, Any] = {}
         self._ended_logged = False
@@ -350,6 +371,30 @@ class StreamSession:
         start = self._parse_control(message["text"])
         if not isinstance(start, SessionStart):
             raise ApiError("protocol_error", "連線後的第一則訊息必須是 session.start。")
+        if start.context is not None:
+            if not self._config.context_hints_enabled:
+                raise ApiError(
+                    "unsupported_option",
+                    "recognition context 尚未由 server 啟用。",
+                )
+            try:
+                self._context_plan = resolve_context(start.context, self._dictionaries)
+            except (InvalidDictionary, UnknownDictionaryProfile) as exc:
+                raise ApiError(
+                    "unsupported_option",
+                    "server dictionary profile is unavailable or invalid.",
+                ) from exc
+            self._context_active = True
+            if self._context_plan.hotwords_truncated:
+                log_event(
+                    logger,
+                    "context.hotwords_truncated",
+                    level="warning",
+                    input_count=len(self._context_plan.hotwords)
+                    + self._context_plan.hotwords_truncated,
+                    kept_count=len(self._context_plan.hotwords),
+                    truncated_count=self._context_plan.hotwords_truncated,
+                )
         if start.profile == "continuous" and self._vad is None:
             raise ApiError(
                 "unsupported_option",
@@ -427,7 +472,7 @@ class StreamSession:
                 if continuous
                 else MAX_UTTERANCE_PCM_BYTES // 2 // 16
             ),
-            context_biasing=False,
+            context_biasing=self._context_active,
         )
 
     # -- parsing -------------------------------------------------------------
@@ -458,10 +503,18 @@ class StreamSession:
     # -- segments ------------------------------------------------------------
 
     def _open_segment(self, start_sample: int, *, cause: str = "vad") -> Segment:
+        context = self._context_plan
         segment = Segment(
             segment_id=str(uuid.uuid4()),
             index=self._state.next_index,
             start_sample=start_sample,
+            system_prompt=(
+                context.system_prompt
+                if context and self._config.context_prompt_enabled
+                else None
+            ),
+            context_domain=context.domain if context else None,
+            replacements=context.replacements if context else (),
         )
         if self._stable_agreement is not None:
             segment.stable = StablePrefixTracker(self._stable_agreement)
@@ -579,6 +632,28 @@ class StreamSession:
             )
         return filtered
 
+    @staticmethod
+    def _apply_context_replacements(text: str, segment: Segment) -> tuple[str, int]:
+        replaced, matches = apply_replacements(text, segment.replacements)
+        if matches:
+            # Log counts only: dictionary terms and recognized text stay private.
+            log_event(logger, "stream.replacements_applied", level="info", matches=matches)
+        return replaced, matches
+
+    @staticmethod
+    def _log_context_prompt_tokens(
+        response: dict[str, Any], segment: Segment, kind: str
+    ) -> None:
+        prompt_tokens = response.get("prompt_tokens")
+        if segment.system_prompt is not None and prompt_tokens is not None:
+            log_event(
+                logger,
+                "stream.context_prompt_tokens",
+                segment_index=segment.index,
+                kind=kind,
+                prompt_tokens=int(prompt_tokens),
+            )
+
     async def _transcribe_segment(self, closed: ClosedSegment) -> None:
         segment = closed.segment
         state = self._state
@@ -587,6 +662,11 @@ class StreamSession:
                 closed.pcm,
                 language=self._language,
                 kind="realtime" if self._profile == "continuous" else "interactive",
+                **(
+                    {"system_prompt": segment.system_prompt}
+                    if segment.system_prompt is not None
+                    else {}
+                ),
             )
         except ApiError as exc:
             state.failed_segments.append(segment.index)
@@ -605,6 +685,7 @@ class StreamSession:
             return
         if state.cancelled:
             return
+        self._log_context_prompt_tokens(response, segment, "final")
         inference_ms = round(float(response.get("total_time_s", 0.0)) * 1000)
         raw_text = str(response["text"])
         if not raw_text:
@@ -650,6 +731,11 @@ class StreamSession:
                 closed, "empty", queue_ms=queue_ms, inference_ms=inference_ms, chars=0
             )
             return
+        text, replacement_count = self._apply_context_replacements(text, segment)
+        if replacement_count:
+            warnings.append("replacements_applied")
+        if contains_context_echo(raw_text, segment.context_domain):
+            warnings.append("context_echo")
         self._writer.emit(
             TranscriptFinal(
                 session_id=state.session_id,
@@ -899,6 +985,11 @@ class StreamSession:
                 language=self._language,
                 kind="preview",
                 is_stale=lambda: self._preview_is_stale(segment),
+                **(
+                    {"system_prompt": segment.system_prompt}
+                    if segment.system_prompt is not None
+                    else {}
+                ),
             )
             self._preview_last_decode_s = max(0.0, loop.time() - started - queue_ms / 1000)
             decode_ms = round(self._preview_last_decode_s * 1000)
@@ -922,11 +1013,13 @@ class StreamSession:
                 audio_ms=audio_ms,
                 queue_ms=queue_ms,
             )
+            self._log_context_prompt_tokens(response, segment, "partial")
             segment.revision += 1
             segment.published_preview_end = end_sample - segment.start_sample
             text = self._apply_pua_filter(
                 str(response["text"]), segment=segment, kind="partial"
             )
+            text, replacement_count = self._apply_context_replacements(text, segment)
             self._writer.emit(
                 TranscriptPartial(
                     session_id=self._state.session_id,
@@ -937,6 +1030,9 @@ class StreamSession:
                     start_sample=segment.start_sample,
                     end_sample=end_sample,
                     text=text,
+                    warnings=(
+                        ["replacements_applied"] if replacement_count else []
+                    ),
                 )
             )
             if segment.stable is not None:
@@ -1143,6 +1239,20 @@ class StreamSession:
                 next_sample=0,
                 send_until_sample=self._state.send_until_sample,
                 preview_policy=self._preview_policy(),
+                context=(
+                    ContextEcho(
+                        profile=self._context_plan.profile,
+                        domain_chars=len(self._context_plan.domain or ""),
+                        hotwords_count=len(self._context_plan.hotwords),
+                        replacements_count=len(self._context_plan.replacements),
+                        prompt_applied=bool(
+                            self._config.context_prompt_enabled
+                            and self._context_plan.system_prompt
+                        ),
+                    )
+                    if self._context_plan is not None
+                    else None
+                ),
             )
         )
         if start.translation is not None and self._translation_provider is not None:
@@ -1531,6 +1641,7 @@ async def run_stream(
     connection_admission: ContinuousSessionAdmission | None = None,
     translation: StreamTranslationProvider | None = None,
     capture_root: Path | None = None,
+    dictionaries: ContextDictionaryStore | None = None,
 ) -> None:
     """Authenticate and admit one `/v1/stream` connection.
 
@@ -1617,6 +1728,7 @@ async def run_stream(
         continuous_admission=continuous_admission,
         translation=translation,
         capture_root=capture_root,
+        dictionaries=dictionaries,
     )
     if registry is not None:
         registry.add(session)

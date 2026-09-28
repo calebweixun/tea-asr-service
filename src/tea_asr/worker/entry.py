@@ -52,7 +52,17 @@ def main() -> int:
         request_id = str(header.get("request_id", ""))
         try:
             audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
-            result = backend.transcribe(audio, language=str(header.get("language", "Chinese")))
+            system_prompt = header.get("system_prompt")
+            if system_prompt is None:
+                result = backend.transcribe(
+                    audio, language=str(header.get("language", "Chinese"))
+                )
+            else:
+                result = backend.transcribe(
+                    audio,
+                    language=str(header.get("language", "Chinese")),
+                    system_prompt=str(system_prompt),
+                )
             payload = asdict(result)
             payload.update({"status": "ok", "request_id": request_id})
             _write(payload)

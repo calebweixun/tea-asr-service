@@ -79,6 +79,16 @@
             "title": "Context Biasing",
             "type": "boolean"
           },
+          "context_limits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContextLimits"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "diarization": {
             "default": false,
             "title": "Diarization",
@@ -169,6 +179,96 @@
           }
         },
         "title": "CapabilityLimits",
+        "type": "object"
+      },
+      "ContextLimits": {
+        "additionalProperties": false,
+        "properties": {
+          "max_domain_chars": {
+            "default": 300,
+            "title": "Max Domain Chars",
+            "type": "integer"
+          },
+          "max_hotword_chars": {
+            "default": 32,
+            "title": "Max Hotword Chars",
+            "type": "integer"
+          },
+          "max_hotwords": {
+            "default": 200,
+            "title": "Max Hotwords",
+            "type": "integer"
+          },
+          "max_replacement_chars": {
+            "default": 32,
+            "title": "Max Replacement Chars",
+            "type": "integer"
+          },
+          "max_replacements": {
+            "default": 500,
+            "title": "Max Replacements",
+            "type": "integer"
+          }
+        },
+        "title": "ContextLimits",
+        "type": "object"
+      },
+      "DictionarySummary": {
+        "additionalProperties": false,
+        "properties": {
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "hotwords_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hotwords Count"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "replacements_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replacements Count"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "DictionarySummary",
         "type": "object"
       },
       "EndSilenceRange": {
@@ -704,6 +804,56 @@
           }
         },
         "summary": "Capabilities"
+      }
+    },
+    "/v1/dictionaries": {
+      "get": {
+        "operationId": "dictionaries_list_v1_dictionaries_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DictionarySummary"
+                  },
+                  "title": "Response Dictionaries List V1 Dictionaries Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Dictionaries List"
       }
     },
     "/v1/logs": {
