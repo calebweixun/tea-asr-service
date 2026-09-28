@@ -243,7 +243,36 @@ PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
 
 報告包含逐段、每個 set 與整體 CER、替換／刪除／插入數、音樂干擾分組，以及兩個以上
 system 的逐段 paired bootstrap 95% 差異區間。`聽不清楚` 預設排除；只有 venv 已裝
-OpenCC 時才附上簡體轉繁體版本。
+OpenCC 時才附上簡體轉繁體版本。加 `--fold-pronouns` 會同時回報原分數與折疊
+祢→你、祂／它→他的分數；`per_set_concatenated` 會依答案順序連接同一 set 的所有項目，
+再計算 CER。
+
+## 離線 Gold 辨識比較
+
+`gold_offline_eval.py` 以服務後端解碼校正答案對應的 WAV 區間，並另存每項解碼時間。
+使用本機預備好的模型執行全部 4-bit、8-bit、span、字典與 prompt 變體：
+
+```bash
+/Users/c2leb/Codes/tea-asr-service/.soak/gold/run-offline-eval.sh
+```
+
+單獨測試 span 與兩秒前後文，並比較原分數、折疊分數及相對於第一個 hypothesis 的
+paired bootstrap 95% 區間：
+
+```bash
+PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  benchmarks/gold_offline_eval.py \
+  --answers /Users/c2leb/Codes/tea-asr-service/.soak/gold/answers/speakers-answers.json \
+  --wav /Users/c2leb/Codes/tea-asr-service/.soak/audio/church-30m-59m.wav \
+  --model-path /Users/c2leb/Codes/tea-asr-service/models/models--Alkd--TEA-ASR-1.1-MLX-4bit/snapshots/caee57a908b6d64be08a6462c7a21ececbd4d7cb \
+  --mode span --pad-s 2 \
+  --output /Users/c2leb/Codes/tea-asr-service/.soak/gold/eval/span.json
+PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  benchmarks/cer_eval.py \
+  /Users/c2leb/Codes/tea-asr-service/.soak/gold/answers/speakers-answers.json \
+  /Users/c2leb/Codes/tea-asr-service/.soak/gold/eval/01-4bit-segment.json \
+  /Users/c2leb/Codes/tea-asr-service/.soak/gold/eval/span.json --fold-pronouns
+```
 
 ## 七、會遇到的已知狀況
 

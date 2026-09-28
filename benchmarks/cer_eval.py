@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 SAMPLE_RATE = 16_000
+PRONOUN_TRANSLATION = str.maketrans({"祢": "你", "祂": "他", "它": "他"})
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,19 @@ def normalize(text: str, *, converter: Any | None = None) -> str:
             char = char.lower()
         chars.append(char)
     return "".join(chars)
+
+
+def fold_god_pronouns(text: str) -> str:
+    """Apply the user's God-pronoun convention before normal CER scoring."""
+    return text.translate(PRONOUN_TRANSLATION)
+
+
+def normalize_for_scoring(
+    text: str, *, converter: Any | None = None, fold_pronouns: bool = False
+) -> str:
+    if fold_pronouns:
+        text = fold_god_pronouns(text)
+    return normalize(text, converter=converter)
 
 
 def edit_counts(reference: Sequence[str], hypothesis: Sequence[str]) -> EditCounts:
@@ -215,6 +229,7 @@ def make_item_counts(
     *,
     include_unclear: bool,
     converter: Any | None = None,
+    fold_pronouns: bool = False,
 ) -> tuple[list[dict[str, Any]], list[EditCounts], list[str], int]:
     source_kind, source_value = source
     included_rows: list[dict[str, Any]] = []
@@ -230,8 +245,12 @@ def make_item_counts(
         else:
             hypothesis = source_value.get(item["id"], "")
             missing += item["id"] not in source_value
-        ref_text = normalize(item["reference"], converter=converter)
-        hyp_text = normalize(hypothesis, converter=converter)
+        ref_text = normalize_for_scoring(
+            item["reference"], converter=converter, fold_pronouns=fold_pronouns
+        )
+        hyp_text = normalize_for_scoring(
+            hypothesis, converter=converter, fold_pronouns=fold_pronouns
+        )
         count = edit_counts(ref_text, hyp_text)
         counts.append(count)
         included_rows.append(
@@ -244,6 +263,42 @@ def make_item_counts(
             }
         )
     return included_rows, counts, excluded_ids, missing
+
+
+def concatenated_set_summaries(
+    reference: dict[str, Any],
+    source: tuple[str, dict[str, str] | list[dict[str, Any]]],
+    *,
+    include_unclear: bool,
+    converter: Any | None = None,
+    fold_pronouns: bool = False,
+) -> dict[str, dict[str, int | float | None]]:
+    """Score each set after joining its item text in reference order."""
+    source_kind, source_value = source
+    grouped: dict[str, tuple[list[str], list[str]]] = {}
+    for item in reference["items"]:
+        if bool(item.get("unclear", False)) and not include_unclear:
+            continue
+        if source_kind == "trace":
+            hypothesis = trace_to_item(source_value, item["start_s"], item["end_s"])
+        else:
+            hypothesis = source_value.get(item["id"], "")
+        set_name = str(item.get("set", reference.get("set", "unknown")))
+        references, hypotheses = grouped.setdefault(set_name, ([], []))
+        references.append(item["reference"])
+        hypotheses.append(hypothesis)
+
+    summaries: dict[str, dict[str, int | float | None]] = {}
+    for set_name, (references, hypotheses) in sorted(grouped.items()):
+        reference_text = normalize_for_scoring(
+            "".join(references), converter=converter, fold_pronouns=fold_pronouns
+        )
+        hypothesis_text = normalize_for_scoring(
+            "".join(hypotheses), converter=converter, fold_pronouns=fold_pronouns
+        )
+        count = edit_counts(reference_text, hypothesis_text)
+        summaries[set_name] = summarize([count], item_count=len(references))
+    return summaries
 
 
 def summarize_breakdowns(rows: Sequence[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -321,6 +376,7 @@ def evaluate(
     include_unclear: bool = False,
     bootstrap_iterations: int = 10_000,
     seed: int = 1729,
+    fold_pronouns: bool = False,
 ) -> dict[str, Any]:
     converter = None
     try:
@@ -332,6 +388,7 @@ def evaluate(
 
     sources: list[dict[str, Any]] = []
     source_counts: list[list[EditCounts]] = []
+    folded_source_counts: list[list[EditCounts]] = []
     for path in hypothesis_paths:
         loaded = load_hypothesis(path)
         rows, counts, excluded_ids, missing = make_item_counts(
@@ -347,6 +404,9 @@ def evaluate(
             "excluded_unclear_ids": excluded_ids,
             "overall": summarize(counts),
             "per_set": sets,
+            "per_set_concatenated": concatenated_set_summaries(
+                reference, loaded, include_unclear=include_unclear
+            ),
             "breakdown_by_music": music,
             "per_item": rows,
         }
@@ -361,9 +421,30 @@ def evaluate(
             source_report["simplified_to_traditional"] = {
                 "overall": summarize(variant_counts),
                 "per_set": variant_sets,
+                "per_set_concatenated": concatenated_set_summaries(
+                    reference, loaded, include_unclear=include_unclear, converter=converter
+                ),
                 "breakdown_by_music": variant_music,
                 "per_item": variant_rows,
             }
+        if fold_pronouns:
+            folded_rows, folded_counts, _, _ = make_item_counts(
+                reference,
+                loaded,
+                include_unclear=include_unclear,
+                fold_pronouns=True,
+            )
+            folded_sets, folded_music = summarize_breakdowns(folded_rows)
+            source_report["pronoun_folded"] = {
+                "overall": summarize(folded_counts),
+                "per_set": folded_sets,
+                "per_set_concatenated": concatenated_set_summaries(
+                    reference, loaded, include_unclear=include_unclear, fold_pronouns=True
+                ),
+                "breakdown_by_music": folded_music,
+                "per_item": folded_rows,
+            }
+            folded_source_counts.append(folded_counts)
         sources.append(source_report)
         source_counts.append(counts)
 
@@ -380,6 +461,13 @@ def evaluate(
                 seed=seed + first_index * 101 + second_index,
             ),
         }
+        if fold_pronouns:
+            comparison["pronoun_folded"] = bootstrap_difference_ci(
+                folded_source_counts[first_index],
+                folded_source_counts[second_index],
+                iterations=bootstrap_iterations,
+                seed=seed + first_index * 101 + second_index,
+            )
         if converter is not None:
             first_variant = make_item_counts(
                 reference,
@@ -409,6 +497,15 @@ def evaluate(
         if not include_unclear
         else 0,
         "normalization": "NFKC fullwidth fold; punctuation, spaces, and control characters removed; Latin lowercased",
+        "per_set_concatenated_note": (
+            "Each set joins reference and hypothesis item text without separators, in answer order."
+        ),
+        "pronoun_folded_available": fold_pronouns,
+        "pronoun_folded_note": (
+            "Also reported after folding 祢→你 and 祂/它→他."
+            if fold_pronouns
+            else "Pass --fold-pronouns to report folded scores alongside standard scores."
+        ),
         "simplified_to_traditional_available": converter is not None,
         "simplified_to_traditional_note": (
             "Reported only because OpenCC is installed in this environment."
@@ -420,16 +517,21 @@ def evaluate(
     }
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("reference", type=Path, help="downloaded listening-kit answers JSON")
     parser.add_argument(
         "hypotheses", type=Path, nargs="+", help="trace JSONL or JSON mapping item ids to text"
     )
     parser.add_argument("--include-unclear", action="store_true", help="score unclear=true items")
+    parser.add_argument(
+        "--fold-pronouns",
+        action="store_true",
+        help="also report scores with 祢→你 and 祂/它→他 folded on both sides",
+    )
     parser.add_argument("--bootstrap", type=int, default=10_000, help="paired bootstrap iterations")
     parser.add_argument("--seed", type=int, default=1729)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> int:
@@ -442,6 +544,7 @@ def main() -> int:
             include_unclear=args.include_unclear,
             bootstrap_iterations=args.bootstrap,
             seed=args.seed,
+            fold_pronouns=args.fold_pronouns,
         )
     except (OSError, TypeError, ValueError, json.JSONDecodeError, ImportError) as exc:
         print(f"error: {exc}", file=sys.stderr)
