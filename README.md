@@ -28,6 +28,7 @@
 | 開 OBS 直播字幕外掛的 repo | [08 OBS 外掛規格](docs/08-obs-plugin.md) |
 | 用 Mac 選單列 app 聽寫或做會議記錄 | [clients/macos](clients/macos/) |
 | 實際測試與回報問題 | [09 測試指南](docs/09-testing-guide.md) |
+| 用真實錄音覆驗 OBS live subtitles 與字幕畫面 | [09 真實錄音字幕 soak](docs/09-testing-guide.md#六真實錄音字幕-soak) |
 
 建議先閱讀 01 的「範圍」，再把 06 最後的開發提示交给實作模型。API 定義以 04 為準；不確定事項以 05 的驗證關卡為準。
 

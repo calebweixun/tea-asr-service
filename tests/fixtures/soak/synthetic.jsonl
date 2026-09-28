@@ -1,0 +1,11 @@
+{"t_ms":0.0,"event":{"type":"hello","session_id":"s1"}}
+{"t_ms":100.0,"event":{"type":"session.started","session_id":"s1","preview_policy":{"endpoint_silence_ms":300}}}
+{"t_ms":200.0,"event":{"type":"speech.started","session_id":"s1","segment_id":"seg-a","segment_index":0,"start_sample":0}}
+{"t_ms":600.0,"event":{"type":"transcript.partial","session_id":"s1","segment_id":"seg-a","segment_index":0,"revision":1,"text":"中華民國中華民國"}}
+{"t_ms":1000.0,"event":{"type":"transcript.partial","session_id":"s1","segment_id":"seg-a","segment_index":0,"revision":2,"text":"中華民國"}}
+{"t_ms":1000.0,"event":{"type":"transcript.stable","session_id":"s1","segment_id":"seg-a","segment_index":0,"stable_revision":1,"state":"open","text":"中華民國"}}
+{"t_ms":1200.0,"event":{"type":"transcript.stable","session_id":"s1","segment_id":"seg-a","segment_index":0,"stable_revision":2,"state":"open","text":"中華民國台灣"}}
+{"t_ms":2200.0,"event":{"type":"segment.queued","session_id":"s1","segment_id":"seg-a","segment_index":0,"boundary":"silence","start_sample":0,"end_sample":32000}}
+{"t_ms":2400.0,"event":{"type":"transcript.final","session_id":"s1","segment_id":"seg-a","segment_index":0,"revision":3,"start_sample":0,"end_sample":32000,"text":"中華民國台灣"}}
+{"t_ms":2401.0,"event":{"type":"transcript.stable","session_id":"s1","segment_id":"seg-a","segment_index":0,"stable_revision":3,"state":"diverged","text":"中華民國台灣"}}
+{"t_ms":2600.0,"event":{"type":"error","session_id":"s1","code":"invalid_ipc","message":"worker desynchronised"}}
