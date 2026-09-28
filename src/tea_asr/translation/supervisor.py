@@ -246,8 +246,14 @@ class TranslationSupervisor:
                     self.last_error,
                     retryable=True,
                 ) from exc
-            if response.get("request_id") != request_id:
-                raise ApiError("translation_failed", "翻譯 worker 回應 ID 不符", retryable=True)
+            except (ValueError, TypeError) as exc:
+                # Oversized or undecodable frame: the stream position is unknown.
+                raise await self._resync(
+                    f"unreadable response: {exc}", expected=request_id, got=None
+                ) from exc
+            got = response.get("request_id") if isinstance(response, dict) else None
+            if got != request_id:
+                raise await self._resync("response ID does not match", expected=request_id, got=got)
             if response.get("status") != "ok":
                 raise ApiError(
                     str(response.get("code", "translation_failed")),
@@ -255,6 +261,29 @@ class TranslationSupervisor:
                     retryable=True,
                 )
             return response
+
+    async def _resync(self, reason: str, *, expected: str, got: object) -> ApiError:
+        """The pipe is out of step with its requests: restart, fail only this one.
+
+        Same rule as the ASR worker: nothing read from this pipe can be trusted
+        to answer the request that reads it, so only a new process gets back
+        in step. Left alone, every later translation would fail.
+        """
+
+        event(
+            logger,
+            "translation.ipc_desync",
+            level="warning",
+            reason=reason,
+            expected_request_id=expected,
+            got_request_id=got,
+            generation=self.generation,
+        )
+        await self.stop(kill=True)
+        self.state = "recovering"
+        self.last_error = f"翻譯 worker IPC 失去同步（{reason}），重新啟動中"
+        self._schedule_restart()
+        return ApiError("translation_failed", self.last_error, retryable=True)
 
     async def start_session(self, direction: str, latency_mode: str) -> int:
         """Reset the worker's history for a new session; returns the generation."""

@@ -93,3 +93,34 @@ def test_counters_return_to_zero_and_queue_ms_is_reported() -> None:
         assert scheduler.waiting_samples == 0
 
     asyncio.run(scenario())
+
+
+def test_a_cancelled_caller_keeps_the_worker_until_its_call_really_ends() -> None:
+    """A session closing mid-preview cancels the caller, not the worker call.
+
+    The call finishes on its own (the worker cannot drop a request halfway),
+    so the next task must not be handed the worker until it has.
+    """
+
+    async def scenario() -> tuple[list[str], int, int]:
+        worker = BlockingWorker()
+        scheduler = Scheduler(worker)
+        preview = asyncio.create_task(scheduler.transcribe(b"pp", kind="preview"))
+        await _settle(scheduler, 1)
+        final = asyncio.create_task(scheduler.transcribe(b"ff", kind="realtime"))
+        await _settle(scheduler, 2)
+        preview.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await preview
+        for _ in range(10):
+            await asyncio.sleep(0)
+        started_while_busy = list(worker.order)
+        still_waiting = scheduler.waiting_tasks
+        worker.release.set()
+        await final
+        return started_while_busy, still_waiting, scheduler.waiting_tasks
+
+    started_while_busy, still_waiting, after = asyncio.run(scenario())
+    assert started_while_busy == ["pp"], "the final must wait for the abandoned preview"
+    assert still_waiting == 2
+    assert after == 0
