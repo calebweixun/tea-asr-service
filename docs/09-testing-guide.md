@@ -146,6 +146,16 @@ PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
 `report` 寫 metrics-only Markdown 到 `.soak/reports/`，另寫 `.soak/review-*.md`，按錄音分鐘列出
 final 與字幕畫面在 segment close 時的內容。
 
+Replay 的每條重複字幕行會對照該 segment 的 server partial/final 分類：`plugin-origin` 表示重複單位在 server 文字裡找不到 fuzzy 的重複；`model-origin` 表示 server partial 已包含重複；`speech-origin` 表示 server final 至少包含兩份 fuzzy 相符的單位。比對會先移除標點與空白、統一大小寫及全形字元，再允許每 4 個字元至多 1 個編輯差異。只有 `plugin-origin` 計入 hard threshold；`model-origin` 和 `speech-origin` 會列在報告的 soft 分類中。無法對應 trace final 的 replay 行會保守計入 plugin hard threshold。
+
+已有 `caption-replay` binary 時可透過 `--replay-binary` 重用，避免建置 plugin：
+
+```bash
+PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  benchmarks/soak_real_audio.py analyze .soak/traces/fake-2m-300.jsonl \
+  --replay-binary .soak/build/caption-replay
+```
+
 真實模型必須使用獨立 HOME、主 checkout 已準備好的 `models/`，並設 `HF_HUB_OFFLINE=1`：
 
 ```bash

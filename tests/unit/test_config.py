@@ -28,6 +28,8 @@ def test_defaults_match_what_has_been_accepted() -> None:
     # docs/benchmarks/pua-bf16-ab-report.md: the deployed MLX 4bit checkpoint
     # leaks PUA characters into 70% of sentences, so filtering ships on.
     assert config.filter_pua is True
+    assert config.repetition_single_char_limit == 3
+    assert config.repetition_multi_char_limit == 3
     # docs/benchmarks/concurrency-report.md: measured safe up to 4 concurrent
     # continuous sessions; ships at 2 for latency-budget reasons on a
     # single-user desktop service, not because more was found unsafe.
@@ -45,6 +47,18 @@ def test_max_continuous_sessions_is_configurable(tmp_path: Path) -> None:
 def test_pua_filter_can_be_turned_off_explicitly() -> None:
     config = ServiceConfig.load(env={"TEA_ASR_FILTER_PUA": "0"})
     assert config.filter_pua is False
+
+
+def test_repetition_limits_are_configurable_with_environment_variables() -> None:
+    config = ServiceConfig.load(
+        env={
+            "TEA_ASR_REPETITION_SINGLE_CHAR_LIMIT": "2",
+            "TEA_ASR_REPETITION_MULTI_CHAR_LIMIT": "4",
+        }
+    )
+
+    assert config.repetition_single_char_limit == 2
+    assert config.repetition_multi_char_limit == 4
 
 
 def test_pua_filter_environment_wins_over_the_file(tmp_path: Path) -> None:

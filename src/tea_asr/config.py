@@ -190,6 +190,13 @@ class ServiceConfig:
     #: `tea_asr/api/stream.py` for the measurements and the removal
     #: condition. Default on since docs/benchmarks/pua-bf16-ab-report.md.
     filter_pua: bool = True
+    #: Maximum consecutive copies kept by the streaming repetition guard.
+    #: One-character runs preserve conversational emphasis (default 3); units
+    #: of 2–6 characters use the same default. Environment overrides are
+    #: TEA_ASR_REPETITION_SINGLE_CHAR_LIMIT and
+    #: TEA_ASR_REPETITION_MULTI_CHAR_LIMIT.
+    repetition_single_char_limit: int = 3
+    repetition_multi_char_limit: int = 3
     max_total_connections: int = 4
     #: Concurrent `continuous` profile sessions the single MLX worker admits
     #: before `/v1/stream` rejects an additional session.start with
@@ -283,6 +290,10 @@ class ServiceConfig:
         config = cls()
         return _apply_env(config, source)
 
+    def __post_init__(self) -> None:
+        if self.repetition_single_char_limit < 1 or self.repetition_multi_char_limit < 1:
+            raise ValueError("repetition limits must be at least 1")
+
     @classmethod
     def load(
         cls, paths: AppPaths | None = None, env: dict[str, str] | None = None
@@ -332,6 +343,12 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
     filter_pua = get("TEA_ASR_FILTER_PUA")
     if filter_pua is not None:
         config = replace(config, filter_pua=filter_pua not in {"0", "false", "no"})
+    repetition_single_char_limit = get("TEA_ASR_REPETITION_SINGLE_CHAR_LIMIT")
+    if repetition_single_char_limit is not None:
+        config = replace(config, repetition_single_char_limit=int(repetition_single_char_limit))
+    repetition_multi_char_limit = get("TEA_ASR_REPETITION_MULTI_CHAR_LIMIT")
+    if repetition_multi_char_limit is not None:
+        config = replace(config, repetition_multi_char_limit=int(repetition_multi_char_limit))
     allow_lan = get("TEA_ASR_ALLOW_LAN")
     if allow_lan is not None:
         config = replace(config, allow_lan=allow_lan not in {"0", "false", "no", ""})
