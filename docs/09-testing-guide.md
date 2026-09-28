@@ -82,7 +82,135 @@ uv run python benchmarks/replay_segmenter.py ~/tea-asr-takes/take2.wav --transcr
 | 預覽會不會擋住正式辨識 | `uv run python benchmarks/mixed_load.py --wav <take>.wav` |
 | 長時間穩定性 | `uv run python benchmarks/soak_continuous.py --wav <take>.wav --minutes 60` |
 
-## 六、會遇到的已知狀況
+## 六、真實錄音字幕 soak
+
+`benchmarks/soak_real_audio.py` 會把本機錄音切成 16 kHz mono PCM16、以 1x 送到測試 server、
+重播事件 trace 到 OBS 外掛字幕 state machine，並輸出 metrics report 與本機逐字稿 review。
+原始音訊、WAV、trace、server log sidecar 與 review 都放在 `.soak/`；請把 `/.soak/`
+加到這個 worktree 的 `.git/info/exclude`，不要放進 `.gitignore`。Review 含私人逐字稿，不可提交；
+metrics report 不含逐字稿。
+
+準備 30:00–59:09 的預設區間與三個說話者 sections：
+
+```bash
+PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  benchmarks/soak_real_audio.py extract
+```
+
+`extract` 預設讀取本機指定錄音。可用 `--input` 指定其他檔案、`--start`／`--end` 覆寫時間，
+也可用重複的 `--section NAME,START,END` 覆寫 sections（時間接受秒數、`MM:SS` 或 `HH:MM:SS`；
+最後一段的 END 可寫 `end`）。兩分鐘 fake-backend smoke cut：
+
+```bash
+PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  benchmarks/soak_real_audio.py extract --start 00:30:00 --end 00:32:00 \
+  --out .soak/audio/fake-2m.wav --manifest .soak/audio/fake-2m.sections.json
+```
+
+Fake backend 使用 OBS 外掛 e2e harness 的 `tests/e2e/fake_asr_server.py`，並把 `--service-dir`
+指向目前 worktree，因此載入這個 worktree 的 server code。它不載入模型：
+
+```bash
+mkdir -p .soak/fake/state .soak/traces
+/Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  /Users/c2leb/Codes/obs-plugins/tea-live-subtitle/tests/e2e/fake_asr_server.py \
+  --service-dir "$PWD" --port 8422 \
+  --state-dir "$PWD/.soak/fake/state" \
+  --request-log "$PWD/.soak/fake/requests.jsonl" --revisable --emulate-segmentation
+```
+
+另一個終端機以 fake server 建立的 token 做 1x capture：
+
+```bash
+PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  benchmarks/soak_real_audio.py capture --wav .soak/audio/fake-2m.wav \
+  --url ws://127.0.0.1:8422/v1/stream \
+  --token-file .soak/fake/state/token --end-silence 300 \
+  --manifest .soak/audio/fake-2m.sections.json \
+  --server-log .soak/fake/state/logs/service.log \
+  --out .soak/traces/fake-2m-300.jsonl
+```
+
+Fake server 結束後，重播、分析並產生報告：
+
+```bash
+PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  benchmarks/soak_real_audio.py replay .soak/traces/fake-2m-300.jsonl
+PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  benchmarks/soak_real_audio.py analyze .soak/traces/fake-2m-300.jsonl
+PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  benchmarks/soak_real_audio.py report .soak/traces/fake-2m-300.jsonl
+```
+
+`analyze` 會同時計算 trace/server 指標與 replay hard thresholds；hard failure 時回傳非零。
+`report` 寫 metrics-only Markdown 到 `.soak/reports/`，另寫 `.soak/review-*.md`，按錄音分鐘列出
+final 與字幕畫面在 segment close 時的內容。
+
+真實模型必須使用獨立 HOME、主 checkout 已準備好的 `models/`，並設 `HF_HUB_OFFLINE=1`：
+
+```bash
+SOAK_HOME="$PWD/.soak/real-home"
+mkdir -p "$SOAK_HOME" .soak/traces
+HOME="$SOAK_HOME" TEA_ASR_MODELS_DIR=/Users/c2leb/Codes/tea-asr-service/models \
+  HF_HUB_OFFLINE=1 PYTHONPATH="$PWD/src" \
+  /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  -c 'from tea_asr.cli import main; raise SystemExit(main())' serve --port 8421
+```
+
+服務建立的 token 與 log 分別位於 `$SOAK_HOME/Library/Application Support/TEA ASR/token` 和
+`$SOAK_HOME/Library/Logs/TEA ASR/service.log`。服務持續執行時，另一個終端機先後執行兩個 29 分鐘
+capture；每次完成後跑同一組 `replay`、`analyze`、`report`：
+
+```bash
+SOAK_HOME="$PWD/.soak/real-home"
+PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  benchmarks/soak_real_audio.py capture --wav .soak/audio/church-30m-59m.wav \
+  --url ws://127.0.0.1:8421/v1/stream \
+  --token-file "$SOAK_HOME/Library/Application Support/TEA ASR/token" \
+  --server-log "$SOAK_HOME/Library/Logs/TEA ASR/service.log" \
+  --manifest .soak/audio/church-30m-59m.sections.json --end-silence 300 \
+  --out .soak/traces/church-300.jsonl
+
+PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  benchmarks/soak_real_audio.py capture --wav .soak/audio/church-30m-59m.wav \
+  --url ws://127.0.0.1:8421/v1/stream \
+  --token-file "$SOAK_HOME/Library/Application Support/TEA ASR/token" \
+  --server-log "$SOAK_HOME/Library/Logs/TEA ASR/service.log" \
+  --manifest .soak/audio/church-30m-59m.sections.json --end-silence 600 \
+  --out .soak/traces/church-600.jsonl
+```
+
+Capture 結束後，對兩個 run 產生各自的 metrics 與 review：
+
+```bash
+for run in church-300 church-600; do
+  trace=".soak/traces/${run}.jsonl"
+  PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+    benchmarks/soak_real_audio.py replay "$trace"
+  PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+    benchmarks/soak_real_audio.py analyze "$trace"
+  PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+    benchmarks/soak_real_audio.py report "$trace"
+done
+```
+
+完成後在 server terminal 按 Ctrl-C。對所有已保存 trace 重做 plugin replay 與 hard-threshold 檢查：
+
+```bash
+PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  benchmarks/replay_regression.py
+```
+
+可用 `TEA_SOAK_TRACES=/path/to/traces` 或 `--trace-dir` 指定 trace 目錄。Replay 會從
+`/Users/c2leb/Codes/obs-plugins/tea-live-subtitle/tests/replay/` 編譯到 `.soak/build/`；不需要 OBS。
+硬門檻為 0 invalid_ipc、layout moves、mid-speech fade-outs、duplication lines，以及沒有超過 10 秒
+未出文字的 speech stretch。stable gap p95 > 3 秒與 final latency p95 > 1.5 秒只列 soft failure。
+
+2026-09-28 驗證狀態：extract 與 synthetic trace 的 replay/analyze/report 已在此環境跑通；fake server
+嘗試 bind `127.0.0.1:8422` 回 `Operation not permitted`，因此此 sandbox 無法驗證 live capture。真模型也
+沒有在此環境啟動；請在可 loopback bind 的終端機照上方命令執行，不要改用 8327。
+
+## 七、會遇到的已知狀況
 
 - **辨識結果原本會夾帶看不見的私用區字元，現在預設過濾掉。** 根因是
   `Alkd/TEA-ASR-1.1-MLX-4bit` 的 4bit 量化（上游 BF16 是 0%、換 8bit 也只降到
@@ -100,7 +228,7 @@ uv run python benchmarks/replay_segmenter.py ~/tea-asr-takes/take2.wav --transcr
 - **一直講不停會在 12 秒附近被切段**，切點會挑最近的安靜處。
 - **同音詞與人名仍會認錯**（「姿勢」→「知識」、「林佳蓉」→「林嘉蓉」），這是模型層的限制。
 
-## 七、模型不見了怎麼辦
+## 八、模型不見了怎麼辦
 
 `doctor` 回報 `model_prepared: false` 但服務還跑得起來，通常表示資產被刪了
 （曾發生過：磁碟剩不到 6 GB 時 macOS 清掉快取）。服務要到下一個辨識請求才會失敗。
@@ -111,7 +239,7 @@ uv run tea-asr model-prepare
 
 資產現在放標準的 Hugging Face cache，不再放在系統會回收的 `~/Library/Caches`。
 
-## 八、回報問題時附上什麼
+## 九、回報問題時附上什麼
 
 ```bash
 uv run tea-asr doctor > doctor.json
