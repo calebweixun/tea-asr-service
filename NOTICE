@@ -1,0 +1,30 @@
+TEA ASR Service - third-party notices
+
+YAMNet (singing detection)
+--------------------------
+The optional singing detector runs Google's YAMNet audio-event classifier.
+
+  Model:      YAMNet v1, trained on AudioSet (521 classes)
+  Copyright:  2022 Google LLC (tensorflow/models, research/audioset/yamnet)
+  Licence:    Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
+  Upstream:   https://www.kaggle.com/models/google/yamnet (tfhub.dev/google/yamnet/1)
+              https://github.com/tensorflow/models/tree/master/research/audioset/yamnet
+
+The ONNX file is not part of this repository. `tea-asr model-prepare` downloads
+it from https://huggingface.co/audiomagic/yamnet-onnx at the revision pinned in
+`models.lock.json` and `src/tea_asr/yamnet.py`. That file is a format
+conversion of Google's SavedModel made with tf2onnx (opset 15); per its README
+no weights were retrained, fine-tuned, pruned or quantized. The Apache-2.0
+LICENSE text ships with it. `yamnet_class_map.csv` is byte-identical to Google's
+file at tensorflow/models commit dfffd623b6be8d1d9744b8e261fbac370d17c46d.
+
+The AudioSet ontology and labels are released by Google under CC BY 4.0.
+
+Citations:
+  S. Hershey et al., "CNN Architectures for Large-Scale Audio Classification",
+  ICASSP 2017.
+  J. F. Gemmeke et al., "Audio Set: An ontology and human-labeled dataset for
+  audio events", ICASSP 2017.
+
+This project only runs the unmodified weights; the singing decision logic
+(src/tea_asr/singing.py) is original to this project.

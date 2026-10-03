@@ -257,7 +257,10 @@ def test_one_revision_at_most_and_only_when_the_label_changes() -> None:
     assert (revision.audio_class, revision.revision) == ("singing", 1)
     t.observe(repeated(SPEECH, 30))
     assert labeler.update(10**7) is None  # no second revision
+    # ...not even when the segment closes much later with opposite evidence.
+    assert labeler.update(START + 600_000, closing=True) is None
     assert labeler.finished
+    assert labeler.decision is not None and labeler.decision.audio_class == "singing"
 
 
 def test_confirming_the_revision_point_sends_nothing() -> None:

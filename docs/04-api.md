@@ -16,7 +16,7 @@
 - **WS Origin allowlist**：`/v1/stream` upgrade 驗證 `Origin` 僅限 `http://127.0.0.1`／`http://localhost`；省略 Origin（native client）視為合法；不符時在 `accept()` 之前拒絕，網路上實際收到的是空 body 的 HTTP 403，不是 WS close 1008（`src/tea_asr/api/stream.py::run_stream`；細節見下方「`accept()` 之前的拒絕」）。這與上一條 Host 檢查是兩段獨立程式碼，不是同一個中介層。
 - **`limits.max_continuous_sessions`**：伺服器實際 enforce，預設2，只算 `profile=continuous`；超過回 `concurrent_session_limit`，close 4029（`ContinuousSessionAdmission`）。
 - **`limits.max_total_connections`**：伺服器實際 enforce，預設4，涵蓋 `/v1/stream` 所有 profile 的連線總數；超過在 `accept()` 之前拒絕，網路上實際收到的是空 body 的 HTTP 403（不是 WS close 1013；收不到 `hello`；細節見下方「`accept()` 之前的拒絕」）（`ContinuousSessionAdmission` 重用於 `connection_admission`）。
-- **capabilities.features**：只有實際驗收過的功能才會宣告為 `true`；`partial_transcripts` 依 `TEA_ASR_REVISABLE_PREVIEW` 可能為 `true`；`translation` 只有在明確啟用 provider 且模型 ready 時為 `true`；`singing_detection` 只在設定開啟時為 `true`（預設不宣告，因 held-out 品質門檻未達）；其餘固定布林欄位維持 `false`（`src/tea_asr/wire.py::CapabilityFeatures`）。另有可選欄位 `stable_transcripts`（只在 revisable 預覽開啟時出現）、`segmentation_control`（只有 continuous profile 可用時出現），細節見下方各節。
+- **capabilities.features**：只有實際驗收過的功能才會宣告為 `true`；`partial_transcripts` 依 `TEA_ASR_REVISABLE_PREVIEW` 可能為 `true`；`translation` 只有在明確啟用 provider 且模型 ready 時為 `true`；`singing_detection` 只在 YAMNet 模型實際載入且 hash 符合 `models.lock.json` 時為 `true`（設定預設開啟，但缺資產就不宣告）；其餘固定布林欄位維持 `false`（`src/tea_asr/wire.py::CapabilityFeatures`）。另有可選欄位 `stable_transcripts`（只在 revisable 預覽開啟時出現）、`segmentation_control`（只有 continuous profile 可用時出現），細節見下方各節。
 - **flow.control 節奏**：只在流控窗口實際往前推進時送出，不是固定週期輪詢（`src/tea_asr/api/stream.py::_handle_frame`）。
 - **WS 心跳**：server 每15秒送 WS-layer ping，30秒未收到 pong 判定斷線（`uvicorn.run(..., ws_ping_interval=15, ws_ping_timeout=30)`，`src/tea_asr/cli.py`）。
 - **v0.2 端點**：`/v1/jobs*` 未實作，一律404，不回假 202（`tests/integration/test_schema_export.py::test_v0_2_endpoints_are_absent_not_faked`）。
@@ -153,7 +153,7 @@ feature 只有完成該功能驗收才變 true；即使 mock mode 也不能假�
 | `stream.speech_started` | INFO | 開新片段 | `segment_index`、`start_sample`、`cause`（`vad`＝VAD 判定開始說話、`split`＝`max_duration` 切段後接續、`utterance`＝utterance profile 第一個 frame） |
 | `stream.segment_closed` | INFO | 片段封口（與 `segment.queued` 同時） | `segment_index`、`boundary`（`silence`／`max_duration`／`stop`／`manual`）、`start_sample`、`end_sample`、`audio_ms` |
 | `stream.segment_done` | INFO | 片段的終局事件送出時 | `outcome`（`final`／`no_speech`／`empty`／`error`）、`latency_ms`（封口到終局）、`queue_ms`、`inference_ms`、`chars`（字數，不是文字）、`stable_state`（`final`／`diverged`／`abandoned`，未開 stable 為 null）、`code`（error 時） |
-| `stream.audio_class` | INFO | opt-in 分類首次決定或修訂時 | 只有目前各類片段計數 `speech`、`singing`，不含片段 ID、音訊或文字 |
+| `stream.audio_class` | INFO | 歌唱標記首次決定或修訂時 | 只有目前各類片段計數 `speech`、`singing`，不含片段 ID、音訊或文字 |
 | `stream.heartbeat` | INFO | 每條進行中的 session 每 5 秒一行 | 見下表 |
 | `stream.preview` | DEBUG | 每次預覽 | `outcome`（`published`／`stale`＝跑完但片段已封口或已被較新結果取代／`dropped`＝排隊中被 scheduler 丟掉／`failed`／`deferred`＝被負載保護延後）、`decode_ms`、`audio_ms`、`queue_ms`、`wait_ms`／`gap_ms`（deferred） |
 | `stream.session_ended` | INFO | session 結束（teardown 時） | `reason`（`stopped`／`cancelled`／`client_disconnect`＋`close_code`／`error:<code>`，例如 `error:idle_timeout`、`error:timeline_gap`／`connection_closed`）、`duration_s`、`frames`、`audio_s`、`speech_started`、`segments_closed`、`boundaries`、`finals`、`skipped`、`failed`、`preview_*` 總數、`warnings`、`warnings_suppressed`、`capture_dropped_frames` |
@@ -175,7 +175,7 @@ feature 只有完成該功能驗收才變 true；即使 mock mode 也不能假�
 | `segment_open`、`pending_segments` | 目前是否有片段開著、有幾段在等辨識 |
 | `preview_run`／`preview_published`／`preview_dropped`／`preview_deferred`／`preview_failed`、`preview_decode_ms` | 這 5 秒的預覽帳：跑了幾次（published＋stale）、真的送出幾次、被丟掉（stale＋dropped）、被負載保護延後、失敗；預覽解碼總毫秒數 |
 | `worker_busy` | 這 5 秒單一 MLX worker 被佔用的比例（全服務，所有 session 合計） |
-| `singing_score` | 啟用 singing detection 時，最近一個片段的 0–1 singing 分數；未啟用或尚無分數時為 null |
+| `singing_score` | 啟用 singing detection 時，最新一個 YAMNet frame 的 0–1 singing 分數；未啟用或尚無分數時為 null |
 
 **WARNING**（同時寫入 `service.log` 與長保存的 `service.error.log`）。每種警告每條 session 每 30 秒最多一行，中間被略過的次數記在下一行的 `suppressed`：
 
@@ -221,13 +221,17 @@ uv run python benchmarks/capture_event_trace.py capture --wav "<capture_dir>/chu
 
 3. 需要重現時，打開除錯錄音，等問題再出現，用上面的 `capture_event_trace.py` 把 `capture_dir` 裡對應時間的 WAV 重播到測試 server。
 
-## Singing detection（實驗性、預設關閉）
+## 歌唱偵測（`segment.audio_class`，預設開啟、需 YAMNet 資產）
 
-`singing_detection_enabled`（TOML `[service]`）或 `TEA_ASR_SINGING_DETECTION=1` 開啟伺服器端標記。只有開啟時 `/v1/capabilities.features.singing_detection` 才出現且為 `true`。伺服器仍照常辨識歌曲；client 可依自己的政策隱藏 `singing` 的字幕。
+server 為每個語音片段標記 `speech` 或 `singing`，讓 client（OBS 外掛）可在眾人唱詩時自動隱藏字幕。**只標記，不改轉錄**：歌曲照常辨識，`text` 不變，隱藏與否是 client 的政策。
 
-分類器只使用 16 kHz PCM 的 NumPy 特徵，約 1.4 秒內先決定 `speech`／`singing`，之後最多因新證據修訂一次。`segment.audio_class` 欄位為 `{segment_id, segment_index, class, confidence, revision}`；首次決定時送出，類別改變時以 `revision=1` 再送一次。`transcript.final.audio_class` 可帶該片段最後的標籤；未啟用時省略能力宣告、不送事件，final 不帶此欄位。舊 client 可忽略未知事件 type。
+**啟用條件。** 設定 `singing_detection_enabled`（TOML `[service]`，預設 `true`）或 `TEA_ASR_SINGING_DETECTION=0` 關閉；另外需要釘版的 YAMNet 資產（約 16 MB，`tea-asr model-prepare` 會下載到與 VAD 相同的目錄，來源與 hash 見 `models.lock.json`、授權見 `NOTICE`）。資產缺少或 hash 不符時 server 照常啟動、只是不送事件，並寫一行 `singing.unavailable` WARNING；`/v1/capabilities.features.singing_detection` **只在模型確實載入時為 `true`**，否則欄位不出現。`tea-asr doctor` 的 `yamnet_prepared` 顯示資產狀態（選用，不影響 healthy）。
 
-**品質限制：** 留一檔交叉驗證未達「speech 錯判 singing <1%、singing recall ≥80%」。以 threshold `0.995` 優先避免隱藏講道，測試語料 held-out 的歌唱 recall 為 0%，church 29 分鐘講道為 0 次 false call。這是保守實驗標記，不應視為已驗收的自動字幕隱藏功能；預設保持關閉。完整 per-file 數字、trade-off 與重現方式見 [singing evaluation report](benchmarks/singing-eval-report.md)。
+**行為。** 每條 session 在背景執行緒（共用單一 executor，onnxruntime CPU）對收到的 16 kHz 音訊每 0.48 秒算一個 YAMNet frame（0.975 秒視窗），約 4.5 ms CPU／秒音訊；收音迴圈不等推論。每段 audio 先以 frame 分數的 speech／music／vocal 三個彙整值算出 singing 機率，再做 session 層級遲滯：連續約 4.2 秒（8 個 frame）平均 ≥ 0.98 才進入 singing 狀態，之後要最近 4 個 frame 平均 < 0.4 才離開（歌曲長達數分鐘，口白「阿們」不會切回）。片段在 VAD 開出後約 **1.5 秒**（`start_sample` 起算）決定 `speech`／`singing`：必須 session 狀態是 singing **且**該時刻最近兩個 frame 也像歌唱，所以歌曲剛結束、牧師接著蓋著樂器說話不會被隱藏。最多修訂一次（開出後 4 秒，或較短片段在關閉時）。每個決定都由其到期時點的證據算出，執行緒延遲只會讓事件晚到、不會改變標籤。stream 剛開始約 4 秒內不可能是 singing（證據不足），從歌曲中途開始的 session，第一段會先標 `speech` 再修訂。
+
+**事件。** `segment.audio_class` 欄位為 `{segment_id, segment_index, class, confidence, revision}`：`class` 是 `speech`／`singing`，`confidence` 0–1，`revision` 是 0（首判）或 1（修訂，只在類別改變時送）。一定早於同片段的 `transcript.final`；`transcript.final.audio_class` 帶該片段最後的標籤（最終判斷在 final 送出前完成）。功能未啟用、資產缺少，或標記器中途失敗（log `singing.disabled`，音訊 backlog 超過 30 秒或 sample 不連續）時，不送事件、final 不帶此欄位，轉錄不受影響。utterance 與 continuous profile 都適用。舊 client 可忽略未知事件 type。
+
+**品質（held-out，留一檔交叉驗證）。** 2 個 speech 集合的 1.5 秒視窗誤判 singing 0.0%（目標 <1%）、歌唱片段首判抓到 83.1%（最終 94.9%，目標 ≥80%）、29 分鐘完整講道 0 次誤判、首判延遲 1.5 秒。證據範圍很窄：3 首歌（同一樂團與場地）、1 段背景音樂下講話、1 場講道；未涵蓋其他敬拜團、純人聲、詩班、牧師在樂器伴奏下禱告的長段落，也未在真實 OBS 實機驗證。完整 per-file 矩陣、trade-off、CPU 與未驗證清單見 [singing evaluation report](benchmarks/singing-eval-report.md)。
 
 ## WebSocket：v0.1
 

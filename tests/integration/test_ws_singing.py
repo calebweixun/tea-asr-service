@@ -6,6 +6,7 @@ singing, quiet ones as speech), so nothing here needs the downloaded asset.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -137,6 +138,27 @@ def test_utterance_profile_is_labelled_too() -> None:
     final = of_type(events, "transcript.final")[0]
     assert [e["class"] for e in labels] == ["speech"]
     assert final["audio_class"] == "speech"
+
+
+class SlowYamnet(FakeYamnet):
+    def scores(self, waveform: Any) -> Any:
+        time.sleep(0.15)
+        return super().scores(waveform)
+
+
+def test_final_waits_for_a_label_the_slow_model_has_not_produced_yet() -> None:
+    client = build_client(FakeSupervisor(), singing_runtime=fake_singing_runtime(SlowYamnet()))
+    with client as http, http.websocket_connect("/v1/stream", headers=AUTH) as socket:
+        socket.receive_json()
+        socket.send_json(START)
+        socket.receive_json()
+        seq = send_audio(socket, 40)  # 4 s, committed at once; the fake ASR is instant
+        socket.send_json({"type": "audio.commit", "request_id": "c1", "through_seq": seq - 1})
+        events = drain_until(socket, "transcript.final")
+    final = of_type(events, "transcript.final")[0]
+    labels = of_type(events, "segment.audio_class")
+    assert final["audio_class"] == "speech"
+    assert labels and events.index(labels[0]) < events.index(final)
 
 
 @pytest.mark.parametrize("with_runtime", [True, False])

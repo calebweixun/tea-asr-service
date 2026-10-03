@@ -139,6 +139,21 @@ def test_backlog_is_scored_in_bounded_batches() -> None:
     run(scenario)
 
 
+def test_a_backlog_drains_without_further_audio() -> None:
+    """The slot is freed after each call, so queued frames are not stranded."""
+
+    async def scenario() -> None:
+        session, failures, _, runtime = make()
+        end = feed(session, LOUD, 20.0)  # no await: everything queues behind one call
+        await asyncio.sleep(0.5)  # no more pushes and no settle(): it must drain itself
+        assert not failures
+        assert session.tracker.frames_seen == 1 + (end - PATCH_SAMPLES) // HOP_SAMPLES
+        await session.close()
+        runtime.close()
+
+    run(scenario)
+
+
 def test_overflowing_the_backlog_stops_labelling_instead_of_skipping_frames() -> None:
     async def scenario() -> None:
         session, failures, _, runtime = make()

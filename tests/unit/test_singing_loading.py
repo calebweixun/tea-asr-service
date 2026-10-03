@@ -57,3 +57,25 @@ def test_verified_asset_builds_a_runtime(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert runtime is not None
     assert runtime.model.path == model  # type: ignore[attr-defined]
     runtime.close()
+
+
+def test_class_map_hash_is_verified_too(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import hashlib
+
+    from tea_asr import yamnet
+
+    model = tmp_path / "yamnet.onnx"
+    model.write_bytes(b"model")
+    classes = _class_map(tmp_path / "c.csv")  # not the pinned class map
+    monkeypatch.setattr(yamnet, "YAMNET_SHA256", hashlib.sha256(b"model").hexdigest())
+    monkeypatch.setattr(app_module, "locate_yamnet", lambda: (model, classes))
+
+    loaded: list[Path] = []
+
+    class StubModel:
+        def __init__(self, path: Path, *, expected_sha256: str | None = None) -> None:
+            loaded.append(path)
+
+    monkeypatch.setattr(app_module, "YamnetModel", StubModel)
+    assert app_module._load_singing(ServiceConfig()) is None
+    assert loaded == []  # an unverified asset is never handed to onnxruntime

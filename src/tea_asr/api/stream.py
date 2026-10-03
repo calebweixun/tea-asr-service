@@ -768,7 +768,6 @@ class StreamSession:
     def _enqueue(self, segment: Segment, pcm: bytes, end_sample: int, boundary: str) -> None:
         segment.terminal = True
         segment.end_sample = end_sample
-        self._poll_singing()
         self._diag.segment_closed(
             segment_index=segment.index,
             start_sample=segment.start_sample,
