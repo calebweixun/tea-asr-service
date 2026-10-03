@@ -30,6 +30,16 @@
 
 Apple Speech提供中間結果開關；這支持中間稿／終稿的介面區分，不能據此推論系統聽寫的內部校對流程。[shouldReportPartialResults](https://developer.apple.com/documentation/speech/sfspeechrecognitionrequest/shouldreportpartialresults)
 
+## 前一段尾音補句首（final-only carry，2026-10-03）
+
+speakers 語料中有數段模型只回出 segment 後半句的案例；同一音訊多給前後文的離線解碼曾找回漏掉的句首，但也帶入鄰段文字。因此只在 final 解碼時，把目前 segment 起點前最多 `carry_context_s` 秒送入模型，再從新文字開頭去掉屬於前一 final 的尾端重疊。segment sample 時間與 `audio_ms` 維持原切段範圍。
+
+設定在 `[service]`：`carry_context_s` 範圍 0–5 秒、預設 **0（關閉）**；`carry_context_max_gap_s` 範圍 0–30 秒、預設 **1.5**。環境變數分別為 `TEA_ASR_CARRY_CONTEXT_S` 與 `TEA_ASR_CARRY_CONTEXT_MAX_GAP_S`。只有緊接的前一段有成功 final，且從該段 `end_sample` 到新段 `start_sample` 的間隔不超過 max gap，才帶音訊及文字上下文。答案集相鄰項目間隔統計：speakers 39 個轉段中 35 個在 1.5 秒內、39 個在 5 秒內；music-8900 的 20 個轉段中 15 個在 1.5 秒內、18 個在 5 秒內。這只量到答案項目的時間間隔，不代表 live segmenter 的分布。
+
+去重使用共用的 `strip_carried_overlap()`：NFKC 寬度折疊與 casefold 後忽略標點／空白，對前一 final 的尾端與新辨識開頭做有界編輯距離比對，至少 4 個正規化字元，最多約每 4 字 1 個編輯差異。移除時用來源索引切原始文字，保留新句拼法及標點。成功去重只修改 final `text`，加 `carry_overlap_stripped`；找不到可信重疊或只剩空白時，改用 segment 音訊重跑一次，並加 `carry_overlap_uncertain`。這時重跑 segment-only 會沿用原辨識路徑，降低把鄰段內容重複顯示的風險；重跑比單次 segment 辨識多一次推論成本，重疊成立時成本是額外 L 秒左音訊。
+
+只讓 final 使用 carry。preview 每次重辨識都加 L 秒會把額外成本乘上預覽次數；preview 仍只代表自己的 segment，stable 仍從這些 preview 衍生，final 收尾照既有 tracker 規則維持 append-only。真實模型 CER／bootstrap CI 與 duplication count 由本機 `.soak/gold/run-carry-eval.sh` 對 speakers、music-8900 測量。在這些結果通過 docs/06 的品質門檻前，`carry_context_s` 維持預設 0。
+
 ## 可修訂的文字單位
 
 每段文字有固定 `segment_id` 與 `segment_index`，從第一次預覽到final都不改ID。`revision`單調增加；每次partial包含**完整替換文字**，不用token append或字元位置patch。如此避免繁體字、emoji、UTF-16與grapheme offset跨client不一致。

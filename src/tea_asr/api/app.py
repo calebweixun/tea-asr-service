@@ -28,6 +28,7 @@ from tea_asr.config import (
     AppPaths,
     ServiceConfig,
     TokenAuthenticator,
+    validate_carry_context_or_raise,
     validate_debug_capture_or_raise,
     validate_preview_cadence_or_raise,
     validate_translation_or_raise,
@@ -270,6 +271,7 @@ def create_app(
     #: Opt-in, separate translation provider (docs/06 #2). `None` when off,
     #: which leaves every ASR code path exactly as it was.
     validate_translation_or_raise(settings)
+    validate_carry_context_or_raise(settings)
     validate_preview_cadence_or_raise(settings)
     validate_debug_capture_or_raise(settings)
     #: Opt-in rolling WAV capture of every stream (`debug_capture_audio`),

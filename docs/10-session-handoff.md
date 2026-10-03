@@ -12,7 +12,7 @@
 
 | 元件 | 狀態 |
 |---|---|
-| Server（`src/tea_asr/`） | P0–P3、P2a 完成並實測；recognition hints 預設關閉，deterministic replacements 審閱後建議使用，model prompt experimental 且預設關閉。483 個測試通過（`pytest tests/unit tests/integration -q`，2026-09-28） |
+| Server（`src/tea_asr/`） | P0–P3、P2a 完成並實測；recognition hints 預設關閉，deterministic replacements 審閱後建議使用，model prompt experimental 且預設關閉。518 個測試通過（`pytest tests/unit tests/integration -q`，2026-10-03；fallback venv Python） |
 | Mac client（`clients/macos/`） | 可用：聽寫、會議記錄、選單列狀態、服務啟停。P5a 的收音裝置／聲道、可設定快捷鍵／PTT、feedback、non-activating overlay 與 deterministic 後處理都已實作。主視窗已做過一輪原生 macOS 設計整理（拿掉每頁大標與描邊卡片、設定頁走 NSGridView、間距收斂成 Metrics 常數），右欄改為 build-once + update 閉包、不再每次狀態更新重建整欄，側欄固定寬度不可收折。「權限」已併入「診斷與權限」頁；macOS 26 起的「裝置控制和資料取用」改名已依 runtime 版本處理。輸入裝置改為嚴格依 UID 路由並 read-back 驗證，附獨立於 session 的電平監看元件。`swift build` 無 warning、93 個 client 測試通過。**仍待實機驗收**：overlay 焦點、跨 app key-up、熱鍵衝突、實際收音品質。P5b 尚未開始 |
 | OBS 外掛（`calebweixun/tea-live-subtitle`，本機 `~/Codes/obs-plugins/tea-live-subtitle`） | **2026-09-25 可接目前的 server 提供 live subtitle。** 相容性修正（tea-live-subtitle#1）：帶 token 的 preflight、退避上限且每來源每 60 秒最多 2 次認證失敗（低於 server 的 10 次門檻）、server 重啟後會重連；原版 partial 永遠不出現、token 錯 5 秒自鎖、重啟後不再重連，e2e 僅 1/11。穩定字幕（tea-live-subtitle#2）：使用 server 的 `transcript.stable`，預設開啟，畫面只增不改，斷線凍結 10 秒。e2e 17/17、CI 三平台建置通過。**尚未在真實 OBS 裡實機驗收**；本機 Xcode 27 的 `cmake --preset macos` 無法 configure，正式 bundle 請用 CI artifact。設定標籤仍是英文 fallback |
 | 穩定字幕流（server） | `transcript.stable`（opt-in，LocalAgreement-2）：只增不改，鎖定延遲 p95 1.70 s，字幕準確度與 final 無顯著差異。現況 partial 有 78.8% 會改掉已顯示的字。見 `docs/benchmarks/stable-prefix-report.md` |
@@ -21,6 +21,7 @@
 | 預覽節奏（server） | **2026-09-27**：預設 300 ms 新音訊／300 ms 間隔（原 800／800），加負載保護（間隔 ≥ 2×上次預覽解碼時間）；封口時排隊中的預覽直接丟棄。可在 config.toml 調整，client 不能要求。stable 提交延遲中位數 0.87→0.10 秒、final 不變；只用拼接朗讀句量過，真實 OBS 畫面未驗收。見 `docs/benchmarks/preview-cadence-report.md` |
 | 串流診斷日誌（server） | **2026-09-27**：每條 `/v1/stream` session 寫 lifecycle、每 5 秒 heartbeat（收件、dBFS、VAD 機率、segmenter 狀態、預覽帳）與四種限流 WARNING，用來判斷「沒字幕」是斷流、太小聲還是 VAD 判定非語音。選用除錯錄音 `TEA_ASR_DEBUG_CAPTURE_AUDIO=1`（預設關閉，會落音訊）。真實模型在測試 port 驗過四種情況可區分，使用者真實 OBS 串流未驗證。見 docs/04「W11」 |
 | Worker IPC 同步（server） | **2026-09-28**：修正 session 在預覽推論中途關閉後整個 worker 永久回 `invalid_ipc` 的 bug（被取消的 caller 留下未讀 response）。一次寫入＋讀回現在不受取消影響；ID 不符或 frame 壞掉時記 `worker.ipc_desync` 並重啟 worker。真實模型測試 port 驗過，使用者 OBS 重連流程未驗證 |
+| Final 左上下文 carry（server） | **2026-10-03 已實作，預設關閉**：final-only carry PCM、normalized/fuzzy overlap strip、低信心時 segment-only retry；warning 僅增加 `carry_overlap_stripped`／`carry_overlap_uncertain`。speakers 35/39、music-8900 15/20 個答案轉段間隔 ≤1.5 s。真實模型 CER、paired bootstrap CI、music guardrail 與 duplication count 待本機 `.soak/gold/run-carry-eval.sh` 執行；通過前不可改預設 |
 | Real-audio live-subtitle soak | **2026-09-28 已實作**：extract/capture/analyze/replay/report 與 replay regression 已加入；synthetic trace 離線流程通過。既有 church trace 已重分類（300 ms plugin/model/speech=1/1/7；600 ms=1/3/7），guard 離線掃描分別 trim 4／22 個 events，其中 3／20 個 trim 單位在 final 重複出現。這不是新版 server 的即時模型驗收；live fake-server capture 因 sandbox bind `127.0.0.1:8422` 收到 `Operation not permitted`，新版本 live capture、真實模型品質與 OBS 畫面仍未驗證。執行命令見 [09 測試指南](09-testing-guide.md#六真實錄音字幕-soak) |
 | 同步翻譯 | T3PO zh→en（opt-in，預設關閉），開啟時 ASR final 延遲 p95 約多 0.2–0.3 s。見 `docs/benchmarks/t3po-eval-report.md` |
 | P4 長檔案與保存 | 未開始，`/v1/jobs` 回 404 |
