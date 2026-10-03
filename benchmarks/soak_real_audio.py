@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,9 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-SOAK_ROOT = ROOT / ".soak"
+# TEA_SOAK_ROOT lets another checkout (a worktree) keep its derived files in the shared,
+# git-excluded soak directory instead of an empty one of its own.
+SOAK_ROOT = Path(os.environ.get("TEA_SOAK_ROOT", ROOT / ".soak"))
 DEFAULT_AUDIO = Path(
     "/Users/c2leb/Downloads/【天使即將出道】FIGHT.K Cloud Church _ 20260926_128k.m4a"
 )
@@ -217,6 +220,7 @@ def capture(args: argparse.Namespace) -> int:
         out=output,
         agreement=2,
         end_silence_ms=args.end_silence,
+        context_profile=getattr(args, "context_profile", None),
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     status = asyncio.run(capture_event_trace.capture(common))
@@ -718,6 +722,7 @@ def main() -> int:
     cap.add_argument("--end-silence", "--end-silence-ms", dest="end_silence", type=int, default=600)
     cap.add_argument("--server-log", type=Path)
     cap.add_argument("--manifest", type=Path)
+    cap.add_argument("--context-profile", help="server dictionary name to request")
     cap.add_argument("--out", type=Path, required=True)
     cap.set_defaults(handler=capture)
 

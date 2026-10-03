@@ -163,6 +163,9 @@ async def capture(args: argparse.Namespace) -> int:
     }
     if args.end_silence_ms is not None:
         start["segmentation"] = {"end_silence_ms": args.end_silence_ms}
+    if getattr(args, "context_profile", None):
+        # What the OBS plugin sends for its "hints_profile" setting.
+        start["context"] = {"profile": args.context_profile}
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     wall_t0_epoch_s = time.time()
@@ -437,6 +440,10 @@ def main() -> int:
     token.add_argument("--token-file", type=Path)
     cap.add_argument("--end-silence-ms", type=int, default=None, help="omit to use the default")
     cap.add_argument("--agreement", type=int, default=2)
+    cap.add_argument(
+        "--context-profile",
+        help="server dictionary name sent as session.start.context.profile (server needs hints on)",
+    )
     cap.add_argument("--out", type=Path, required=True)
 
     summary = commands.add_parser("summarize")
