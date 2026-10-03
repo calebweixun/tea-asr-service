@@ -35,6 +35,8 @@ from tea_asr.rate_limit import AuthRateLimiter
 from tea_asr.repetition import TrimmedRepetition, trim_repetitions
 from tea_asr.scheduler import StaleTaskDropped
 from tea_asr.segmenter import ContinuousSegmenter, SegmentClosed, SegmenterConfig, SpeechStarted
+from tea_asr.singing import AudioClassDecision, SegmentLabeler
+from tea_asr.singing_session import SessionSinging, SingingRuntime
 from tea_asr.stable import StablePrefixTracker, StableUpdate
 from tea_asr.translation.session import SessionTranslator
 from tea_asr.vad import SileroVad
@@ -54,6 +56,7 @@ from tea_asr.wire import (
     Pong,
     PreviewPolicy,
     PreviewStatus,
+    SegmentAudioClass,
     SegmentError,
     SegmentQueued,
     SegmentSkipped,
@@ -305,6 +308,12 @@ class Segment:
     system_prompt: str | None = None
     context_domain: str | None = None
     replacements: tuple[ReplacementRule, ...] = ()
+    #: Singing/speech label (docs/04 `segment.audio_class`); `None` when the
+    #: feature is off, unavailable or has not decided yet.
+    labeler: SegmentLabeler | None = None
+    audio_class: str | None = None
+    #: Set when the segment closes; the labeler then finishes at this sample.
+    end_sample: int | None = None
     #: A bounded snapshot immediately before `start_sample`, captured for a
     #: possible final-only carry after the preceding segment is finalized.
     carry_pcm: bytes = b""
@@ -399,6 +408,7 @@ class StreamSession:
         translation: StreamTranslationProvider | None = None,
         capture_root: Path | None = None,
         dictionaries: ContextDictionaryStore | None = None,
+        singing: SingingRuntime | None = None,
     ) -> None:
         self._websocket = websocket
         self._scheduler = scheduler
@@ -413,6 +423,16 @@ class StreamSession:
         self._continuous_admission = continuous_admission
         self._continuous_reserved = False
         self._state = SessionState()
+        self._singing_counts = {"speech": 0, "singing": 0}
+        #: Segments whose singing label is still undecided or unrevised.
+        self._labeling: list[Segment] = []
+        self._singing: SessionSinging | None = (
+            SessionSinging(
+                singing, on_frames=self._poll_singing, on_failure=self._singing_failed
+            )
+            if singing is not None
+            else None
+        )
         self._writer = EventWriter(websocket, self._state.session_id)
         self._profile = "utterance"
         self._transcript_mode = "final_only"
@@ -676,6 +696,9 @@ class StreamSession:
         )
         if self._stable_agreement is not None:
             segment.stable = StablePrefixTracker(self._stable_agreement)
+        if self._singing is not None and self._singing.failed is None:
+            segment.labeler = SegmentLabeler(self._singing.tracker, start_sample)
+            self._labeling.append(segment)
         self._state.next_index += 1
         self._state.segment = segment
         self._diag.speech_started(
@@ -683,8 +706,68 @@ class StreamSession:
         )
         return segment
 
+    def _singing_failed(self, reason: str) -> None:
+        """The labeller stopped; transcription is unaffected."""
+
+        log_event(logger, "singing.disabled", session_id=self._state.session_id, reason=reason)
+        self._labeling.clear()
+
+    def _poll_singing(self) -> None:
+        """Emit any label that has become due; called when audio or frames advance."""
+
+        singing = self._singing
+        if singing is None or singing.failed is not None:
+            return
+        if singing.tracker.last_score is not None:
+            self._diag.singing_score = singing.tracker.last_score
+        sample = self._state.next_sample
+        for segment in list(self._labeling):
+            labeler = segment.labeler
+            if labeler is None:
+                self._labeling.remove(segment)
+                continue
+            if segment.end_sample is None:
+                decision = labeler.update(sample)
+            else:
+                decision = labeler.update(segment.end_sample, closing=True)
+            if decision is not None:
+                self._emit_audio_class(segment, decision)
+            if labeler.finished:
+                self._labeling.remove(segment)
+
+    def _emit_audio_class(self, segment: Segment, decision: AudioClassDecision) -> None:
+        if segment.audio_class is not None:
+            self._singing_counts[segment.audio_class] -= 1
+        segment.audio_class = decision.audio_class
+        self._singing_counts[decision.audio_class] += 1
+        self._writer.emit(
+            SegmentAudioClass(
+                session_id=self._state.session_id,
+                event_id=0,
+                segment_id=segment.segment_id,
+                segment_index=segment.index,
+                class_=decision.audio_class,
+                confidence=decision.confidence,
+                revision=decision.revision,
+            )
+        )
+        self._diag.audio_class(**self._singing_counts)
+
+    async def _finish_audio_class(self, segment: Segment) -> None:
+        """Settle the label before the final goes out, so the final carries it."""
+
+        if segment.labeler is None or self._singing is None:
+            return
+        await self._singing.settle()
+        self._poll_singing()
+        # Whatever is still undecided (labeller failed) stays unlabelled.
+        segment.labeler = None
+        if segment in self._labeling:
+            self._labeling.remove(segment)
+
     def _enqueue(self, segment: Segment, pcm: bytes, end_sample: int, boundary: str) -> None:
         segment.terminal = True
+        segment.end_sample = end_sample
         self._diag.segment_closed(
             segment_index=segment.index,
             start_sample=segment.start_sample,
@@ -967,6 +1050,9 @@ class StreamSession:
             warnings.append("replacements_applied")
         if contains_context_echo(raw_text, segment.context_domain):
             warnings.append("context_echo")
+        await self._finish_audio_class(segment)
+        if state.cancelled:
+            return
         self._writer.emit(
             TranscriptFinal(
                 session_id=state.session_id,
@@ -982,6 +1068,7 @@ class StreamSession:
                 queue_ms=queue_ms,
                 inference_ms=inference_ms,
                 warnings=warnings,
+                audio_class=segment.audio_class,
             )
         )
         stable_state: str | None = None
@@ -1054,6 +1141,8 @@ class StreamSession:
         if end_sample > state.send_until_sample:
             raise ApiError("protocol_error", "Frame 超出 flow-control 窗口。")
         self._diag.on_frame(pcm)
+        if self._singing is not None:
+            self._singing.push(start_sample, pcm)
         if self._capture is not None:
             self._capture.write(start_sample, pcm)
         # The ring is bounded to the configured left-context window plus the
@@ -1071,6 +1160,7 @@ class StreamSession:
 
         state.next_seq += 1
         state.next_sample = end_sample
+        self._poll_singing()
         self._writer.emit(
             AudioAck(
                 session_id=state.session_id,
@@ -1600,6 +1690,7 @@ class StreamSession:
             "seg_state": self._segmenter.state if self._segmenter is not None else None,
             "segment_open": segment is not None and not segment.terminal,
             "pending_segments": self._pending.qsize(),
+            "singing_score": self._diag.singing_score,
         }
 
     async def _diagnostics_loop(self) -> None:
@@ -1778,6 +1869,8 @@ class StreamSession:
         ]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if self._singing is not None:
+            await self._singing.close()
         capture, self._capture = self._capture, None
         if capture is not None:
             await asyncio.to_thread(capture.close)
@@ -1878,6 +1971,7 @@ async def run_stream(
     translation: StreamTranslationProvider | None = None,
     capture_root: Path | None = None,
     dictionaries: ContextDictionaryStore | None = None,
+    singing: SingingRuntime | None = None,
 ) -> None:
     """Authenticate and admit one `/v1/stream` connection.
 
@@ -1965,6 +2059,7 @@ async def run_stream(
         translation=translation,
         capture_root=capture_root,
         dictionaries=dictionaries,
+        singing=singing,
     )
     if registry is not None:
         registry.add(session)

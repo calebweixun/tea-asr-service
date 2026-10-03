@@ -3,9 +3,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from tea_asr.api.events import EventWriter
 from tea_asr.wire import (
     ClientEnvelope,
+    SegmentAudioClass,
+    ServerEnvelope,
     SessionStart,
+    TranscriptFinal,
     is_trusted_lan_address,
     make_host_allowlist,
     make_origin_allowlist,
@@ -59,8 +63,56 @@ def test_unsupported_audio_format_is_rejected() -> None:
 
 def test_schema_covers_every_wire_event() -> None:
     models = ws_event_schema()["$defs"]["models"]
-    for name in ("AudioAck", "SegmentSkipped", "SegmentError", "TranscriptPartial", "Pong"):
+    for name in (
+        "AudioAck",
+        "SegmentAudioClass",
+        "SegmentSkipped",
+        "SegmentError",
+        "TranscriptPartial",
+        "Pong",
+    ):
         assert name in models
+    assert "class" in models["SegmentAudioClass"]["properties"]
+    assert models["SegmentAudioClass"]["properties"]["revision"]["maximum"] == 1
+    assert "audio_class" in models["TranscriptFinal"]["properties"]
+
+
+def test_audio_class_event_uses_wire_alias_and_accepts_server_envelope() -> None:
+    event = SegmentAudioClass(
+        session_id="s",
+        event_id=0,
+        segment_id="seg",
+        segment_index=2,
+        class_="singing",
+        confidence=0.995,
+        revision=0,
+    )
+    writer = EventWriter(None, "s")  # producer-side serialization needs no socket
+    writer.emit(event)
+    assert writer._queue[0]["class"] == "singing"
+    assert "class_" not in writer._queue[0]
+    envelope = ServerEnvelope.model_validate(
+        {"event": {**writer._queue[0], "session_id": "s", "event_id": 0}}
+    )
+    assert isinstance(envelope.event, SegmentAudioClass)
+
+
+def test_transcript_final_audio_class_is_optional() -> None:
+    payload = TranscriptFinal(
+        session_id="s",
+        event_id=0,
+        segment_id="seg",
+        segment_index=0,
+        revision=1,
+        start_sample=0,
+        end_sample=16000,
+        text="text",
+        raw_text="text",
+        audio_ms=1000,
+        queue_ms=0,
+        inference_ms=1,
+    )
+    assert payload.audio_class is None
 
 
 # --- W9: LAN/Tailscale host & origin allowlists ------------------------------

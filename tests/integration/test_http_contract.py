@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tea_asr.worker.supervisor import WorkerError
-from tests.conftest import AUTH, FakeSupervisor, build_client
+from tests.conftest import AUTH, FakeSupervisor, build_client, fake_singing_runtime
 
 TRANSCRIBE = "/v1/transcriptions?sample_rate=16000&channels=1&format=pcm_s16le"
 
@@ -67,6 +67,17 @@ def test_capabilities_declare_1_1_only_when_preview_is_enabled(
         body = http.get("/v1/capabilities", headers=AUTH).json()
         assert body["protocol_version"] == "1.1"
         assert body["features"]["partial_transcripts"] is True
+
+
+def test_singing_detection_capability_requires_a_loaded_model() -> None:
+    # Constraint 6: advertised only when the runtime is really there. The
+    # default config enables the feature, but without the asset it is absent.
+    with build_client(FakeSupervisor()) as http:
+        absent = http.get("/v1/capabilities", headers=AUTH).json()
+    with build_client(FakeSupervisor(), singing_runtime=fake_singing_runtime()) as http:
+        present = http.get("/v1/capabilities", headers=AUTH).json()
+    assert "singing_detection" not in absent["features"]
+    assert present["features"]["singing_detection"] is True
 
 
 def test_transcription_contract(client: TestClient) -> None:

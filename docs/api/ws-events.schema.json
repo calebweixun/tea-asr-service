@@ -600,6 +600,66 @@
         "title": "PreviewStatus",
         "type": "object"
       },
+      "SegmentAudioClass": {
+        "additionalProperties": false,
+        "properties": {
+          "class": {
+            "enum": [
+              "speech",
+              "singing"
+            ],
+            "title": "Class",
+            "type": "string"
+          },
+          "confidence": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "revision": {
+            "maximum": 1,
+            "minimum": 0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "segment_id": {
+            "title": "Segment Id",
+            "type": "string"
+          },
+          "segment_index": {
+            "title": "Segment Index",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "segment.audio_class",
+            "default": "segment.audio_class",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "segment_id",
+          "segment_index",
+          "class",
+          "confidence",
+          "revision"
+        ],
+        "title": "SegmentAudioClass",
+        "type": "object"
+      },
       "SegmentError": {
         "additionalProperties": false,
         "properties": {
@@ -1162,6 +1222,22 @@
       "TranscriptFinal": {
         "additionalProperties": false,
         "properties": {
+          "audio_class": {
+            "anyOf": [
+              {
+                "enum": [
+                  "speech",
+                  "singing"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Audio Class"
+          },
           "audio_ms": {
             "title": "Audio Ms",
             "type": "integer"
@@ -1621,6 +1697,7 @@
           "flow.control": "#/$defs/models/FlowControl",
           "pong": "#/$defs/models/Pong",
           "preview.status": "#/$defs/models/PreviewStatus",
+          "segment.audio_class": "#/$defs/models/SegmentAudioClass",
           "segment.error": "#/$defs/models/SegmentError",
           "segment.queued": "#/$defs/models/SegmentQueued",
           "segment.skipped": "#/$defs/models/SegmentSkipped",
@@ -1652,6 +1729,9 @@
         },
         {
           "$ref": "#/$defs/models/SegmentQueued"
+        },
+        {
+          "$ref": "#/$defs/models/SegmentAudioClass"
         },
         {
           "$ref": "#/$defs/models/TranscriptPartial"

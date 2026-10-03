@@ -249,6 +249,10 @@ class CapabilityFeatures(ServerModel):
     hotwords: bool = False
     context_biasing: bool = False
     context_limits: ContextLimits | None = None
+    #: `segment.audio_class` labels from the YAMNet classifier. Advertised only
+    #: when the pinned model really loaded (docs/06 constraint 6); `None` is
+    #: left out of the response, so a server without it shows nothing.
+    singing_detection: bool | None = None
     #: Opt-in append-only `transcript.stable` (docs/07「只增不改的穩定前綴」).
     #: Derived from revisable partials, so it is only offered with them. `None`
     #: is left out of the response (exclude_none), so a server without
@@ -574,6 +578,18 @@ class TranscriptFinal(SessionEvent):
     queue_ms: int
     inference_ms: int
     warnings: list[str] = Field(default_factory=list)
+    audio_class: Literal["speech", "singing"] | None = None
+
+
+class SegmentAudioClass(SessionEvent):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    type: Literal["segment.audio_class"] = "segment.audio_class"
+    segment_id: str
+    segment_index: int
+    class_: Literal["speech", "singing"] = Field(alias="class")
+    confidence: float = Field(ge=0.0, le=1.0)
+    revision: int = Field(ge=0, le=1)
 
 
 StableState = Literal["open", "final", "diverged", "abandoned"]
@@ -707,6 +723,7 @@ ServerEvent = Annotated[
     | SpeechStarted
     | AudioCommitted
     | SegmentQueued
+    | SegmentAudioClass
     | TranscriptPartial
     | TranscriptFinal
     | TranscriptStable

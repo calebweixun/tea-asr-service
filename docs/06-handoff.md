@@ -3,6 +3,8 @@
 > 原始交付為文件。**2026-09-19更新：** P0–P3與P2a已完成並實測；P2一小時soak與N=1..4併發容量測試已完成，進度表見 [README](../README.md#實作進度)。
 > 以下各階段的完成條件仍然有效，勾選狀態寫在每節開頭。
 
+**2026-10-03 singing detection 狀態：** 改用 YAMNet（ONNX、Apache-2.0，釘版於 `models.lock.json`，`tea-asr model-prepare` 下載）；`singing.py`（特徵、logistic、session 遲滯、片段決策）與 `singing_session.py`（背景 executor，不阻塞收音）取代先前失敗的 DSP heuristic。`segment.audio_class` 與 `transcript.final.audio_class` 預設開啟，但只有 YAMNet 資產載入且 hash 符合時才送事件與宣告 `features.singing_detection`（約束 6）。Held-out 留一檔：speech 視窗誤判 0.0%（兩組 speech）、歌唱片段首判 83.1%／最終 94.9%、29 分鐘講道 0 誤判、首判 1.5 秒，達成目標；證據只有 3 首同一樂團的歌、1 段背景音樂下講話與 1 場講道，**真實 OBS 與其他敬拜團／場地未驗證**，詳見 [評估報告](benchmarks/singing-eval-report.md)。實作完成與實機驗收分開記錄：後者尚待使用者在真實 OBS 上確認。
+
 ## 開發方式
 
 採單一repo、Python package、逐階段垂直切片。每個階段都交付可重現結果，前一個關卡沒通過就不要把後續功能當成完成。使用專案的codebase-memory-mcp做程式探索；尚無程式時不需要硬建空索引，有程式後建立／更新索引。
