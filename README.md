@@ -2,7 +2,7 @@
 
 在 Apple Silicon Mac 上運行的本機語音辨識服務，讓輸入工具、字幕工具、OBS 與會議紀錄共用一份模型。
 
-**目前狀態：P0–P3與P2a已完成並實測，Mac選單列client可用。** 指定模型已在M4 Pro真實載入與推論。私用區字元的成因已定位在MLX量化本身（上游BF16為0%），服務端預設過濾，見 [PUA A/B報告](docs/benchmarks/pua-bf16-ab-report.md)。Silero VAD已接上並用真實口語校準，串流預覽通過驗收且預設開啟。
+**目前狀態：P0–P3與P2a已完成並實測，Mac選單列client可用。** 指定模型已在M4 Pro真實載入與推論。私用區字元的成因已定位在MLX量化本身（上游BF16為0%），服務端預設過濾，見 [PUA A/B報告](docs/benchmarks/pua-bf16-ab-report.md)。Silero VAD已接上並用真實口語校準，串流預覽通過驗收且預設開啟。Final 左上下文 carry 已實作但預設關閉，等待 speakers／music-8900 真模型品質驗收。
 
 ## 先看這裡
 
@@ -70,6 +70,8 @@ uv run tea-asr service uninstall
 port = 8327
 idle_unload_s = 900   # 閒置這麼久就卸載模型釋放記憶體；0 或 keep_warm 可關閉
 keep_warm = false
+carry_context_s = 0.0  # final 左上下文；未通過 gold 品質門檻前維持關閉
+carry_context_max_gap_s = 1.5
 ```
 
 服務啟動時會檢查 port 與 singleton lock，第二份實例會被拒絕並告訴你是誰占著。
@@ -121,6 +123,7 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 | P3 服務管理 | 完成 | LaunchAgent install/uninstall/status、singleton lock、port 檢查、idle unload 與重新載入、TOML 設定、JSON log 輪替、關閉時 drain、睡眠喚醒偵測與 worker 健康探測 |
 | Recognition hints | 已實作，預設關閉 | `TEA_ASR_CONTEXT_HINTS=1` 開啟 dictionaries、profiles 與 deterministic replacements；`GET /v1/dictionaries` 逐檔回報無效字典而保留有效項目，session start 仍拒絕無效 profile。Model prompt 需另外開啟 `TEA_ASR_CONTEXT_PROMPT=1`，且只有 hints 已開時生效；prompt 預設關閉、仍屬 experimental，prompt token 數只記 server log。4段真實講道音訊 smoke 未見改善。見 [04 API 契約](docs/04-api.md) |
 | Singing labels | 已實作，實驗性且預設關閉 | `singing_detection_enabled`／`TEA_ASR_SINGING_DETECTION=1` 才送 `segment.audio_class` 並宣告能力。留一檔驗證在 threshold 0.995 下 singing recall 0%，29 分鐘 church speech 0 次 false call，未達使用目標所以不預設啟用；仍會照常轉錄。見 [評估報告](docs/benchmarks/singing-eval-report.md) |
+| Final 左上下文 carry | 已實作，預設關閉，等待真模型評估 | Final 最多帶前段尾音 0–5 秒，去除前一 final 尾端重疊；無可信重疊時重跑 segment-only。preview 不帶 carry。答案間隔統計及評估方式見 [07](docs/07-contextual-streaming.md)；品質門檻未通過前不可開啟 |
 | P4 長檔案與保存 | 未開始 | `/v1/jobs` 不存在，回404 |
 | P5a Mac client | 可用，未完整驗收 | 選單列 app：聽寫（定稿後貼進前景 app）與會議記錄（即時視窗＋Markdown 匯出），見 [clients/macos](clients/macos/)。P5b 輸入法組字區整合未做 |
 

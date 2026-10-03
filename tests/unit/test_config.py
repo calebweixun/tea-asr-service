@@ -12,6 +12,7 @@ from tea_asr.config import (
     revoke_token,
     rotate_token,
     validate_bind_or_raise,
+    validate_carry_context_or_raise,
 )
 
 
@@ -36,6 +37,8 @@ def test_defaults_match_what_has_been_accepted() -> None:
     assert config.max_continuous_sessions == 2
     assert config.context_hints_enabled is False
     assert config.singing_detection_enabled is False
+    assert config.carry_context_s == 0.0
+    assert config.carry_context_max_gap_s == 1.5
 
 
 @pytest.mark.parametrize(("value", "enabled"), [("1", True), ("0", False), ("false", False)])
@@ -86,6 +89,42 @@ def test_repetition_limits_are_configurable_with_environment_variables() -> None
 
     assert config.repetition_single_char_limit == 2
     assert config.repetition_multi_char_limit == 4
+
+
+def test_carry_context_is_configurable_from_environment_and_file(tmp_path: Path) -> None:
+    env_config = ServiceConfig.load(
+        env={
+            "TEA_ASR_CARRY_CONTEXT_S": "2",
+            "TEA_ASR_CARRY_CONTEXT_MAX_GAP_S": "5",
+        }
+    )
+    assert env_config.carry_context_s == 2.0
+    assert env_config.carry_context_max_gap_s == 5.0
+
+    paths = app_paths(tmp_path)
+    paths.support.mkdir(parents=True)
+    paths.config_file.write_text(
+        "[service]\ncarry_context_s = 3.0\ncarry_context_max_gap_s = 1.5\n"
+    )
+    file_config = ServiceConfig.load(paths, env={})
+    assert file_config.carry_context_s == 3.0
+    assert file_config.carry_context_max_gap_s == 1.5
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        ServiceConfig(carry_context_s=-0.1),
+        ServiceConfig(carry_context_s=5.1),
+        ServiceConfig(carry_context_s=float("nan")),
+        ServiceConfig(carry_context_max_gap_s=-0.1),
+        ServiceConfig(carry_context_max_gap_s=30.1),
+        ServiceConfig(carry_context_max_gap_s=float("inf")),
+    ],
+)
+def test_carry_context_outside_bounds_is_rejected(config: ServiceConfig) -> None:
+    with pytest.raises(RuntimeError, match="carry_context"):
+        validate_carry_context_or_raise(config)
 
 
 def test_pua_filter_environment_wins_over_the_file(tmp_path: Path) -> None:

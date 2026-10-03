@@ -87,6 +87,46 @@ def test_parse_args_accepts_span_padding_and_requires_dictionary_for_prompt() ->
         )
 
 
+def test_parse_args_validates_carry_mode_arguments() -> None:
+    args = gold_offline_eval.parse_args(
+        [
+            "--answers",
+            "answers.json",
+            "--wav",
+            "audio.wav",
+            "--model-path",
+            "model",
+            "--mode",
+            "carry",
+            "--carry-s",
+            "2",
+            "--carry-max-gap-s",
+            "1.5",
+        ]
+    )
+    assert args.mode == "carry"
+    assert args.carry_s == 2
+    assert args.carry_max_gap_s == 1.5
+
+    with pytest.raises(SystemExit):
+        gold_offline_eval.parse_args(
+            [
+                "--answers",
+                "answers.json",
+                "--wav",
+                "audio.wav",
+                "--model-path",
+                "model",
+                "--mode",
+                "carry",
+                "--carry-s",
+                "6",
+                "--carry-max-gap-s",
+                "1.5",
+            ]
+        )
+
+
 def test_main_uses_mock_backend_context_filters_and_writes_timings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -183,3 +223,73 @@ def test_segment_mode_keeps_the_exact_item_span() -> None:
         samples, {"id": "one", "start_s": 1, "end_s": 2}, mode="segment", pad_s=0
     )
     assert audio.size == 16_000
+
+
+def test_carry_mode_matches_server_audio_and_shared_overlap_stripping(
+    tmp_path: Path,
+) -> None:
+    answers = tmp_path / "answers.json"
+    wav_path = tmp_path / "audio.wav"
+    _write_answers(answers)
+    _write_wav(wav_path)
+    document = json.loads(answers.read_text(encoding="utf-8"))
+    document["items"][1].update(start_s=2.5, end_s=3.5, reference="新句")
+    answers.write_text(json.dumps(document), encoding="utf-8")
+    calls: list[int] = []
+
+    class FakeBackend:
+        def __init__(self, model_path: Path) -> None:
+            pass
+
+        def load(self) -> None:
+            return None
+
+        def transcribe(self, audio, *, system_prompt=None):
+            calls.append(audio.size)
+            text = "前一段共同短語" if audio.size == 16_000 else "共同短語，新句"
+            return SimpleNamespace(text=text, total_time_s=0.1)
+
+        def close(self) -> None:
+            return None
+
+    args = gold_offline_eval.parse_args(
+        [
+            "--answers",
+            str(answers),
+            "--wav",
+            str(wav_path),
+            "--model-path",
+            str(tmp_path / "model"),
+            "--mode",
+            "carry",
+            "--carry-s",
+            "0.5",
+            "--carry-max-gap-s",
+            "1.5",
+        ]
+    )
+    output, timings = gold_offline_eval.run_evaluation(args, backend_factory=FakeBackend)
+
+    assert calls == [16_000, 24_000]
+    assert output == {"first": "前一段共同短語", "second": "新句"}
+    assert timings["second"]["carry_used"] is True
+    assert timings["second"]["carry_audio_s"] == 0.5
+    assert timings["second"]["decode_attempts"] == 1
+    assert timings["second"]["overlap_chars"] == 4
+
+
+def test_duplicate_prefix_count_requires_four_chars_and_reference_absence() -> None:
+    answers = {
+        "items": [
+            {"id": "first", "reference": "舊段"},
+            {"id": "duplicate", "reference": "新內容"},
+            {"id": "legitimate", "reference": "重複短語後文"},
+        ]
+    }
+    hypothesis = {
+        "first": "舊段重複短語",
+        "duplicate": "重複短語新內容",
+        "legitimate": "重複短語後文",
+    }
+
+    assert gold_offline_eval.count_duplicate_prefix_items(answers, hypothesis) == 1

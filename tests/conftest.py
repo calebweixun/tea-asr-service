@@ -96,6 +96,8 @@ def build_client(
     context_hints_enabled: bool = False,
     context_prompt_enabled: bool = False,
     singing_detection_enabled: bool = False,
+    carry_context_s: float = _DEFAULTS.carry_context_s,
+    carry_context_max_gap_s: float = _DEFAULTS.carry_context_max_gap_s,
 ) -> TestClient:
     app = create_app(
         Path("unused"),
@@ -116,6 +118,8 @@ def build_client(
             context_hints_enabled=context_hints_enabled,
             context_prompt_enabled=context_prompt_enabled,
             singing_detection_enabled=singing_detection_enabled,
+            carry_context_s=carry_context_s,
+            carry_context_max_gap_s=carry_context_max_gap_s,
         ),
         vad_model=vad,
         rate_limiter=rate_limiter,

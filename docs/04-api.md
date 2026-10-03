@@ -40,7 +40,7 @@
 - IDs 為 server UUID 字串；client `request_id` 為1–64字元識別碼，同一 session 不得重用於不同操作。
 - JSON 為 UTF-8；拒絕未知 client 欄位與不支援選項，不能 silently ignore。client 可忽略未知 server 欄位，但未知 event type 要記錄診斷。
 - 所有 duration/timing 欄位單位明示；`start_sample`／`end_sample` 採16kHz來源時間軸、左閉右開。
-- `audio_ms` 是送入辨識片段的樣本數／16；`queue_ms` 是等待 scheduler；`inference_ms` 是 worker 實際耗時。不得混用。
+- `audio_ms` 是 segment 原始樣本數／16，與 `start_sample`／`end_sample` 一致；啟用左上下文時不把前綴算進此欄。`queue_ms` 與 `inference_ms` 是實際辨識工作耗時；若重疊不確定而重跑，會累計兩次工作。不得混用。
 - 時間戳是 segment 範圍，不是逐字對齊。`raw_text` 保留原始辨識；`text` 預設會過濾掉
   Unicode 全部私用區字元（BMP U+E000–U+F8FF、Plane 15 U+F0000–FFFFD、Plane 16
   U+100000–10FFFD；`filter_pua` 設定／`TEA_ASR_FILTER_PUA` 可關閉），
@@ -313,6 +313,8 @@ punctuation and spaces between copies do not break the run. The defaults are con
 Units containing decimal digits, runs adjacent to decimal digits, and units containing CJK numerals are preserved. ASCII-letter units are shortened only when no ASCII letter borders the run. This affects both `transcript.partial.text` and `transcript.final.text`. A final keeps the model result in
 `raw_text` unchanged and adds `repetition_trimmed` to `warnings` when trimming occurred. The other final warning
 tag is `private_use_characters`; the one-shot HTTP empty-speech warning is `no_speech`. These tags can coexist.
+
+**Final 左上下文（server opt-in，預設關閉）**：設定 `[service].carry_context_s`（0–5 秒，預設 0；環境變數 `TEA_ASR_CARRY_CONTEXT_S`）後，segment final 可帶入前一個成功 final 結束到目前 segment 起點之間、最多這麼長的 PCM；只在兩者間隔不超過 `[service].carry_context_max_gap_s`（0–30 秒，預設 1.5；環境變數 `TEA_ASR_CARRY_CONTEXT_MAX_GAP_S`）時使用。server 以前一 final 的文字尾端比對新辨識文字開頭，忽略 Unicode 寬度、大小寫、標點與空白，並容許約每 4 字 1 個編輯差異。辨識出明確重疊時只從 `text` 移除；`raw_text` 仍保留模型原文，並加 `carry_overlap_stripped`。沒有明確重疊時會再以 segment 原始音訊辨識一次，使用重跑結果並加 `carry_overlap_uncertain`，以避免把鄰段字詞重複送到 client。這兩個 warning 只加在 final，不新增欄位；`audio_ms`、segment sample 範圍仍只表示原片段。預覽不帶左上下文。
 
 同 session 的 segment_index 按來源順序由0遞增；final/error/skipped 依此順序交付，一個 segment 恰有一個終局事件。客戶端以 `(session_id, segment_id)` 去重，只有final可正式注入文件。v0.1不送partial；P2a的partial只更新自有預覽或有所有權的組字區，依下列契約。final之後不再改字。
 

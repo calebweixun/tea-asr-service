@@ -9,12 +9,17 @@ import sys
 import time
 import wave
 from collections.abc import Callable
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from tea_asr.api.stream import filter_private_use_characters
+from tea_asr.api.stream import (
+    filter_private_use_characters,
+    normalize_carry_text,
+    strip_carried_overlap,
+)
 from tea_asr.backend import TeaMlxBackend
 from tea_asr.context import (
     ContextDictionaryStore,
@@ -34,10 +39,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, help="write {item_id: text} JSON here")
     parser.add_argument("--timings", type=Path, help="write per-item decode timings JSON here")
     parser.add_argument(
-        "--mode", choices=("segment", "span"), default="segment", help="decode exact or padded spans"
+        "--mode",
+        choices=("segment", "span", "carry"),
+        default="segment",
+        help="decode exact spans, padded spans, or with previous-final carry-over",
     )
     parser.add_argument(
         "--pad-s", type=float, default=0.0, help="extra seconds on both sides in span mode"
+    )
+    parser.add_argument("--carry-s", type=float, help="audio seconds before each item to carry")
+    parser.add_argument(
+        "--carry-max-gap-s", type=float, help="maximum previous-item gap eligible for carry"
     )
     parser.add_argument("--dictionary", type=Path, help="context dictionary TOML")
     parser.add_argument(
@@ -53,6 +65,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--pad-s must be finite and non-negative")
     if args.mode != "span" and args.pad_s:
         parser.error("--pad-s can only be used with --mode span")
+    if args.mode == "carry":
+        if args.carry_s is None or args.carry_max_gap_s is None:
+            parser.error("--mode carry requires --carry-s and --carry-max-gap-s")
+        if (
+            not math.isfinite(args.carry_s)
+            or not 0 <= args.carry_s <= 5
+            or not math.isfinite(args.carry_max_gap_s)
+            or not 0 <= args.carry_max_gap_s <= 30
+        ):
+            parser.error("carry values must be finite; --carry-s is 0–5 and max gap is 0–30")
+    elif args.carry_s is not None or args.carry_max_gap_s is not None:
+        parser.error("--carry-s and --carry-max-gap-s can only be used with --mode carry")
     if args.prompt and args.dictionary is None:
         parser.error("--prompt requires --dictionary")
     if args.dictionary is not None and args.dictionary.suffix != ".toml":
@@ -122,11 +146,54 @@ def _item_audio(
     return samples[start:end]
 
 
+def _carry_audio(samples: np.ndarray, item: dict[str, Any], carry_s: float) -> np.ndarray:
+    start = round(float(item["start_s"]) * SAMPLE_RATE)
+    end = round(float(item["end_s"]) * SAMPLE_RATE)
+    if end > samples.size:
+        raise ValueError(f"answers item {item['id']} ends beyond the WAV duration")
+    carry_start = max(0, start - round(carry_s * SAMPLE_RATE))
+    if end <= carry_start:
+        raise ValueError(f"answers item {item['id']} selects no audio samples")
+    return samples[carry_start:end]
+
+
+def _postprocess(text: str, replacement_rules: tuple[Any, ...]) -> str:
+    filtered = filter_private_use_characters(text)
+    filtered, _ = trim_repetitions(filtered)
+    filtered, _ = apply_replacements(filtered, replacement_rules)
+    return filtered
+
+
+def count_duplicate_prefix_items(
+    answers: dict[str, Any], hypothesis: dict[str, str]
+) -> int:
+    """Count outputs with a carried prefix absent from that item's reference."""
+
+    items = answers["items"]
+    duplicated = 0
+    for previous_item, current_item in pairwise(items):
+        previous_text = hypothesis.get(previous_item["id"], "")
+        current_text = hypothesis.get(current_item["id"], "")
+        previous, _ = normalize_carry_text(previous_text)
+        current, _ = normalize_carry_text(current_text)
+        reference, _ = normalize_carry_text(str(current_item.get("reference", "")))
+        overlap_size = min(len(previous), len(current))
+        overlap = ""
+        for size in range(overlap_size, 3, -1):
+            candidate = previous[-size:]
+            if current.startswith(candidate):
+                overlap = candidate
+                break
+        if overlap and not reference.startswith(overlap):
+            duplicated += 1
+    return duplicated
+
+
 def run_evaluation(
     args: argparse.Namespace,
     *,
     backend_factory: Callable[[Path], Any] | None = None,
-) -> tuple[dict[str, str], dict[str, dict[str, float]]]:
+) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
     items = load_items(args.answers)
     samples = read_wav(args.wav)
     dictionary = None
@@ -142,27 +209,81 @@ def run_evaluation(
     backend_class = backend_factory or TeaMlxBackend
     backend = backend_class(args.model_path)
     output: dict[str, str] = {}
-    timings: dict[str, dict[str, float]] = {}
+    timings: dict[str, dict[str, Any]] = {}
     try:
         backend.load()
-        for item in items:
-            audio = _item_audio(samples, item, mode=args.mode, pad_s=args.pad_s)
-            started = time.perf_counter()
-            transcription = backend.transcribe(audio, system_prompt=system_prompt)
-            decode_s = time.perf_counter() - started
+        for index, item in enumerate(items):
+            segment_audio = _item_audio(
+                samples,
+                item,
+                mode="segment" if args.mode == "carry" else args.mode,
+                pad_s=args.pad_s,
+            )
+            audio_attempted_samples = 0
+            decode_s = 0.0
+            model_time_s = 0.0
+            attempts = 0
 
-            text = filter_private_use_characters(str(transcription.text))
-            text, _ = trim_repetitions(text)
-            text, _ = apply_replacements(text, replacement_rules)
+            def decode(audio: np.ndarray) -> Any:
+                nonlocal audio_attempted_samples, decode_s, model_time_s, attempts
+                started = time.perf_counter()
+                result = backend.transcribe(audio, system_prompt=system_prompt)
+                decode_s += time.perf_counter() - started
+                audio_attempted_samples += audio.size
+                attempts += 1
+                elapsed = getattr(result, "total_time_s", None)
+                if isinstance(elapsed, (int, float)) and math.isfinite(elapsed):
+                    model_time_s += float(elapsed)
+                return result
+
+            carry_audio_s = 0.0
+            overlap_chars = 0
+            carry_used = False
+            carry_fallback = False
+            carried_decode_text: str | None = None
+            if args.mode == "carry" and index > 0 and args.carry_s > 0:
+                previous_item = items[index - 1]
+                gap_s = float(item["start_s"]) - float(previous_item["end_s"])
+                previous_text = output.get(previous_item["id"], "")
+                if (
+                    previous_text
+                    and 0 <= gap_s <= args.carry_max_gap_s
+                ):
+                    audio = _carry_audio(samples, item, args.carry_s)
+                    carry_audio_s = max(0.0, (audio.size - segment_audio.size) / SAMPLE_RATE)
+                    carry_used = carry_audio_s > 0
+                    if carry_used:
+                        transcription = decode(audio)
+                        candidate = filter_private_use_characters(str(transcription.text))
+                        candidate, _ = trim_repetitions(candidate)
+                        overlap = strip_carried_overlap(previous_text, candidate)
+                        if overlap is not None and overlap[0].strip():
+                            carried_decode_text = overlap[0]
+                            overlap_chars = overlap[1]
+                        else:
+                            carry_fallback = True
+
+            if carried_decode_text is None:
+                transcription = decode(segment_audio)
+                raw_text = str(transcription.text)
+                text = _postprocess(raw_text, replacement_rules)
+            else:
+                text, _ = apply_replacements(carried_decode_text, replacement_rules)
             item_id = item["id"]
             output[item_id] = text
-            timings[item_id] = {
+            timing = {
                 "decode_s": round(decode_s, 6),
-                "audio_s": round(audio.size / SAMPLE_RATE, 6),
+                "audio_s": round(audio_attempted_samples / SAMPLE_RATE, 6),
+                "segment_audio_s": round(segment_audio.size / SAMPLE_RATE, 6),
+                "carry_audio_s": round(carry_audio_s, 6),
+                "decode_attempts": attempts,
+                "carry_used": carry_used,
+                "carry_fallback": carry_fallback,
+                "overlap_chars": overlap_chars,
             }
-            model_time = getattr(transcription, "total_time_s", None)
-            if isinstance(model_time, (int, float)) and math.isfinite(model_time):
-                timings[item_id]["model_time_s"] = round(float(model_time), 6)
+            if model_time_s:
+                timing["model_time_s"] = round(model_time_s, 6)
+            timings[item_id] = timing
     finally:
         backend.close()
     return output, timings
