@@ -97,6 +97,8 @@ final 與 final-only 模式完全一致、混合負載下 23/23 HTTP 辨識成�
 
 **2026-09-28｜Recognition hints：** server dictionaries、profiles 與 deterministic replacements 由預設關閉的 `TEA_ASR_CONTEXT_HINTS=1` 啟用；replacement 保留 `raw_text`，stable 遇到已提交邊界時保持 append-only。`GET /v1/dictionaries` 會逐檔回報錯誤字典，不影響有效項目，並以 `context.dictionary_invalid` WARNING 記錄 name/reason；`session.start` 仍拒絕無效 profile。Domain/hotwords prompt 分離為 `TEA_ASR_CONTEXT_PROMPT=1`，且需 hints 已啟用；prompt 預設關閉且維持 experimental。`session.started.context` 不含 prompt token count；backend 每次 request 回報的數量只寫 server log。4段真實講道音訊 smoke 未見 prompt 改善（約多150 tokens；一處聖經→聖家、一處失去標點，住棚節變體未修正），已審閱的 deterministic replacement 是建議工具。完整 CER、數字／否定詞與錯誤替換風險仍未評估。`use_previous_finals` 延後。
 
+**2026-10-03｜Final 左上下文 carry：** 已實作 server 端 final-only PCM 前綴與共用 overlap stripper；無可信重疊時保守重跑 segment-only，`raw_text` 保留實際採用那次解碼的原文，warning 為 `carry_overlap_stripped`／`carry_overlap_uncertain`。preview 不帶前文，避免多次推論都增加 L 秒，stable 仍逐段 append-only。答案集轉段間隔在 1.5 秒內：speakers 35/39、music-8900 15/20。離線 MLX 評估尚未執行；`carry_context_s` 預設 **0（關閉）**，不得在未驗收 speakers 的 paired bootstrap CI、music CER 與 duplication count 前打開。Coordinator 執行 `/Users/c2leb/Codes/tea-asr-service/.soak/gold/run-carry-eval.sh`；方法見 [07](07-contextual-streaming.md)。
+
 **完成條件：** 能呈現「先出字→後文修正→定稿」；partial不重複append、不改已final內容；重跑總RTF與品質、延遲符合07或有明確未達標報告；preview超載不阻塞收音與正式排程。測試同音詞、數字、否定詞、中英混用與cancel/final競態。
 
 **v0.1.1可發行條件：** P2a驗收通過才宣告partial_transcripts=true。未達標可交付研究與改善方案，但不能把需求標成完成或靜默移除。保留final-only模式；P4再驗證durable_revisable。

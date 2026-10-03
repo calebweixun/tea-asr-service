@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import secrets
 import tomllib
@@ -285,6 +286,12 @@ class ServiceConfig:
     preview_min_interval_ms: int = 300
     preview_min_audio_ms: int = 300
     preview_load_factor: float = 2.0
+    #: Audio before a new final's segment start to include as left context.
+    #: Kept off until the speaker/music gold evaluation meets its quality gate.
+    carry_context_s: float = 0.0
+    #: Maximum silence/gap after the previous final for its text/audio to be
+    #: eligible as left context. This does not change segment sample clocks.
+    carry_context_max_gap_s: float = 1.5
     #: Diagnostics only, off by default: keep the most recent
     #: `debug_capture_minutes` of every `/v1/stream` session's received 16 kHz
     #: PCM as rolling WAV files under `<logs>/captures/`, so the exact audio
@@ -404,6 +411,12 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
     load_factor = get("TEA_ASR_PREVIEW_LOAD_FACTOR")
     if load_factor is not None:
         config = replace(config, preview_load_factor=float(load_factor))
+    carry_context = get("TEA_ASR_CARRY_CONTEXT_S")
+    if carry_context is not None:
+        config = replace(config, carry_context_s=float(carry_context))
+    carry_max_gap = get("TEA_ASR_CARRY_CONTEXT_MAX_GAP_S")
+    if carry_max_gap is not None:
+        config = replace(config, carry_context_max_gap_s=float(carry_max_gap))
     capture = get("TEA_ASR_DEBUG_CAPTURE_AUDIO")
     if capture is not None:
         config = replace(config, debug_capture_audio=capture not in {"0", "false", "no", ""})
@@ -433,6 +446,33 @@ def validate_preview_cadence_or_raise(config: ServiceConfig) -> None:
             f"preview_load_factor={config.preview_load_factor} 超出範圍"
             f"（必須介於 0 與 {PREVIEW_LOAD_FACTOR_MAX:g} 之間，0 表示關閉負載保護）。"
         )
+
+
+CARRY_CONTEXT_S_RANGE = (0.0, 5.0)
+CARRY_CONTEXT_MAX_GAP_S_RANGE = (0.0, 30.0)
+
+
+def validate_carry_context_or_raise(config: ServiceConfig) -> None:
+    """Refuse carry-over windows outside the memory and timing bounds."""
+
+    for name, value, limits in (
+        ("carry_context_s", config.carry_context_s, CARRY_CONTEXT_S_RANGE),
+        (
+            "carry_context_max_gap_s",
+            config.carry_context_max_gap_s,
+            CARRY_CONTEXT_MAX_GAP_S_RANGE,
+        ),
+    ):
+        low, high = limits
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not low <= value <= high
+        ):
+            raise RuntimeError(
+                f"{name}={value!r} 超出範圍（必須介於 {low:g} 與 {high:g} 秒之間）。"
+            )
 
 
 #: Ceiling on `debug_capture_minutes` (docs/06 #4). An hour of 16 kHz PCM is

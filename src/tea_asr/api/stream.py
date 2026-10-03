@@ -6,6 +6,7 @@ import json
 import logging
 import struct
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -73,6 +74,15 @@ SESSION_START_TIMEOUT_S = 5.0
 FLOW_WINDOW_REFILL_SAMPLES = 80_000
 FLOW_WINDOW_LOW_WATER_SAMPLES = 40_000
 CONTROL_DEDUP_LIMIT = 256
+SAMPLE_RATE = 16_000
+
+# Carry-over is bounded independently of a session's total received audio. The
+# extra two seconds cover the continuous segmenter's pre-roll and a full frame
+# when a segment opens partway through it.
+CARRY_HISTORY_LOOKBACK_S = 2.0
+CARRY_OVERLAP_MIN_CHARS = 4
+CARRY_OVERLAP_MAX_CHARS = 256
+CARRY_OVERLAP_FUZZY_MAX_CHARS = 64
 
 #: Longest wait for queued segments to finish after session.stop. A stuck
 #: consumer must not hold the connection open forever.
@@ -181,6 +191,103 @@ def filter_private_use_characters(text: str) -> str:
     )
 
 
+def normalize_carry_text(text: str) -> tuple[str, list[int]]:
+    """Fold width, case, punctuation, and whitespace for carry matching.
+
+    The returned indexes map each normalized character to the exclusive end
+    of its source character in ``text``, so a match can be removed without
+    changing the spelling or punctuation of the remaining text.
+    """
+
+    normalized: list[str] = []
+    source_ends: list[int] = []
+    for index, char in enumerate(text):
+        folded = unicodedata.normalize("NFKC", char).casefold()
+        for candidate in folded:
+            if candidate.isspace() or unicodedata.category(candidate).startswith("P"):
+                continue
+            normalized.append(candidate)
+            source_ends.append(index + 1)
+    return "".join(normalized), source_ends
+
+
+def strip_carried_overlap(previous_text: str, current_text: str) -> tuple[str, int] | None:
+    """Strip a confident previous-final suffix from a carried decode prefix.
+
+    Matching is NFKC/case/space/punctuation insensitive. A bounded edit
+    distance allows roughly one change per four normalized characters. An
+    overlap shorter than four normalized characters is ambiguous, so callers
+    should retry the segment without carry when this returns ``None``.
+    """
+
+    previous, _ = normalize_carry_text(previous_text)
+    current, source_ends = normalize_carry_text(current_text)
+    if len(previous) < CARRY_OVERLAP_MIN_CHARS or len(current) < CARRY_OVERLAP_MIN_CHARS:
+        return None
+
+    previous = previous[-CARRY_OVERLAP_MAX_CHARS:]
+    current = current[:CARRY_OVERLAP_MAX_CHARS]
+    source_ends = source_ends[:CARRY_OVERLAP_MAX_CHARS]
+
+    best: tuple[tuple[int, int, int, int, int], int] | None = None
+    for size in range(min(len(previous), len(current)), CARRY_OVERLAP_MIN_CHARS - 1, -1):
+        if previous[-size:] == current[:size]:
+            best = ((size, 0, 0, size, -size), size)
+            break
+
+    # Fuzzy matching is limited to the last/first 64 normalized characters.
+    # That covers a 5-second speech prefix while keeping work on the stream's
+    # event loop bounded; exact overlaps above can be longer (up to 256).
+    fuzzy_previous = previous[-CARRY_OVERLAP_FUZZY_MAX_CHARS:]
+    fuzzy_current = current[:CARRY_OVERLAP_FUZZY_MAX_CHARS]
+    for suffix_size in range(CARRY_OVERLAP_MIN_CHARS, len(fuzzy_previous) + 1):
+        suffix = fuzzy_previous[-suffix_size:]
+        row = list(range(len(fuzzy_current) + 1))
+        for previous_index, previous_char in enumerate(suffix, start=1):
+            next_row = [previous_index]
+            for current_index, current_char in enumerate(fuzzy_current, start=1):
+                next_row.append(
+                    min(
+                        row[current_index] + 1,
+                        next_row[current_index - 1] + 1,
+                        row[current_index - 1] + (previous_char != current_char),
+                    )
+                )
+            row = next_row
+
+        for prefix_size in range(CARRY_OVERLAP_MIN_CHARS, len(fuzzy_current) + 1):
+            distance = row[prefix_size]
+            longest = max(suffix_size, prefix_size)
+            matched = longest - distance
+            if distance * 4 > longest or min(suffix_size, prefix_size) < CARRY_OVERLAP_MIN_CHARS:
+                continue
+            # Prefer an exact shorter overlap over a fuzzy alignment that
+            # absorbs the first new character as an insertion. This minimizes
+            # accidental loss when the previous suffix is genuinely present.
+            score = (
+                matched,
+                -distance,
+                -abs(suffix_size - prefix_size),
+                min(suffix_size, prefix_size),
+                -prefix_size,
+            )
+            if best is None or score > best[0]:
+                best = (score, prefix_size)
+
+    if best is None:
+        return None
+
+    prefix_size = best[1]
+    source_cut = source_ends[prefix_size - 1]
+    # Separators after the duplicate belong to the carried phrase boundary.
+    while source_cut < len(current_text):
+        char = current_text[source_cut]
+        if not char.isspace() and not unicodedata.category(char).startswith("P"):
+            break
+        source_cut += 1
+    return current_text[source_cut:], prefix_size
+
+
 @dataclass(slots=True)
 class Segment:
     segment_id: str
@@ -198,6 +305,9 @@ class Segment:
     system_prompt: str | None = None
     context_domain: str | None = None
     replacements: tuple[ReplacementRule, ...] = ()
+    #: A bounded snapshot immediately before `start_sample`, captured for a
+    #: possible final-only carry after the preceding segment is finalized.
+    carry_pcm: bytes = b""
 
 
 @dataclass(slots=True)
@@ -322,6 +432,15 @@ class StreamSession:
         self._preview_min_audio_samples = config.preview_min_audio_ms * 16
         self._preview_min_interval_s = config.preview_min_interval_ms / 1000
         self._preview_load_factor = config.preview_load_factor
+        self._previous_final: tuple[int, str] | None = None
+        self._audio_history = bytearray()
+        self._audio_history_start_sample = 0
+        self._audio_history_max_samples = (
+            round((config.carry_context_s + CARRY_HISTORY_LOOKBACK_S) * SAMPLE_RATE)
+            + MAX_FRAME_PCM_BYTES // 2
+            if config.carry_context_s > 0
+            else 0
+        )
         self._closing = False
         self._control_acks: dict[str, str] = {}
         #: Opt-in translation (docs/04「翻譯（opt-in）」). `None` unless the
@@ -502,6 +621,44 @@ class StreamSession:
 
     # -- segments ------------------------------------------------------------
 
+    def _remember_audio(self, start_sample: int, pcm: bytes) -> None:
+        """Keep only enough recent PCM to snapshot a future segment's prefix."""
+
+        if self._audio_history_max_samples <= 0 or not pcm:
+            return
+        history_end = self._audio_history_start_sample + len(self._audio_history) // 2
+        if not self._audio_history:
+            self._audio_history_start_sample = start_sample
+        elif start_sample != history_end:
+            # The wire validator normally guarantees a continuous clock. Reset
+            # rather than accidentally joining two unrelated sample ranges.
+            self._audio_history.clear()
+            self._audio_history_start_sample = start_sample
+        self._audio_history.extend(pcm)
+        max_bytes = self._audio_history_max_samples * 2
+        if len(self._audio_history) > max_bytes:
+            remove_bytes = len(self._audio_history) - max_bytes
+            remove_bytes -= remove_bytes % 2
+            del self._audio_history[:remove_bytes]
+            self._audio_history_start_sample += remove_bytes // 2
+
+    def _audio_before(self, end_sample: int) -> bytes:
+        """Return up to `carry_context_s` samples ending at an absolute sample."""
+
+        if not self._audio_history or self._config.carry_context_s <= 0:
+            return b""
+        history_end = self._audio_history_start_sample + len(self._audio_history) // 2
+        end_sample = min(end_sample, history_end)
+        start_sample = max(
+            self._audio_history_start_sample,
+            end_sample - round(self._config.carry_context_s * SAMPLE_RATE),
+        )
+        if end_sample <= start_sample:
+            return b""
+        start_offset = (start_sample - self._audio_history_start_sample) * 2
+        end_offset = (end_sample - self._audio_history_start_sample) * 2
+        return bytes(self._audio_history[start_offset:end_offset])
+
     def _open_segment(self, start_sample: int, *, cause: str = "vad") -> Segment:
         context = self._context_plan
         segment = Segment(
@@ -515,6 +672,7 @@ class StreamSession:
             ),
             context_domain=context.domain if context else None,
             replacements=context.replacements if context else (),
+            carry_pcm=self._audio_before(start_sample),
         )
         if self._stable_agreement is not None:
             segment.stable = StablePrefixTracker(self._stable_agreement)
@@ -657,9 +815,21 @@ class StreamSession:
     async def _transcribe_segment(self, closed: ClosedSegment) -> None:
         segment = closed.segment
         state = self._state
-        try:
-            response, queue_ms = await self._scheduler.transcribe(
-                closed.pcm,
+        previous_final = self._previous_final
+        carry_pcm = b""
+        if previous_final is not None and segment.carry_pcm:
+            gap_samples = segment.start_sample - previous_final[0]
+            if 0 <= gap_samples <= round(self._config.carry_context_max_gap_s * SAMPLE_RATE):
+                carry_pcm = segment.carry_pcm
+
+        decode_pcm = carry_pcm + closed.pcm
+        carried = bool(carry_pcm and previous_final is not None and previous_final[1])
+        carry_warning: str | None = None
+        carry_stripped_text: str | None = None
+
+        async def transcribe(pcm: bytes) -> tuple[dict[str, Any], int]:
+            return await self._scheduler.transcribe(
+                pcm,
                 language=self._language,
                 kind="realtime" if self._profile == "continuous" else "interactive",
                 **(
@@ -668,6 +838,9 @@ class StreamSession:
                     else {}
                 ),
             )
+
+        try:
+            response, queue_ms = await transcribe(decode_pcm)
         except ApiError as exc:
             state.failed_segments.append(segment.index)
             self._writer.emit(
@@ -688,6 +861,59 @@ class StreamSession:
         self._log_context_prompt_tokens(response, segment, "final")
         inference_ms = round(float(response.get("total_time_s", 0.0)) * 1000)
         raw_text = str(response["text"])
+
+        if carried:
+            candidate_text = (
+                filter_private_use_characters(raw_text) if self._config.filter_pua else raw_text
+            )
+            candidate_text, _ = trim_repetitions(
+                candidate_text,
+                single_char_limit=self._config.repetition_single_char_limit,
+                multi_char_limit=self._config.repetition_multi_char_limit,
+            )
+            overlap = strip_carried_overlap(previous_final[1], candidate_text)
+            if overlap is not None and overlap[0].strip():
+                carry_warning = "carry_overlap_stripped"
+                carry_stripped_text = overlap[0]
+                log_event(
+                    logger,
+                    "stream.carry_overlap_stripped",
+                    segment_index=segment.index,
+                    carry_audio_ms=len(carry_pcm) // 32,
+                    overlap_chars=overlap[1],
+                )
+            else:
+                try:
+                    response, retry_queue_ms = await transcribe(closed.pcm)
+                except ApiError as exc:
+                    state.failed_segments.append(segment.index)
+                    self._writer.emit(
+                        SegmentError(
+                            session_id=state.session_id,
+                            event_id=0,
+                            segment_id=segment.segment_id,
+                            segment_index=segment.index,
+                            code=exc.code,
+                            message=exc.message,
+                            retryable=exc.retryable,
+                        )
+                    )
+                    self._segment_done(closed, "error", code=exc.code)
+                    return
+                if state.cancelled:
+                    return
+                self._log_context_prompt_tokens(response, segment, "final")
+                queue_ms += retry_queue_ms
+                inference_ms += round(float(response.get("total_time_s", 0.0)) * 1000)
+                raw_text = str(response["text"])
+                carry_warning = "carry_overlap_uncertain"
+                log_event(
+                    logger,
+                    "stream.carry_overlap_uncertain",
+                    segment_index=segment.index,
+                    carry_audio_ms=len(carry_pcm) // 32,
+                )
+
         if not raw_text:
             self._writer.emit(
                 SegmentSkipped(
@@ -710,8 +936,13 @@ class StreamSession:
             kind="final",
             repetition_trims=repetition_trims,
         )
+        if carry_warning == "carry_overlap_stripped":
+            assert carry_stripped_text is not None
+            text = carry_stripped_text
         if repetition_trims:
             warnings.append("repetition_trimmed")
+        if carry_warning is not None:
+            warnings.append(carry_warning)
         if not text:
             # The whole segment was PUA noise (see filter_private_use_characters):
             # sending an empty final would look like a real, silent recognition
@@ -773,6 +1004,7 @@ class StreamSession:
             chars=len(text),
             stable_state=stable_state,
         )
+        self._previous_final = (closed.end_sample, text)
         if self._translator is not None:
             # After the final is queued, never instead of it: translation only
             # reads the text the client already has (docs/06 #5).
@@ -791,6 +1023,7 @@ class StreamSession:
         """Close the stable line and log a segment that ended without a final."""
 
         segment = closed.segment
+        self._previous_final = None
         self._abandon_stable(segment)
         self._diag.segment_done(
             segment_index=segment.index,
@@ -823,6 +1056,9 @@ class StreamSession:
         self._diag.on_frame(pcm)
         if self._capture is not None:
             self._capture.write(start_sample, pcm)
+        # The ring is bounded to the configured left-context window plus the
+        # segmenter's pre-roll. It is only used to assemble later final audio.
+        self._remember_audio(start_sample, pcm)
 
         if self._profile == "continuous":
             self._advance_continuous(pcm)
