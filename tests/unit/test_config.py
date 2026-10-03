@@ -36,12 +36,15 @@ def test_defaults_match_what_has_been_accepted() -> None:
     # single-user desktop service, not because more was found unsafe.
     assert config.max_continuous_sessions == 2
     assert config.context_hints_enabled is False
-    assert config.singing_detection_enabled is False
+    # Labels only; effective only when the pinned YAMNet asset is present.
+    assert config.singing_detection_enabled is True
     assert config.carry_context_s == 0.0
     assert config.carry_context_max_gap_s == 1.5
 
 
-@pytest.mark.parametrize(("value", "enabled"), [("1", True), ("0", False), ("false", False)])
+@pytest.mark.parametrize(
+    ("value", "enabled"), [("1", True), ("0", False), ("false", False), ("no", False)]
+)
 def test_singing_detection_environment_gate(value: str, enabled: bool) -> None:
     config = ServiceConfig.load(env={"TEA_ASR_SINGING_DETECTION": value})
     assert config.singing_detection_enabled is enabled

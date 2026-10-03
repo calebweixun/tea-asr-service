@@ -1,379 +1,294 @@
-"""Small, interpretable singing detector for 16 kHz mono PCM.
+"""Singing detection on top of YAMNet frame scores.
 
-The estimator is deliberately CPU-only and uses no downloaded model.  See
-``benchmarks/singing_eval.py`` for feature fitting and held-out evaluation.
+Pipeline (pure and deterministic, so the offline evaluation in
+``benchmarks/singing_eval.py`` replays exactly what the server runs):
+
+1. ``frame_features``: 521 YAMNet class scores per 0.48 s frame are reduced to
+   three numbers: the strongest speech-type class, ``Music``, and the strongest
+   vocal-music class (Singing, Choir, Song, Christian music, ...).
+2. ``FrameScorer``: a three-weight logistic over the log-odds of those numbers
+   gives a per-frame singing probability.
+3. ``SingingTracker``: session-level hysteresis over the recent frames. Worship
+   songs last minutes, so one clearly singing stretch switches the state on and
+   it only switches off after sustained non-singing evidence. Precision is the
+   priority, so entering needs a long run of clearly singing frames.
+4. ``SegmentLabeler``: labels one VAD segment ``speech`` or ``singing`` about
+   1.5 s after it opened, with at most one revision. A segment is singing only
+   if the session state is singing *and* the frames right at the segment agree,
+   so a pastor speaking over a band is not hidden because a song just ended.
 """
 
 from __future__ import annotations
 
-import math
+from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
 
-SAMPLE_RATE = 16_000
-FRAME_SAMPLES = 640  # 40 ms, enough to resolve a low sung fundamental.
-HOP_SAMPLES = 320  # 20 ms.
-FEATURE_NAMES = (
-    "voiced_ratio",
-    "stable_ratio",
-    "longest_plateau_s",
-    "pitch_range_st",
-    "median_pitch_step_st",
-    "harmonicity",
-    "spectral_flatness",
-    "syllable_rate_hz",
+from .yamnet import NUM_CLASSES, SAMPLE_RATE, complete_frames
+
+AudioClass = Literal["speech", "singing"]
+
+#: Class groups, by AudioSet display name (resolved against the pinned class map).
+SPEECH_CLASSES = (
+    "Speech",
+    "Narration, monologue",
+    "Conversation",
+    "Child speech, kid speaking",
+)
+MUSIC_CLASSES = ("Music",)
+VOCAL_CLASSES = (
+    "Singing",
+    "Choir",
+    "Chant",
+    "Vocal music",
+    "A capella",
+    "Song",
+    "Christian music",
+    "Gospel music",
 )
 
-# Weighted logistic fit on the labelled 1.5 s windows. The evaluation and
-# leave-one-file-out results are documented in docs/benchmarks/singing-eval-report.md.
-MODEL_MEAN = np.asarray(
-    [0.35739189, 0.67992097, 0.13535635, 13.86319629, 0.52991905, 0.68445204, 0.04320519, 2.40197803]
-)
-MODEL_SCALE = np.asarray(
-    [0.22214998, 0.26926760, 0.11032763, 7.46111762, 1.53079010, 0.11568377, 0.04058072, 0.80932770]
-)
-MODEL_COEFFICIENTS = np.asarray(
-    [-0.64305559, 0.45020013, -0.03853093, 0.00101658, 0.03103230, -0.00913680, 0.10898463, -0.28673772]
-)
-MODEL_INTERCEPT = 0.00600639
-# The requested <1% sermon false-positive rate is prioritized over recall.
-# This held-out threshold does not reach the 80% singing recall target; keep the
-# capability opt-in until the detector can meet both targets.
-SINGING_THRESHOLD = 0.995
+FEATURE_NAMES = ("speech", "music", "vocal")
+_LOGIT_CLIP = 1e-4
 
-EARLY_EVIDENCE_S = 0.8
-EARLY_DECISION_DEADLINE_S = 1.4
-REVISION_EVIDENCE_S = 2.5
-MAX_ANALYSIS_SECONDS = 2.0
+
+class ClassMapError(ValueError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
-class AudioFeatures:
-    voiced_ratio: float
-    stable_ratio: float
-    longest_plateau_s: float
-    pitch_range_st: float
-    median_pitch_step_st: float
-    harmonicity: float
-    spectral_flatness: float
-    syllable_rate_hz: float
+class ClassGroups:
+    speech: tuple[int, ...]
+    music: tuple[int, ...]
+    vocal: tuple[int, ...]
 
-    def as_array(self) -> np.ndarray:
-        return np.asarray([getattr(self, name) for name in FEATURE_NAMES], dtype=np.float64)
+    @classmethod
+    def from_names(cls, names: Sequence[str]) -> ClassGroups:
+        if len(names) != NUM_CLASSES:
+            raise ClassMapError(f"expected {NUM_CLASSES} class names, got {len(names)}")
+        lookup = {name: index for index, name in enumerate(names)}
+        resolved: list[tuple[int, ...]] = []
+        for group in (SPEECH_CLASSES, MUSIC_CLASSES, VOCAL_CLASSES):
+            missing = [name for name in group if name not in lookup]
+            if missing:
+                raise ClassMapError(f"class map lacks {missing}; refusing to guess indices")
+            resolved.append(tuple(lookup[name] for name in group))
+        return cls(*resolved)
+
+
+def frame_features(scores: np.ndarray, groups: ClassGroups) -> np.ndarray:
+    """``[frames, 521]`` YAMNet scores to ``[frames, 3]`` (speech, music, vocal)."""
+
+    scores = np.asarray(scores, dtype=np.float64)
+    if scores.ndim != 2 or scores.shape[1] != NUM_CLASSES:
+        raise ValueError(f"scores must be [frames, {NUM_CLASSES}]")
+    return np.stack(
+        [
+            scores[:, list(groups.speech)].max(axis=1),
+            scores[:, list(groups.music)].max(axis=1),
+            scores[:, list(groups.vocal)].max(axis=1),
+        ],
+        axis=1,
+    )
+
+
+def design_matrix(features: np.ndarray) -> np.ndarray:
+    """Log-odds of each feature, clipped so a saturated score stays finite."""
+
+    clipped = np.clip(np.asarray(features, dtype=np.float64), _LOGIT_CLIP, 1.0 - _LOGIT_CLIP)
+    return np.log(clipped / (1.0 - clipped))
+
+
+@dataclass(frozen=True, slots=True)
+class FrameScorer:
+    """Logistic regression over the logit of (speech, music, vocal)."""
+
+    coefficients: tuple[float, float, float]
+    intercept: float
+
+    def score(self, features: np.ndarray) -> np.ndarray:
+        features = np.asarray(features, dtype=np.float64).reshape(-1, 3)
+        logits = design_matrix(features) @ np.asarray(self.coefficients) + self.intercept
+        return 1.0 / (1.0 + np.exp(-np.clip(logits, -40.0, 40.0)))
+
+
+# Fitted offline on every labelled frame by ``benchmarks/singing_eval.py --fit``.
+# Speech evidence pulls the score down, vocal-music evidence pushes it up, and
+# ``Music`` alone barely matters: a speaker over a band stays speech. The
+# held-out numbers are in docs/benchmarks/singing-eval-report.md.
+DEFAULT_SCORER = FrameScorer(coefficients=(-0.6882, -0.1611, 0.9478), intercept=2.2381)
+
+
+@dataclass(frozen=True, slots=True)
+class SingingParams:
+    """Hysteresis and decision knobs (see the evaluation report for the sweep)."""
+
+    #: Enter singing when the mean score of the last ``enter_frames`` frames is
+    #: at least ``enter_threshold`` (8 frames span about 4.2 s of audio). The
+    #: precision-first selection on all labelled files picked this setting.
+    enter_frames: int = 8
+    enter_threshold: float = 0.98
+    #: Leave singing when the mean of the last ``exit_frames`` frames drops
+    #: below ``exit_threshold``.
+    exit_frames: int = 4
+    exit_threshold: float = 0.4
+    #: The frames ending at the decision must also look singing: the mean of
+    #: the last ``local_frames`` frames is at least ``local_threshold``.
+    local_frames: int = 2
+    local_threshold: float = 0.5
+    #: Early decision about 1.5 s after the segment's first sample; the single
+    #: revision is evaluated 4 s after it, or at close for shorter segments.
+    early_decision_s: float = 1.5
+    revision_decision_s: float = 4.0
+
+
+DEFAULT_PARAMS = SingingParams()
 
 
 @dataclass(frozen=True, slots=True)
 class AudioClassDecision:
-    audio_class: Literal["speech", "singing"]
+    audio_class: AudioClass
     confidence: float
     revision: int
 
 
-def _parabolic_peak(values: np.ndarray, index: int) -> float:
-    """Return a sub-sample peak location using a three-point parabola."""
+class SingingTracker:
+    """Per-session frame history and hysteresis state.
 
-    if index <= 0 or index >= values.size - 1:
-        return float(index)
-    left, middle, right = map(float, values[index - 1 : index + 2])
-    denominator = left - 2.0 * middle + right
-    if abs(denominator) < 1e-12:
-        return float(index)
-    return float(index) + 0.5 * (left - right) / denominator
-
-
-def estimate_f0(frame: np.ndarray, sample_rate: int = SAMPLE_RATE) -> tuple[float | None, float]:
-    """Estimate the fundamental with a YIN cumulative-mean autocorrelation.
-
-    Returns ``(hz, confidence)``. ``hz`` is ``None`` when the frame is too
-    short, silent, or insufficiently periodic.  The implementation uses NumPy
-    FFTs and is intentionally independent of librosa or Torch.
+    Frames are fed in order. Frame ``i`` ends at a fixed sample, so a decision
+    at sample ``t`` uses exactly ``complete_frames(t)`` frames however late the
+    executor delivered them.
     """
-
-    signal = np.asarray(frame, dtype=np.float64).reshape(-1)
-    if signal.size < sample_rate // 40:
-        return None, 0.0
-    signal = signal - float(np.mean(signal))
-    energy = float(np.dot(signal, signal))
-    if energy <= 1e-10:
-        return None, 0.0
-
-    # FFT autocorrelation gives the YIN difference function in O(n log n).
-    signal = signal * np.hanning(signal.size)
-    fft_size = 1 << (2 * signal.size - 1).bit_length()
-    spectrum = np.fft.rfft(signal, n=fft_size)
-    autocorrelation = np.fft.irfft(spectrum * np.conjugate(spectrum), n=fft_size)
-    autocorrelation = autocorrelation[: signal.size]
-    prefix = np.concatenate(([0.0], np.cumsum(signal * signal)))
-
-    min_lag = max(2, int(sample_rate / 500))
-    max_lag = min(signal.size // 2, int(sample_rate / 65))
-    if max_lag <= min_lag:
-        return None, 0.0
-    lags = np.arange(1, max_lag + 1)
-    overlap = signal.size - lags
-    difference = (
-        prefix[overlap]
-        + (prefix[-1] - prefix[lags])
-        - 2.0 * autocorrelation[lags]
-    )
-    cumulative = np.cumsum(difference)
-    cmnd = np.ones(max_lag + 1, dtype=np.float64)
-    cmnd[1:] = difference * lags / np.maximum(cumulative, 1e-12)
-
-    # YIN uses the first clear period minimum to avoid selecting a multiple of
-    # the true period.  If none crosses the cutoff, keep only a strong global
-    # minimum; noisy frames remain unvoiced.
-    selected: int | None = None
-    cutoff = 0.22
-    for lag in range(min_lag, max_lag):
-        if cmnd[lag] < cutoff:
-            selected = lag
-            while selected + 1 < max_lag and cmnd[selected + 1] < cmnd[selected]:
-                selected += 1
-            break
-    if selected is None:
-        candidate = int(np.argmin(cmnd[min_lag : max_lag + 1])) + min_lag
-        if cmnd[candidate] >= 0.42:
-            return None, max(0.0, 1.0 - float(cmnd[candidate]))
-        selected = candidate
-
-    refined_lag = _parabolic_peak(-cmnd, selected)
-    confidence = min(1.0, max(0.0, 1.0 - float(cmnd[selected])))
-    if refined_lag <= 0 or confidence < 0.45:
-        return None, confidence
-    return float(sample_rate / refined_lag), confidence
-
-
-def _runs(mask: np.ndarray) -> list[int]:
-    lengths: list[int] = []
-    current = 0
-    for value in mask:
-        if bool(value):
-            current += 1
-        elif current:
-            lengths.append(current)
-            current = 0
-    if current:
-        lengths.append(current)
-    return lengths
-
-
-def extract_features(audio: np.ndarray | bytes, sample_rate: int = SAMPLE_RATE) -> AudioFeatures:
-    """Extract pitch, harmonicity, plateau, and syllabic-rate features."""
-
-    if isinstance(audio, bytes):
-        signal = np.frombuffer(audio, dtype="<i2").astype(np.float64) / 32768.0
-    else:
-        signal = np.asarray(audio, dtype=np.float64).reshape(-1)
-        if signal.size and float(np.max(np.abs(signal))) > 1.5:
-            signal = signal / 32768.0
-    if signal.size < FRAME_SAMPLES:
-        empty = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
-        return AudioFeatures(*empty)
-
-    starts = range(0, signal.size - FRAME_SAMPLES + 1, HOP_SAMPLES)
-    pitches: list[float] = []
-    confidences: list[float] = []
-    flatness: list[float] = []
-    rms: list[float] = []
-    window = np.hanning(FRAME_SAMPLES)
-    fft_size = 1024
-    frequencies = np.fft.rfftfreq(fft_size, 1.0 / sample_rate)
-    spectral_bins = (frequencies >= 100.0) & (frequencies <= 4_000.0)
-
-    for start in starts:
-        frame = signal[start : start + FRAME_SAMPLES]
-        f0, confidence = estimate_f0(frame, sample_rate)
-        pitches.append(float(f0 or 0.0))
-        confidences.append(confidence)
-        rms.append(float(np.sqrt(np.mean(frame * frame))))
-        power = np.abs(np.fft.rfft(frame * window, n=fft_size))[spectral_bins] ** 2
-        if power.size and float(np.mean(power)) > 1e-15:
-            flatness.append(float(np.exp(np.mean(np.log(power + 1e-15))) / np.mean(power)))
-        else:
-            flatness.append(1.0)
-
-    f0_track = np.asarray(pitches, dtype=np.float64)
-    confidence_track = np.asarray(confidences, dtype=np.float64)
-    voiced = (f0_track > 0.0) & (confidence_track >= 0.55)
-    voiced_pitches = f0_track[voiced]
-    voiced_ratio = float(np.mean(voiced)) if voiced.size else 0.0
-    harmonicity = float(np.mean(confidence_track[voiced])) if np.any(voiced) else 0.0
-
-    if voiced_pitches.size >= 2:
-        semitones = np.zeros_like(f0_track)
-        semitones[voiced] = 12.0 * np.log2(
-            voiced_pitches / float(np.median(voiced_pitches))
-        )
-        adjacent_voiced = voiced[:-1] & voiced[1:]
-        all_steps = np.abs(np.diff(semitones))
-        adjacent_steps = all_steps[adjacent_voiced]
-        stable_pairs = adjacent_voiced & (all_steps <= 0.65)
-        stable_ratio = (
-            float(np.mean(adjacent_steps <= 0.65)) if adjacent_steps.size else 0.0
-        )
-        longest_plateau_s = (
-            (max(_runs(stable_pairs), default=0) + 1) * HOP_SAMPLES / sample_rate
-        )
-        voiced_semitones = semitones[voiced]
-        pitch_range_st = float(
-            np.percentile(voiced_semitones, 95) - np.percentile(voiced_semitones, 5)
-        )
-        median_pitch_step_st = float(np.median(adjacent_steps)) if adjacent_steps.size else 0.0
-    else:
-        stable_ratio = 0.0
-        longest_plateau_s = 0.0
-        pitch_range_st = 0.0
-        median_pitch_step_st = 0.0
-
-    energy = np.asarray(rms, dtype=np.float64)
-    # A 100 ms moving average suppresses individual pitch cycles while
-    # preserving syllable-scale rises. Count separated positive envelope peaks.
-    if energy.size >= 7 and float(np.max(energy)) > 1e-5:
-        smooth = np.convolve(energy, np.ones(5, dtype=np.float64) / 5.0, mode="same")
-        threshold = max(float(np.percentile(smooth, 35)) * 1.18, 1e-5)
-        peaks = [
-            i
-            for i in range(1, smooth.size - 1)
-            if smooth[i - 1] < smooth[i] >= smooth[i + 1] and smooth[i] >= threshold
-        ]
-        min_gap = max(1, round(0.18 * sample_rate / HOP_SAMPLES))
-        separated: list[int] = []
-        for peak in peaks:
-            if not separated or peak - separated[-1] >= min_gap:
-                separated.append(peak)
-        duration = signal.size / sample_rate
-        syllable_rate = len(separated) / max(duration, 1e-6)
-    else:
-        syllable_rate = 0.0
-
-    return AudioFeatures(
-        voiced_ratio=voiced_ratio,
-        stable_ratio=stable_ratio,
-        longest_plateau_s=longest_plateau_s,
-        pitch_range_st=pitch_range_st,
-        median_pitch_step_st=median_pitch_step_st,
-        harmonicity=harmonicity,
-        spectral_flatness=float(np.median(flatness)) if flatness else 1.0,
-        syllable_rate_hz=float(syllable_rate),
-    )
-
-
-def singing_probability(features: AudioFeatures) -> float:
-    """Return the fitted singing probability from source-stored coefficients."""
-
-    scaled = (features.as_array() - MODEL_MEAN) / MODEL_SCALE
-    logit = MODEL_INTERCEPT + float(np.dot(MODEL_COEFFICIENTS, scaled))
-    if logit >= 0:
-        return 1.0 / (1.0 + math.exp(-min(logit, 60.0)))
-    value = math.exp(max(logit, -60.0))
-    return value / (1.0 + value)
-
-
-class SingingDecisionPolicy:
-    """Make one early decision and permit at most one evidence-based revision."""
-
-    def __init__(self, threshold: float = SINGING_THRESHOLD) -> None:
-        self.threshold = float(threshold)
-        self.decision: AudioClassDecision | None = None
-        self.revised = False
-
-    def observe(
-        self, score: float, elapsed_s: float, *, final: bool = False
-    ) -> AudioClassDecision | None:
-        score = min(1.0, max(0.0, float(score)))
-        if self.decision is None:
-            if elapsed_s >= EARLY_EVIDENCE_S and score >= self.threshold:
-                self.decision = AudioClassDecision("singing", round(score, 4), 0)
-            elif elapsed_s >= EARLY_DECISION_DEADLINE_S or final:
-                self.decision = AudioClassDecision("speech", round(1.0 - score, 4), 0)
-            else:
-                return None
-            return self.decision
-
-        if self.revised or elapsed_s < REVISION_EVIDENCE_S:
-            return None
-        previous = self.decision
-        next_class = "singing" if score >= self.threshold else "speech"
-        if next_class == previous.audio_class:
-            return None
-        confidence = score if next_class == "singing" else 1.0 - score
-        self.decision = AudioClassDecision(next_class, round(confidence, 4), 1)
-        self.revised = True
-        return self.decision
-
-
-class StreamingSingingClassifier:
-    """Per-segment bounded PCM history plus the early/revision decision policy."""
 
     def __init__(
         self,
-        start_sample: int,
+        scorer: FrameScorer = DEFAULT_SCORER,
+        params: SingingParams = DEFAULT_PARAMS,
         *,
-        initial_pcm: bytes = b"",
-        initial_start_sample: int | None = None,
-        threshold: float = SINGING_THRESHOLD,
+        history_frames: int = 512,
     ) -> None:
+        self._scorer = scorer
+        self._params = params
+        self._scores: deque[float] = deque(maxlen=history_frames)
+        self._states: deque[bool] = deque(maxlen=history_frames)
+        self.frames_seen = 0
+        self.singing = False
+        #: Probability of the newest frame, for diagnostics only.
+        self.last_score: float | None = None
+
+    @property
+    def params(self) -> SingingParams:
+        return self._params
+
+    def observe(self, features: np.ndarray) -> None:
+        """Add ``[n, 3]`` features for the next ``n`` frames."""
+
+        for probability in self._scorer.score(features):
+            self._step(float(probability))
+
+    def _step(self, probability: float) -> None:
+        params = self._params
+        self._scores.append(probability)
+        self.last_score = probability
+        self.frames_seen += 1
+        if not self.singing:
+            if self.frames_seen >= params.enter_frames and (
+                self._recent_mean(params.enter_frames) >= params.enter_threshold
+            ):
+                self.singing = True
+        elif self._recent_mean(params.exit_frames) < params.exit_threshold:
+            self.singing = False
+        self._states.append(self.singing)
+
+    def _recent_mean(self, count: int) -> float:
+        count = min(count, len(self._scores))
+        return sum(self._scores[-k] for k in range(1, count + 1)) / count
+
+    def _offset(self, frame_count: int, history: int) -> int:
+        offset = self.frames_seen - frame_count
+        if offset < 0:
+            raise ValueError("frames not processed yet")
+        if offset >= history:
+            raise ValueError("frame history already trimmed")
+        return offset
+
+    def state_after(self, frame_count: int) -> bool:
+        """Hysteresis state once ``frame_count`` frames were processed."""
+
+        if frame_count <= 0:
+            return False
+        offset = self._offset(frame_count, len(self._states))
+        return self._states[len(self._states) - 1 - offset]
+
+    def local_score(self, frame_count: int) -> float:
+        """Mean score of the ``local_frames`` frames ending at ``frame_count``."""
+
+        if frame_count <= 0:
+            return 0.0
+        end = len(self._scores) - self._offset(frame_count, len(self._scores))
+        start = max(0, end - self._params.local_frames)
+        return sum(self._scores[i] for i in range(start, end)) / (end - start)
+
+    def ready(self, sample: int) -> bool:
+        """True when every frame completed by ``sample`` has been observed."""
+
+        return self.frames_seen >= complete_frames(sample)
+
+    def evaluate(self, sample: int) -> AudioClassDecision:
+        """Label with the evidence of the frames complete at stream ``sample``."""
+
+        count = complete_frames(sample)
+        score = self.local_score(count)
+        singing = self.state_after(count) and score >= self._params.local_threshold
+        if singing:
+            return AudioClassDecision("singing", round(min(1.0, score), 4), 0)
+        return AudioClassDecision("speech", round(min(1.0, 1.0 - score), 4), 0)
+
+
+class SegmentLabeler:
+    """One early label per segment, at most one revision.
+
+    Drive it with the current stream sample whenever audio or frames advance;
+    each decision is computed *at its due sample*, not at the call time, so a
+    slow executor delays the event but never changes the label.
+    """
+
+    def __init__(self, tracker: SingingTracker, start_sample: int) -> None:
+        self._tracker = tracker
         self.start_sample = start_sample
-        audio_start_sample = start_sample if initial_start_sample is None else initial_start_sample
-        self._audio = bytearray(initial_pcm)
-        self._last_sample = audio_start_sample + len(self._audio) // 2
-        self._policy = SingingDecisionPolicy(threshold)
-        self._last_feature_samples = 0
-        self.latest_score: float | None = None
+        params = tracker.params
+        self.early_sample = start_sample + round(params.early_decision_s * SAMPLE_RATE)
+        self.revision_sample = start_sample + round(params.revision_decision_s * SAMPLE_RATE)
+        self.decision: AudioClassDecision | None = None
+        self.revised = False
 
     @property
-    def elapsed_s(self) -> float:
-        return max(0.0, (self._last_sample - self.start_sample) / SAMPLE_RATE)
+    def finished(self) -> bool:
+        return self.revised
 
-    @property
-    def decision(self) -> AudioClassDecision | None:
-        return self._policy.decision
+    def update(self, stream_sample: int, *, closing: bool = False) -> AudioClassDecision | None:
+        """Return a decision to emit (first label or the single revision).
 
-    def append(self, pcm: bytes, start_sample: int) -> AudioClassDecision | None:
-        if len(pcm) % 2:
-            raise ValueError("PCM byte length must be even")
-        count = len(pcm) // 2
-        end_sample = start_sample + count
-        if end_sample <= self._last_sample:
+        ``closing`` evaluates at the segment end when the next due point has not
+        been reached yet. Returns ``None`` when nothing is due or when the
+        frames required are not processed yet; call again after they arrive.
+        """
+
+        if self.revised:
             return None
-        # The wire sample clock is continuous. If a caller nevertheless skips
-        # a range, leave it absent instead of manufacturing samples.
-        self._last_sample = max(self._last_sample, start_sample)
-        overlap = max(0, self._last_sample - start_sample)
-        self._audio.extend(pcm[overlap * 2 :])
-        self._last_sample = end_sample
-        max_samples = round(MAX_ANALYSIS_SECONDS * SAMPLE_RATE)
-        if len(self._audio) // 2 > max_samples:
-            trim_samples = len(self._audio) // 2 - max_samples
-            del self._audio[: trim_samples * 2]
-        return self._evaluate(final=False)
-
-    def seed(self) -> AudioClassDecision | None:
-        """Evaluate audio already present in the stream's bounded history."""
-
-        return self._evaluate(final=False)
-
-    def finish(self) -> AudioClassDecision | None:
-        return self._evaluate(final=True)
-
-    def _evaluate(self, *, final: bool) -> AudioClassDecision | None:
-        samples = len(self._audio) // 2
-        if samples < round(EARLY_EVIDENCE_S * SAMPLE_RATE) and not final:
+        due = self.early_sample if self.decision is None else self.revision_sample
+        at = stream_sample if closing and stream_sample < due else due
+        if stream_sample < at or not self._tracker.ready(at):
             return None
-        # Recompute only after a useful amount of new audio. Each analysis uses
-        # at most 1.5 s, regardless of the segment's full duration.
-        if not final and samples - self._last_feature_samples < round(0.18 * SAMPLE_RATE):
+        candidate = self._tracker.evaluate(at)
+        if self.decision is None:
+            self.decision = candidate
+            return candidate
+        if candidate.audio_class == self.decision.audio_class:
+            self.revised = True  # evidence confirmed the label; nothing to send
             return None
-        max_window = round(EARLY_DECISION_DEADLINE_S * SAMPLE_RATE)
-        if self._policy.decision is None:
-            analysis = bytes(self._audio[: max_window * 2])
-        else:
-            window = min(samples, max_window)
-            analysis = bytes(self._audio[-window * 2 :])
-        features = extract_features(analysis)
-        self.latest_score = singing_probability(features)
-        self._last_feature_samples = samples
-        return self._policy.observe(self.latest_score, self.elapsed_s, final=final)
+        self.revised = True
+        self.decision = AudioClassDecision(candidate.audio_class, candidate.confidence, 1)
+        return self.decision

@@ -249,8 +249,9 @@ class CapabilityFeatures(ServerModel):
     hotwords: bool = False
     context_biasing: bool = False
     context_limits: ContextLimits | None = None
-    #: Experimental singing labeler; opt-in because its held-out quality goal
-    #: was not reached (see docs/benchmarks/singing-eval-report.md).
+    #: `segment.audio_class` labels from the YAMNet classifier. Advertised only
+    #: when the pinned model really loaded (docs/06 constraint 6); `None` is
+    #: left out of the response, so a server without it shows nothing.
     singing_detection: bool | None = None
     #: Opt-in append-only `transcript.stable` (docs/07「只增不改的穩定前綴」).
     #: Derived from revisable partials, so it is only offered with them. `None`

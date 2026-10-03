@@ -187,9 +187,12 @@ class ServiceConfig:
     """
 
     revisable_preview: bool = True
-    #: Experimental audio-class labels. The held-out song/speech threshold
-    #: target was not met; keep this off unless an operator opts in.
-    singing_detection_enabled: bool = False
+    #: `segment.audio_class` labels (docs/04). On since the held-out YAMNet
+    #: evaluation in docs/benchmarks/singing-eval-report.md met its targets.
+    #: It only takes effect when the pinned YAMNet asset is present (fetched by
+    #: `tea-asr model-prepare`); without it the capability is simply not
+    #: advertised. Transcription is never changed, only labelled.
+    singing_detection_enabled: bool = True
     #: Strip Unicode Private Use Area characters (BMP U+E000-U+F8FF and
     #: supplementary U+F0000-U+FFFFD/U+100000-U+10FFFD) from recognized text
     #: before it reaches the client. This is a stopgap for a
