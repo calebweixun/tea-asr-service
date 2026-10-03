@@ -317,3 +317,22 @@ tail -200 ~/Library/Logs/TEA\ ASR/service.log > service-log.txt
 警告，對照 [04「怎麼診斷『沒有字幕』」](04-api.md#怎麼診斷沒有字幕) 的表。要重現同一段聲音，
 暫時用 `TEA_ASR_DEBUG_CAPTURE_AUDIO=1` 啟動服務（會把串流進來的聲音存到
 `~/Library/Logs/TEA ASR/captures/`，查完請關掉並刪除）。
+
+## 十、從訂正稿挖 replacement 候選
+
+用答案 kit 與一個或多個 id→文字假設稿產生安全候選和人工 review。預設略過標記為 unclear
+的項目；style conventions 會另外計數，不會變成 replacement。
+
+```bash
+uv run python benchmarks/dict_mine.py \
+  --answers .soak/gold/answers/speakers-answers.json \
+  --hypothesis .soak/gold/eval/01-4bit-segment.json \
+  --candidates-toml .soak/dict-mine/candidates.toml \
+  --review-md .soak/dict-mine/candidates-review.md \
+  --merge-with docs/examples/dictionaries/church.example.toml
+```
+
+Review 會列出 contexts、precision proxy、harm、style convention 次數，以及和既有字典的重複或衝突。
+可用 `--hotwords-file` 放寬網域詞的 count/support 門檻，或用
+`--stoplist-file` 擴充常見詞排除表。輸出含逐字稿片段，請留在 git-excluded 的
+`.soak/`；加入字典前先人工檢查。
