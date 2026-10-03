@@ -34,6 +34,8 @@ from tea_asr.rate_limit import AuthRateLimiter
 from tea_asr.repetition import TrimmedRepetition, trim_repetitions
 from tea_asr.scheduler import StaleTaskDropped
 from tea_asr.segmenter import ContinuousSegmenter, SegmentClosed, SegmenterConfig, SpeechStarted
+from tea_asr.singing import SAMPLE_RATE as SINGING_SAMPLE_RATE
+from tea_asr.singing import SINGING_THRESHOLD, StreamingSingingClassifier
 from tea_asr.stable import StablePrefixTracker, StableUpdate
 from tea_asr.translation.session import SessionTranslator
 from tea_asr.vad import SileroVad
@@ -53,6 +55,7 @@ from tea_asr.wire import (
     Pong,
     PreviewPolicy,
     PreviewStatus,
+    SegmentAudioClass,
     SegmentError,
     SegmentQueued,
     SegmentSkipped,
@@ -198,6 +201,8 @@ class Segment:
     system_prompt: str | None = None
     context_domain: str | None = None
     replacements: tuple[ReplacementRule, ...] = ()
+    singing_classifier: StreamingSingingClassifier | None = None
+    audio_class: str | None = None
 
 
 @dataclass(slots=True)
@@ -303,6 +308,12 @@ class StreamSession:
         self._continuous_admission = continuous_admission
         self._continuous_reserved = False
         self._state = SessionState()
+        #: Bounded recent audio lets a VAD-opened segment include its detected
+        #: start samples, without changing the segmenter's audio assembly.
+        self._singing_history = bytearray()
+        self._singing_history_start_sample = 0
+        self._singing_history_samples = round(2.0 * SINGING_SAMPLE_RATE)
+        self._singing_counts = {"speech": 0, "singing": 0}
         self._writer = EventWriter(websocket, self._state.session_id)
         self._profile = "utterance"
         self._transcript_mode = "final_only"
@@ -518,12 +529,90 @@ class StreamSession:
         )
         if self._stable_agreement is not None:
             segment.stable = StablePrefixTracker(self._stable_agreement)
+        if self._config.singing_detection_enabled:
+            history_end = self._singing_history_start_sample + len(self._singing_history) // 2
+            analysis_start = max(start_sample, self._singing_history_start_sample)
+            if history_end > analysis_start:
+                offset = (analysis_start - self._singing_history_start_sample) * 2
+                initial_pcm = bytes(self._singing_history[offset:])
+            else:
+                analysis_start = start_sample
+                initial_pcm = b""
+            segment.singing_classifier = StreamingSingingClassifier(
+                start_sample,
+                initial_pcm=initial_pcm,
+                initial_start_sample=analysis_start,
+                threshold=SINGING_THRESHOLD,
+            )
         self._state.next_index += 1
         self._state.segment = segment
         self._diag.speech_started(
             segment_index=segment.index, start_sample=start_sample, cause=cause
         )
         return segment
+
+    def _remember_singing_audio(self, start_sample: int, pcm: bytes) -> None:
+        """Maintain bounded samples for segments opened after VAD detection."""
+
+        if not self._singing_history:
+            self._singing_history_start_sample = start_sample
+            self._singing_history.extend(pcm)
+        else:
+            end_sample = self._singing_history_start_sample + len(self._singing_history) // 2
+            overlap = max(0, end_sample - start_sample)
+            if start_sample > end_sample:
+                self._singing_history.clear()
+                self._singing_history_start_sample = start_sample
+                overlap = 0
+            if overlap < len(pcm) // 2:
+                self._singing_history.extend(pcm[overlap * 2 :])
+        max_bytes = self._singing_history_samples * 2
+        if len(self._singing_history) > max_bytes:
+            trim_bytes = len(self._singing_history) - max_bytes
+            trim_bytes -= trim_bytes % 2
+            del self._singing_history[:trim_bytes]
+            self._singing_history_start_sample += trim_bytes // 2
+
+    def _update_singing(
+        self,
+        segment: Segment,
+        pcm: bytes | None = None,
+        start_sample: int | None = None,
+        *,
+        seed: bool = False,
+        final: bool = False,
+    ) -> None:
+        classifier = segment.singing_classifier
+        if classifier is None:
+            return
+        if final:
+            decision = classifier.finish()
+        elif seed:
+            decision = classifier.seed()
+        elif pcm is not None and start_sample is not None:
+            decision = classifier.append(pcm, start_sample)
+        else:
+            return
+        if classifier.latest_score is not None:
+            self._diag.singing_score = classifier.latest_score
+        if decision is None or decision.audio_class == segment.audio_class:
+            return
+        if segment.audio_class is not None:
+            self._singing_counts[segment.audio_class] -= 1
+        segment.audio_class = decision.audio_class
+        self._singing_counts[decision.audio_class] += 1
+        self._writer.emit(
+            SegmentAudioClass(
+                session_id=self._state.session_id,
+                event_id=0,
+                segment_id=segment.segment_id,
+                segment_index=segment.index,
+                class_=decision.audio_class,
+                confidence=decision.confidence,
+                revision=decision.revision,
+            )
+        )
+        self._diag.audio_class(**self._singing_counts)
 
     def _enqueue(self, segment: Segment, pcm: bytes, end_sample: int, boundary: str) -> None:
         segment.terminal = True
@@ -751,6 +840,7 @@ class StreamSession:
                 queue_ms=queue_ms,
                 inference_ms=inference_ms,
                 warnings=warnings,
+                audio_class=segment.audio_class,
             )
         )
         stable_state: str | None = None
@@ -821,17 +911,26 @@ class StreamSession:
         if end_sample > state.send_until_sample:
             raise ApiError("protocol_error", "Frame 超出 flow-control 窗口。")
         self._diag.on_frame(pcm)
+        self._remember_singing_audio(start_sample, pcm)
         if self._capture is not None:
             self._capture.write(start_sample, pcm)
 
         if self._profile == "continuous":
+            if state.segment is not None:
+                self._update_singing(state.segment, pcm, start_sample)
             self._advance_continuous(pcm)
         else:
             if len(state.pcm) + len(pcm) > MAX_UTTERANCE_PCM_BYTES:
                 raise ApiError("payload_too_large", "單一 utterance 不得超過 30 秒。")
+            opened = state.segment is None
             if state.segment is None:
                 self._open_segment(start_sample, cause="utterance")
             state.pcm.extend(pcm)
+            assert state.segment is not None
+            if opened:
+                self._update_singing(state.segment, seed=True)
+            else:
+                self._update_singing(state.segment, pcm, start_sample)
 
         state.next_seq += 1
         state.next_sample = end_sample
@@ -873,8 +972,10 @@ class StreamSession:
                         start_sample=event.start_sample,
                     )
                 )
+                self._update_singing(segment, seed=True)
             elif isinstance(event, SegmentClosed):
                 segment = self._state.segment or self._open_segment(event.start_sample)
+                self._update_singing(segment, final=True)
                 self._state.segment = None
                 self._settle_preview_soon(segment)
                 self._enqueue(segment, event.pcm, event.end_sample, event.boundary)
@@ -891,6 +992,7 @@ class StreamSession:
                             start_sample=event.end_sample,
                         )
                     )
+                    self._update_singing(reopened, seed=True)
 
     # -- preview (P2a, experimental) ----------------------------------------
 
@@ -1162,6 +1264,7 @@ class StreamSession:
             for event in self._segmenter.flush():
                 if isinstance(event, SegmentClosed):
                     active = state.segment or self._open_segment(event.start_sample)
+                    self._update_singing(active, final=True)
                     state.segment = None
                     self._enqueue(active, event.pcm, event.end_sample, "stop")
                     closed_any = True
@@ -1188,6 +1291,7 @@ class StreamSession:
                 )
             )
             return
+        self._update_singing(segment, final=True)
         self._writer.emit(
             AudioCommitted(
                 session_id=state.session_id,
@@ -1364,6 +1468,11 @@ class StreamSession:
             "seg_state": self._segmenter.state if self._segmenter is not None else None,
             "segment_open": segment is not None and not segment.terminal,
             "pending_segments": self._pending.qsize(),
+            "singing_score": (
+                segment.singing_classifier.latest_score
+                if segment is not None and segment.singing_classifier is not None
+                else self._diag.singing_score
+            ),
         }
 
     async def _diagnostics_loop(self) -> None:

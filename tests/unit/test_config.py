@@ -35,6 +35,13 @@ def test_defaults_match_what_has_been_accepted() -> None:
     # single-user desktop service, not because more was found unsafe.
     assert config.max_continuous_sessions == 2
     assert config.context_hints_enabled is False
+    assert config.singing_detection_enabled is False
+
+
+@pytest.mark.parametrize(("value", "enabled"), [("1", True), ("0", False), ("false", False)])
+def test_singing_detection_environment_gate(value: str, enabled: bool) -> None:
+    config = ServiceConfig.load(env={"TEA_ASR_SINGING_DETECTION": value})
+    assert config.singing_detection_enabled is enabled
 
 
 @pytest.mark.parametrize(("value", "enabled"), [("1", True), ("0", False), ("true", False)])

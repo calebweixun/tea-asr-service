@@ -3,6 +3,8 @@
 > 原始交付為文件。**2026-09-19更新：** P0–P3與P2a已完成並實測；P2一小時soak與N=1..4併發容量測試已完成，進度表見 [README](../README.md#實作進度)。
 > 以下各階段的完成條件仍然有效，勾選狀態寫在每節開頭。
 
+**2026-10-03 singing detection 狀態：** `singing.py` 的 NumPy streaming labeler 與 `segment.audio_class` wire event 已實作；只在 `singing_detection_enabled`／`TEA_ASR_SINGING_DETECTION=1` 時啟用與宣告 capability。Held-out 留一檔測試沒達 speech FPR <1% 且 singing recall ≥80%；保守 threshold 0.995 的 recall 為 0%，因此預設 off，不能將其視為自動隱藏字幕的已驗收能力。結果見 [評估報告](benchmarks/singing-eval-report.md)。
+
 ## 開發方式
 
 採單一repo、Python package、逐階段垂直切片。每個階段都交付可重現結果，前一個關卡沒通過就不要把後續功能當成完成。使用專案的codebase-memory-mcp做程式探索；尚無程式時不需要硬建空索引，有程式後建立／更新索引。

@@ -186,6 +186,9 @@ class ServiceConfig:
     """
 
     revisable_preview: bool = True
+    #: Experimental audio-class labels. The held-out song/speech threshold
+    #: target was not met; keep this off unless an operator opts in.
+    singing_detection_enabled: bool = False
     #: Strip Unicode Private Use Area characters (BMP U+E000-U+F8FF and
     #: supplementary U+F0000-U+FFFFD/U+100000-U+10FFFD) from recognized text
     #: before it reaches the client. This is a stopgap for a
@@ -349,6 +352,12 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
         config = replace(config, revisable_preview=preview not in {"0", "false", "no"})
     elif get("TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW") == "1":
         config = replace(config, revisable_preview=True)
+    singing_detection = get("TEA_ASR_SINGING_DETECTION")
+    if singing_detection is not None:
+        config = replace(
+            config,
+            singing_detection_enabled=singing_detection not in {"0", "false", "no", ""},
+        )
     if get("TEA_ASR_KEEP_WARM") == "1":
         config = replace(config, keep_warm=True)
     filter_pua = get("TEA_ASR_FILTER_PUA")

@@ -2,7 +2,7 @@
 
 > 基線wire 1.0，P2a增加opt-in wire 1.1擴充；路徑仍使用 `/v1`。v0.1／v0.1.1／v0.2是產品里程碑，不是wire版本。
 >
-> **實作狀態（2026-09-19）：** v0.1的HTTP端點與WS utterance session已實作，機器可讀契約在 [docs/api/](api/)。
+> **實作狀態（2026-10-03）：** v0.1的HTTP端點與WS utterance session已實作，機器可讀契約在 [docs/api/](api/)。
 > continuous profile與Silero VAD已實作，`speech.started` 與 `boundary=silence/max_duration` 會實際送出。
 > 尚未實作：durable session、`/v1/jobs`、resume；這些選項一律回 `unsupported_option` 或404，不會靜默降級。
 > P2a的1.1擴充已通過驗收並預設開啟（`TEA_ASR_REVISABLE_PREVIEW=0` 可關閉），量測見 [P2a報告](benchmarks/p2a-preview-report.md)。
@@ -16,7 +16,7 @@
 - **WS Origin allowlist**：`/v1/stream` upgrade 驗證 `Origin` 僅限 `http://127.0.0.1`／`http://localhost`；省略 Origin（native client）視為合法；不符時在 `accept()` 之前拒絕，網路上實際收到的是空 body 的 HTTP 403，不是 WS close 1008（`src/tea_asr/api/stream.py::run_stream`；細節見下方「`accept()` 之前的拒絕」）。這與上一條 Host 檢查是兩段獨立程式碼，不是同一個中介層。
 - **`limits.max_continuous_sessions`**：伺服器實際 enforce，預設2，只算 `profile=continuous`；超過回 `concurrent_session_limit`，close 4029（`ContinuousSessionAdmission`）。
 - **`limits.max_total_connections`**：伺服器實際 enforce，預設4，涵蓋 `/v1/stream` 所有 profile 的連線總數；超過在 `accept()` 之前拒絕，網路上實際收到的是空 body 的 HTTP 403（不是 WS close 1013；收不到 `hello`；細節見下方「`accept()` 之前的拒絕」）（`ContinuousSessionAdmission` 重用於 `connection_admission`）。
-- **capabilities.features**：固定輸出10個布林欄位（含 `context_biasing`、`durable_revisable`），只有實際驗收過的功能才是 `true`；`partial_transcripts` 依 `TEA_ASR_REVISABLE_PREVIEW` 可能為 `true`；`translation` 只有在明確啟用翻譯 provider（預設關閉）且其模型已 ready 時才是 `true`（見下方「翻譯（opt-in）」）；其餘一律 `false`（`src/tea_asr/wire.py::CapabilityFeatures`）。翻譯關閉時 capabilities 回應與加入翻譯前逐欄相同（`tests/integration/test_translation_disabled.py`）。另有可選的第11個欄位 `stable_transcripts`：只在 revisable 預覽開啟時出現且為 `true`，關閉時整個欄位不出現（見下方「只增不改的穩定字幕流」）。以及可選的物件欄位 `segmentation_control`：只在 continuous profile 可用（VAD 資產已載入）時出現，內容是 server 實際 enforce 的 `session.start.segmentation` 範圍，沒有 VAD 時整個欄位不出現（見下方「切段控制」）。
+- **capabilities.features**：只有實際驗收過的功能才會宣告為 `true`；`partial_transcripts` 依 `TEA_ASR_REVISABLE_PREVIEW` 可能為 `true`；`translation` 只有在明確啟用 provider 且模型 ready 時為 `true`；`singing_detection` 只在設定開啟時為 `true`（預設不宣告，因 held-out 品質門檻未達）；其餘固定布林欄位維持 `false`（`src/tea_asr/wire.py::CapabilityFeatures`）。另有可選欄位 `stable_transcripts`（只在 revisable 預覽開啟時出現）、`segmentation_control`（只有 continuous profile 可用時出現），細節見下方各節。
 - **flow.control 節奏**：只在流控窗口實際往前推進時送出，不是固定週期輪詢（`src/tea_asr/api/stream.py::_handle_frame`）。
 - **WS 心跳**：server 每15秒送 WS-layer ping，30秒未收到 pong 判定斷線（`uvicorn.run(..., ws_ping_interval=15, ws_ping_timeout=30)`，`src/tea_asr/cli.py`）。
 - **v0.2 端點**：`/v1/jobs*` 未實作，一律404，不回假 202（`tests/integration/test_schema_export.py::test_v0_2_endpoints_are_absent_not_faked`）。
@@ -153,6 +153,7 @@ feature 只有完成該功能驗收才變 true；即使 mock mode 也不能假�
 | `stream.speech_started` | INFO | 開新片段 | `segment_index`、`start_sample`、`cause`（`vad`＝VAD 判定開始說話、`split`＝`max_duration` 切段後接續、`utterance`＝utterance profile 第一個 frame） |
 | `stream.segment_closed` | INFO | 片段封口（與 `segment.queued` 同時） | `segment_index`、`boundary`（`silence`／`max_duration`／`stop`／`manual`）、`start_sample`、`end_sample`、`audio_ms` |
 | `stream.segment_done` | INFO | 片段的終局事件送出時 | `outcome`（`final`／`no_speech`／`empty`／`error`）、`latency_ms`（封口到終局）、`queue_ms`、`inference_ms`、`chars`（字數，不是文字）、`stable_state`（`final`／`diverged`／`abandoned`，未開 stable 為 null）、`code`（error 時） |
+| `stream.audio_class` | INFO | opt-in 分類首次決定或修訂時 | 只有目前各類片段計數 `speech`、`singing`，不含片段 ID、音訊或文字 |
 | `stream.heartbeat` | INFO | 每條進行中的 session 每 5 秒一行 | 見下表 |
 | `stream.preview` | DEBUG | 每次預覽 | `outcome`（`published`／`stale`＝跑完但片段已封口或已被較新結果取代／`dropped`＝排隊中被 scheduler 丟掉／`failed`／`deferred`＝被負載保護延後）、`decode_ms`、`audio_ms`、`queue_ms`、`wait_ms`／`gap_ms`（deferred） |
 | `stream.session_ended` | INFO | session 結束（teardown 時） | `reason`（`stopped`／`cancelled`／`client_disconnect`＋`close_code`／`error:<code>`，例如 `error:idle_timeout`、`error:timeline_gap`／`connection_closed`）、`duration_s`、`frames`、`audio_s`、`speech_started`、`segments_closed`、`boundaries`、`finals`、`skipped`、`failed`、`preview_*` 總數、`warnings`、`warnings_suppressed`、`capture_dropped_frames` |
@@ -174,6 +175,7 @@ feature 只有完成該功能驗收才變 true；即使 mock mode 也不能假�
 | `segment_open`、`pending_segments` | 目前是否有片段開著、有幾段在等辨識 |
 | `preview_run`／`preview_published`／`preview_dropped`／`preview_deferred`／`preview_failed`、`preview_decode_ms` | 這 5 秒的預覽帳：跑了幾次（published＋stale）、真的送出幾次、被丟掉（stale＋dropped）、被負載保護延後、失敗；預覽解碼總毫秒數 |
 | `worker_busy` | 這 5 秒單一 MLX worker 被佔用的比例（全服務，所有 session 合計） |
+| `singing_score` | 啟用 singing detection 時，最近一個片段的 0–1 singing 分數；未啟用或尚無分數時為 null |
 
 **WARNING**（同時寫入 `service.log` 與長保存的 `service.error.log`）。每種警告每條 session 每 30 秒最多一行，中間被略過的次數記在下一行的 `suppressed`：
 
@@ -218,6 +220,14 @@ uv run python benchmarks/capture_event_trace.py capture --wav "<capture_dir>/chu
 | `outcome=no_speech`／`empty` | 模型沒聽出字或全被 PUA 過濾 | `pua_filtered` |
 
 3. 需要重現時，打開除錯錄音，等問題再出現，用上面的 `capture_event_trace.py` 把 `capture_dir` 裡對應時間的 WAV 重播到測試 server。
+
+## Singing detection（實驗性、預設關閉）
+
+`singing_detection_enabled`（TOML `[service]`）或 `TEA_ASR_SINGING_DETECTION=1` 開啟伺服器端標記。只有開啟時 `/v1/capabilities.features.singing_detection` 才出現且為 `true`。伺服器仍照常辨識歌曲；client 可依自己的政策隱藏 `singing` 的字幕。
+
+分類器只使用 16 kHz PCM 的 NumPy 特徵，約 1.4 秒內先決定 `speech`／`singing`，之後最多因新證據修訂一次。`segment.audio_class` 欄位為 `{segment_id, segment_index, class, confidence, revision}`；首次決定時送出，類別改變時以 `revision=1` 再送一次。`transcript.final.audio_class` 可帶該片段最後的標籤；未啟用時省略能力宣告、不送事件，final 不帶此欄位。舊 client 可忽略未知事件 type。
+
+**品質限制：** 留一檔交叉驗證未達「speech 錯判 singing <1%、singing recall ≥80%」。以 threshold `0.995` 優先避免隱藏講道，測試語料 held-out 的歌唱 recall 為 0%，church 29 分鐘講道為 0 次 false call。這是保守實驗標記，不應視為已驗收的自動字幕隱藏功能；預設保持關閉。完整 per-file 數字、trade-off 與重現方式見 [singing evaluation report](benchmarks/singing-eval-report.md)。
 
 ## WebSocket：v0.1
 

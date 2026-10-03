@@ -120,6 +120,7 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 | P2a 串流修訂 | 已驗收，預設開啟 | 首次可見延遲 p95 0.91 秒、final 與 final-only 完全一致、混合負載不互相阻塞，見 [P2a 報告](docs/benchmarks/p2a-preview-report.md)。`TEA_ASR_REVISABLE_PREVIEW=0` 可關閉 |
 | P3 服務管理 | 完成 | LaunchAgent install/uninstall/status、singleton lock、port 檢查、idle unload 與重新載入、TOML 設定、JSON log 輪替、關閉時 drain、睡眠喚醒偵測與 worker 健康探測 |
 | Recognition hints | 已實作，預設關閉 | `TEA_ASR_CONTEXT_HINTS=1` 開啟 dictionaries、profiles 與 deterministic replacements；`GET /v1/dictionaries` 逐檔回報無效字典而保留有效項目，session start 仍拒絕無效 profile。Model prompt 需另外開啟 `TEA_ASR_CONTEXT_PROMPT=1`，且只有 hints 已開時生效；prompt 預設關閉、仍屬 experimental，prompt token 數只記 server log。4段真實講道音訊 smoke 未見改善。見 [04 API 契約](docs/04-api.md) |
+| Singing labels | 已實作，實驗性且預設關閉 | `singing_detection_enabled`／`TEA_ASR_SINGING_DETECTION=1` 才送 `segment.audio_class` 並宣告能力。留一檔驗證在 threshold 0.995 下 singing recall 0%，29 分鐘 church speech 0 次 false call，未達使用目標所以不預設啟用；仍會照常轉錄。見 [評估報告](docs/benchmarks/singing-eval-report.md) |
 | P4 長檔案與保存 | 未開始 | `/v1/jobs` 不存在，回404 |
 | P5a Mac client | 可用，未完整驗收 | 選單列 app：聽寫（定稿後貼進前景 app）與會議記錄（即時視窗＋Markdown 匯出），見 [clients/macos](clients/macos/)。P5b 輸入法組字區整合未做 |
 

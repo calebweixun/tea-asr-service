@@ -95,6 +95,7 @@ def build_client(
     debug_capture_audio: bool = False,
     context_hints_enabled: bool = False,
     context_prompt_enabled: bool = False,
+    singing_detection_enabled: bool = False,
 ) -> TestClient:
     app = create_app(
         Path("unused"),
@@ -114,6 +115,7 @@ def build_client(
             debug_capture_audio=debug_capture_audio,
             context_hints_enabled=context_hints_enabled,
             context_prompt_enabled=context_prompt_enabled,
+            singing_detection_enabled=singing_detection_enabled,
         ),
         vad_model=vad,
         rate_limiter=rate_limiter,

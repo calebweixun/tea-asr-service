@@ -129,6 +129,17 @@
               }
             ]
           },
+          "singing_detection": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Singing Detection"
+          },
           "stable_transcripts": {
             "anyOf": [
               {

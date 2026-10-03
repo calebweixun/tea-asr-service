@@ -69,6 +69,15 @@ def test_capabilities_declare_1_1_only_when_preview_is_enabled(
         assert body["features"]["partial_transcripts"] is True
 
 
+def test_singing_detection_capability_is_opt_in() -> None:
+    with build_client(FakeSupervisor()) as http:
+        disabled = http.get("/v1/capabilities", headers=AUTH).json()
+    with build_client(FakeSupervisor(), singing_detection_enabled=True) as http:
+        enabled = http.get("/v1/capabilities", headers=AUTH).json()
+    assert "singing_detection" not in disabled["features"]
+    assert enabled["features"]["singing_detection"] is True
+
+
 def test_transcription_contract(client: TestClient) -> None:
     with client as http:
         response = http.post(

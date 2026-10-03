@@ -482,6 +482,7 @@ def create_app(
                 translation=translation is not None and translation.state == "ready",
                 context_biasing=settings.context_hints_enabled,
                 context_limits=ContextLimits() if settings.context_hints_enabled else None,
+                singing_detection=True if settings.singing_detection_enabled else None,
             ),
             limits=CapabilityLimits(
                 max_continuous_sessions=settings.max_continuous_sessions if vad is not None else 0,

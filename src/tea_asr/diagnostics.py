@@ -182,6 +182,7 @@ class SessionDiagnostics:
         self._last_frame_at: float | None = None
         self._last_heartbeat_at = now
         self._busy_at_heartbeat = busy_seconds() if busy_seconds is not None else 0.0
+        self.singing_score: float | None = None
         #: The quiet and no-speech trackers run on the audio clock (samples),
         #: so they are exact however the frames happen to be sized.
         #: (samples, sum of squares, peak) per closed 1 s block, newest last.
@@ -283,6 +284,11 @@ class SessionDiagnostics:
         )
         if queue_ms is not None:
             self.queue_wait("final", queue_ms, segment_index=segment_index)
+
+    def audio_class(self, *, speech: int, singing: int) -> None:
+        """Log only aggregate class counts; never log text or segment IDs."""
+
+        self.emit("stream.audio_class", speech=speech, singing=singing)
 
     def session_ended(self, *, reason: str, now: float | None = None, **fields: Any) -> None:
         moment = self._now(now)
@@ -528,6 +534,11 @@ class SessionDiagnostics:
                 round(window.vad_speech / window.vad_windows, 3) if window.vad_windows else None
             ),
             **state,
+            "singing_score": (
+                round(float(state.get("singing_score", self.singing_score)), 3)
+                if state.get("singing_score", self.singing_score) is not None
+                else None
+            ),
             "preview_run": window.preview_run,
             "preview_published": window.preview_published,
             "preview_dropped": window.preview_dropped,
