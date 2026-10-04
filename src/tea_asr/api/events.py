@@ -81,6 +81,12 @@ class EventWriter:
         payload.pop("session_id", None)
         payload.pop("event_id", None)
         event_type = str(payload["type"])
+        if event_type == "segment.audio_class":
+            payload["class"] = payload.pop("class_")
+        # Keep the pre-feature final shape byte-for-byte stable for disabled
+        # sessions; when enabled, the optional field carries a real label.
+        if event_type == "transcript.final" and payload.get("audio_class") is None:
+            payload.pop("audio_class", None)
         if event_type in COALESCED_TYPES:
             self._replace(event_type, payload)
         elif event_type == "transcript.partial":

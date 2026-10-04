@@ -226,6 +226,137 @@
         "title": "AudioFormat",
         "type": "object"
       },
+      "ContextEcho": {
+        "additionalProperties": false,
+        "properties": {
+          "domain_chars": {
+            "title": "Domain Chars",
+            "type": "integer"
+          },
+          "hotwords_count": {
+            "title": "Hotwords Count",
+            "type": "integer"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "prompt_applied": {
+            "title": "Prompt Applied",
+            "type": "boolean"
+          },
+          "replacements_count": {
+            "title": "Replacements Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "domain_chars",
+          "hotwords_count",
+          "replacements_count",
+          "prompt_applied"
+        ],
+        "title": "ContextEcho",
+        "type": "object"
+      },
+      "ContextOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "domain": {
+            "anyOf": [
+              {
+                "maxLength": 300,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Domain"
+          },
+          "hotwords": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 32,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Hotwords"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "replacements": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/models/ContextReplacement"
+                },
+                "maxItems": 500,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Replacements"
+          }
+        },
+        "title": "ContextOptions",
+        "type": "object"
+      },
+      "ContextReplacement": {
+        "additionalProperties": false,
+        "description": "A deterministic exact substring replacement (`from` is a JSON key).",
+        "properties": {
+          "from": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "From",
+            "type": "string"
+          },
+          "to": {
+            "maxLength": 32,
+            "title": "To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "title": "ContextReplacement",
+        "type": "object"
+      },
       "ErrorEvent": {
         "additionalProperties": false,
         "properties": {
@@ -469,6 +600,66 @@
         "title": "PreviewStatus",
         "type": "object"
       },
+      "SegmentAudioClass": {
+        "additionalProperties": false,
+        "properties": {
+          "class": {
+            "enum": [
+              "speech",
+              "singing"
+            ],
+            "title": "Class",
+            "type": "string"
+          },
+          "confidence": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "event_id": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "title": "Event Id",
+            "type": "integer"
+          },
+          "revision": {
+            "maximum": 1,
+            "minimum": 0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "segment_id": {
+            "title": "Segment Id",
+            "type": "string"
+          },
+          "segment_index": {
+            "title": "Segment Index",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "segment.audio_class",
+            "default": "segment.audio_class",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "event_id",
+          "segment_id",
+          "segment_index",
+          "class",
+          "confidence",
+          "revision"
+        ],
+        "title": "SegmentAudioClass",
+        "type": "object"
+      },
       "SegmentError": {
         "additionalProperties": false,
         "properties": {
@@ -702,6 +893,17 @@
           "audio": {
             "$ref": "#/$defs/models/AudioFormat"
           },
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/models/ContextOptions"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "durable": {
             "default": false,
             "title": "Durable",
@@ -786,6 +988,17 @@
       "SessionStarted": {
         "additionalProperties": false,
         "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/models/ContextEcho"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "event_id": {
             "maximum": 9007199254740991,
             "minimum": 0,
@@ -1009,6 +1222,22 @@
       "TranscriptFinal": {
         "additionalProperties": false,
         "properties": {
+          "audio_class": {
+            "anyOf": [
+              {
+                "enum": [
+                  "speech",
+                  "singing"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Audio Class"
+          },
           "audio_ms": {
             "title": "Audio Ms",
             "type": "integer"
@@ -1144,6 +1373,13 @@
             "default": "transcript.partial",
             "title": "Type",
             "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
           }
         },
         "required": [
@@ -1461,6 +1697,7 @@
           "flow.control": "#/$defs/models/FlowControl",
           "pong": "#/$defs/models/Pong",
           "preview.status": "#/$defs/models/PreviewStatus",
+          "segment.audio_class": "#/$defs/models/SegmentAudioClass",
           "segment.error": "#/$defs/models/SegmentError",
           "segment.queued": "#/$defs/models/SegmentQueued",
           "segment.skipped": "#/$defs/models/SegmentSkipped",
@@ -1492,6 +1729,9 @@
         },
         {
           "$ref": "#/$defs/models/SegmentQueued"
+        },
+        {
+          "$ref": "#/$defs/models/SegmentAudioClass"
         },
         {
           "$ref": "#/$defs/models/TranscriptPartial"

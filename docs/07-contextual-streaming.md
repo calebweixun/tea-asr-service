@@ -21,7 +21,7 @@
 | 能力 | 本案方式 | 第一階段 |
 |---|---|---|
 | 後文修正前面的辨識 | 對同一個尚未定稿片段，用累積音訊重辨識，整段更新 | **P2a必要** |
-| 前文／專有詞輔助辨識 | 使用已確認文字作有限context提示；需验证system_prompt效果 | P2a實驗，独立capability，預設關閉 |
+| 前文／專有詞輔助辨識 | 確定性 replacement 優先；domain/hotword model prompt 獨立開關 | replacement 可用；prompt experimental 且預設關閉 |
 | 語句潤飾、語意重寫 | 另行文字校對或LLM，保留逐字稿並提供版本 | 後續opt-in，不是即時ASR必要依賴 |
 
 第一種方式讓ASR在每次推論時同時看到該片段較早與較晚的聲音；不需要先常駐第二個LLM。更正品質仍需實測，不能承諾後文一定會修正正確。句子一旦final，後續聲音不再自動回改該句。
@@ -29,6 +29,16 @@
 所選mlx-audio固定版本的 `generate` 接受完整音訊，`stream_transcribe` 主要是輸出token串流；P2a在服務層做累積音訊重辨識，`native_audio_streaming`仍為false。未證實可安全沿用變動音訊的KV cache，不自行沿用以求速度。[固定版Qwen3 ASR實作](https://github.com/Blaizzy/mlx-audio/blob/04151c6abb74b886f879a4457ccdc96761f10102/mlx_audio/stt/models/qwen3_asr/qwen3_asr.py)
 
 Apple Speech提供中間結果開關；這支持中間稿／終稿的介面區分，不能據此推論系統聽寫的內部校對流程。[shouldReportPartialResults](https://developer.apple.com/documentation/speech/sfspeechrecognitionrequest/shouldreportpartialresults)
+
+## 前一段尾音補句首（final-only carry，2026-10-03）
+
+speakers 語料中有數段模型只回出 segment 後半句的案例；同一音訊多給前後文的離線解碼曾找回漏掉的句首，但也帶入鄰段文字。因此只在 final 解碼時，把目前 segment 起點前最多 `carry_context_s` 秒送入模型，再從新文字開頭去掉屬於前一 final 的尾端重疊。segment sample 時間與 `audio_ms` 維持原切段範圍。
+
+設定在 `[service]`：`carry_context_s` 範圍 0–5 秒、預設 **0（關閉）**；`carry_context_max_gap_s` 範圍 0–30 秒、預設 **1.5**。環境變數分別為 `TEA_ASR_CARRY_CONTEXT_S` 與 `TEA_ASR_CARRY_CONTEXT_MAX_GAP_S`。只有緊接的前一段有成功 final，且從該段 `end_sample` 到新段 `start_sample` 的間隔不超過 max gap，才帶音訊及文字上下文。答案集相鄰項目間隔統計：speakers 39 個轉段中 35 個在 1.5 秒內、39 個在 5 秒內；music-8900 的 20 個轉段中 15 個在 1.5 秒內、18 個在 5 秒內。這只量到答案項目的時間間隔，不代表 live segmenter 的分布。
+
+去重使用共用的 `strip_carried_overlap()`：NFKC 寬度折疊與 casefold 後忽略標點／空白，對前一 final 的尾端與新辨識開頭做有界編輯距離比對，至少 4 個正規化字元，最多約每 4 字 1 個編輯差異。移除時用來源索引切原始文字，保留新句拼法及標點。成功去重只修改 final `text`，加 `carry_overlap_stripped`；找不到可信重疊或只剩空白時，改用 segment 音訊重跑一次，並加 `carry_overlap_uncertain`。這時重跑 segment-only 會沿用原辨識路徑，降低把鄰段內容重複顯示的風險；重跑比單次 segment 辨識多一次推論成本，重疊成立時成本是額外 L 秒左音訊。
+
+只讓 final 使用 carry。preview 每次重辨識都加 L 秒會把額外成本乘上預覽次數；preview 仍只代表自己的 segment，stable 仍從這些 preview 衍生，final 收尾照既有 tracker 規則維持 append-only。真實模型 CER／bootstrap CI 與 duplication count 由本機 `.soak/gold/run-carry-eval.sh` 對 speakers、music-8900 測量。在這些結果通過 docs/06 的品質門檻前，`carry_context_s` 維持預設 0。
 
 ## 可修訂的文字單位
 
@@ -93,17 +103,21 @@ preview在所有等待中的final之後執行、batch之前；不改既有final�
 
 P0 benchmark必須包括「0.8秒、1.6秒……8秒多次重跑＋最後final」的**總推論成本／原始8秒**。單次8秒音訊RTF很低，不代表這個模式足夠即時。若8秒preview task的p95超過700ms，先限制可preview長度或暫停較長片段預覽，測得合格前不預設開啟。單一模型若無法達到需求，再提出真增量ASR後端比較，不能僅重命名stream選項。
 
-## 前文文字context：獨立實驗
+## Recognition context：model prompt experimental，預設關閉
 
-P2a基本路徑不依赖文字prompt；同片段音訊本身已提供前後文。前文提示待驗證後才啟用 `context_biasing=true`：
+服務支援每個 session 的 domain、hotwords、server dictionary 與 replacement table。`TEA_ASR_CONTEXT_HINTS=1` 才會宣告 `capabilities.features.context_biasing=true`，並啟用 profiles 與 deterministic replacements；預設關閉。審閱過的 replacement 是建議工具。model prompt 由獨立的 `TEA_ASR_CONTEXT_PROMPT=1` 開啟，且需先啟用 context hints；prompt 預設關閉。prompt 關閉時 domain/hotwords 仍驗證與回報，但不會進模型 request。`session.started.context.prompt_applied` 說明該 session 是否送出 prompt；`session.started.context` 永遠不含 `prompt_tokens`，因為 prompt 逐 request 組裝，token 數會寫入 server log。
 
-1. 來源僅同session最近兩段已final文字，合計最多256個模型token；可選session.start提供的最多32個hotwords、每詞最多32 Unicode code points。合併prompt最多384個模型token。
-2. 不把partial餵回下一輪prompt，避免自我強化錯誤；不自動讀取其他app、剪貼簿或其他session的內容。
-3. context在segment打開時凍結，該段所有preview/final使用同一版本；前段稍後final則只供下一新段使用，避免同一段因prompt變動而抖動。
-4. adapter驗證 `system_prompt` 接法，明示前文僅供詞彙參考、只轉錄目前聲音。model card其他backend的 `context=` 不能直接照搬。
-5. 對照測試：同音專有詞是否改善、是否抄出前文、數字或否定詞是否遭改寫、錯誤context是否放大偏誤。未通過時保持capability=false。
+**2026-09-28 真實音訊 smoke finding：** coordinator 用4段真實講道音訊比較了 prompt on/off。Prompt 約增加150個 prompt tokens，整體沒有改善：一段原本正確的「聖經」變成「聖家」，另一段失去標點；「住棚節」的三種常見誤聽「祝棚節」、「祝鵬節」、「祝鵬傑」也沒有被 prompt 修正。故 model prompt 保持 experimental 並預設關閉；對確認過的固定誤聽，建議用 deterministic replacement。這是小樣本觀察，不代表完整 CER 評估。
 
-P2a實验介面用session.start的 `context` 物件（04定義），連線中不可更新；後續若需要使用者修正字典或清空topic，先開新session。不同會議／來源切換必須清空歷史，不做跨session「記憶」。
+- prompt 來源只包含這次 session 的 domain 和 hotwords；不使用前幾段 final，也不讀其他 app、剪貼簿或其他 session。`use_previous_finals` 已從舊草圖移除，延後到有獨立評估後再做。
+- **每個 segment 開啟時凍結** prompt 和 replacement 規則。該 segment 的全部 preview/final 沿用快照，後續 session 或檔案變更只影響下一個 session。
+- 本機鎖定的 mlx-audio 0.4.5 Qwen3-ASR 程式中，`generate()` 接受 `system_prompt`（`qwen3_asr.py:1199–1248`），`_build_prompt()` 把它作為純文字放在 system turn（`:911–945`）。server 以該模型 tokenizer 將 context prompt 限為384 tokens。只有 `TEA_ASR_CONTEXT_PROMPT=1` 時才傳送 domain/hotwords；關閉時不向 model request 加入欄位，與無 context 的 request byte-identical。`session.started.context.prompt_applied` 回報實際狀態；`session.started.context` 不含 prompt token count，backend 回報的逐 request token 數只記在 `stream.context_prompt_tokens` INFO log。替換表獨立於 prompt。
+- PUA filter 與 repetition trim 之後才套 replacement，stable tracking 之前。替換依原始辨識字串由左至右執行，最長命中優先且不重疊；不遞迴處理替換結果，`raw_text` 不變。
+- replacement 若落在已提交 stable 字尾或跨過提交邊界，stable 永遠不回刪既有文字：preview 不會發布與已提交前綴衝突的更新；finalizer 保留原 committed prefix，依對齊結果追加 final 的尾段。stable 可能呈現舊前綴和修正後尾段組成的文字，final 則保留完整替換結果。
+- final 若含 domain 文字中至少12個連續原字，加入 `context_echo` 警告，不移除 transcript。它只能偵測文字重疊，無法確認音訊是否真的說了這些字，因此可能誤報。
+- CER 驗收必須檢查聖經同音詞、prompt echo、替換誤傷、數字、否定詞與錯誤 context 放大偏誤。數字和否定詞沒有特殊保護。未完成評估前不要把預設改為開啟。
+
+Source inspected in the locked environment: [mlx-audio Qwen3-ASR implementation](https://github.com/Blaizzy/mlx-audio/blob/04151c6abb74b886f879a4457ccdc96761f10102/mlx_audio/stt/models/qwen3_asr/qwen3_asr.py), also present under the service venv's `site-packages/mlx_audio/stt/models/qwen3_asr/qwen3_asr.py`.
 
 ## 四種client的更新行為
 
@@ -197,4 +211,3 @@ final 並不比較可靠（n=2 字幕流 CER 12.9% vs final 12.0%；n=3 為 8.3%
 
 **界線。** 超過 `max_preview_audio_ms` 不再有 partial，穩定流等 final 才前進。session cancel／error 時不補收尾事件。
 10 秒以上同講者長句的分歧率沒有語料可量（拼接語料上模型本身會丟句，見報告），列為未證實。
-

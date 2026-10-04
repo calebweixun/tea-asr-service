@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+MAX_CONTEXT_PROMPT_TOKENS = 384
+
 
 class ModelCompatibilityError(RuntimeError):
     pass
@@ -65,7 +67,13 @@ class TeaMlxBackend:
         if not hasattr(self._model, "_tokenizer") or not hasattr(self._model, "_feature_extractor"):
             raise ModelCompatibilityError("Tokenizer or feature extractor was not initialized")
 
-    def transcribe(self, audio: np.ndarray, *, language: str = "Chinese") -> Transcription:
+    def transcribe(
+        self,
+        audio: np.ndarray,
+        *,
+        language: str = "Chinese",
+        system_prompt: str | None = None,
+    ) -> Transcription:
         if self._model is None:
             raise RuntimeError("Model has not been loaded")
         samples = np.asarray(audio, dtype=np.float32).reshape(-1)
@@ -74,15 +82,19 @@ class TeaMlxBackend:
         if not np.isfinite(samples).all():
             raise ValueError("Audio contains NaN or infinity")
 
-        result = self._model.generate(
-            samples,
-            language=language,
-            temperature=0.0,
-            batch_size=1,
-            max_tokens=512,
-            min_chunk_duration=1.0,
-            verbose=False,
-        )
+        options: dict[str, Any] = {
+            "language": language,
+            "temperature": 0.0,
+            "batch_size": 1,
+            "max_tokens": 512,
+            "min_chunk_duration": 1.0,
+            "verbose": False,
+        }
+        if system_prompt is not None:
+            options["system_prompt"] = _bounded_system_prompt(
+                system_prompt, self._model._tokenizer
+            )
+        result = self._model.generate(samples, **options)
         model_samples = max(samples.size, 16_000)
         return Transcription(
             text=str(result.text).strip(),
@@ -101,3 +113,27 @@ class TeaMlxBackend:
             mx.clear_cache()
         except ImportError:
             pass
+
+
+def _bounded_system_prompt(prompt: str, tokenizer: Any) -> str:
+    """Cap the context text using the tokenizer used by Qwen3-ASR itself.
+
+    mlx-audio 0.4.5's Qwen3-ASR `generate()` accepts `system_prompt`; its
+    `_build_prompt()` places that plain text inside the system turn. See
+    `qwen3_asr.py` lines 911-945 and 1199-1248 (pinned source is cited in
+    docs/07-contextual-streaming.md).
+    """
+
+    encoded = tokenizer.encode(prompt + "\n", return_tensors="np")
+    if encoded.shape[-1] <= MAX_CONTEXT_PROMPT_TOKENS:
+        return prompt
+    tokens = encoded[0, :MAX_CONTEXT_PROMPT_TOKENS].tolist()
+    while tokens:
+        candidate = tokenizer.decode(tokens, skip_special_tokens=True)
+        if (
+            tokenizer.encode(candidate + "\n", return_tensors="np").shape[-1]
+            <= MAX_CONTEXT_PROMPT_TOKENS
+        ):
+            return candidate
+        tokens.pop()
+    return ""

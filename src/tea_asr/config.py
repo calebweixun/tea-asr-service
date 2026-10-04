@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import secrets
 import tomllib
@@ -27,6 +28,10 @@ class AppPaths:
     @property
     def config_file(self) -> Path:
         return self.support / "config.toml"
+
+    @property
+    def dictionaries_dir(self) -> Path:
+        return self.support / "dictionaries"
 
     @property
     def lock_file(self) -> Path:
@@ -182,6 +187,12 @@ class ServiceConfig:
     """
 
     revisable_preview: bool = True
+    #: `segment.audio_class` labels (docs/04). On since the held-out YAMNet
+    #: evaluation in docs/benchmarks/singing-eval-report.md met its targets.
+    #: It only takes effect when the pinned YAMNet asset is present (fetched by
+    #: `tea-asr model-prepare`); without it the capability is simply not
+    #: advertised. Transcription is never changed, only labelled.
+    singing_detection_enabled: bool = True
     #: Strip Unicode Private Use Area characters (BMP U+E000-U+F8FF and
     #: supplementary U+F0000-U+FFFFD/U+100000-U+10FFFD) from recognized text
     #: before it reaches the client. This is a stopgap for a
@@ -190,6 +201,17 @@ class ServiceConfig:
     #: `tea_asr/api/stream.py` for the measurements and the removal
     #: condition. Default on since docs/benchmarks/pua-bf16-ab-report.md.
     filter_pua: bool = True
+    #: Maximum consecutive copies kept by the streaming repetition guard.
+    #: One-character runs preserve conversational emphasis (default 3); units
+    #: of 2–6 characters use the same default. Environment overrides:
+    #: TEA_ASR_REPETITION_SINGLE_CHAR_LIMIT and
+    #: TEA_ASR_REPETITION_MULTI_CHAR_LIMIT.
+    repetition_single_char_limit: int = 3
+    repetition_multi_char_limit: int = 3
+    #: Numeral-bearing loops are trimmed to three copies after this threshold.
+    #: A run of one decimal digit needs at least ten copies for number safety.
+    #: Environment override: TEA_ASR_REPETITION_NUMERAL_LOOP_LIMIT.
+    repetition_numeral_loop_limit: int = 6
     max_total_connections: int = 4
     #: Concurrent `continuous` profile sessions the single MLX worker admits
     #: before `/v1/stream` rejects an additional session.start with
@@ -255,6 +277,13 @@ class ServiceConfig:
     #: Refuse to keep the translation worker if the loaded model occupies more
     #: than this much Metal memory. Measured peak is ~8.5 GiB.
     translation_max_memory_gib: float = 12.0
+    #: Enables validated context, server dictionaries, and deterministic
+    #: replacements. Off by default; reviewed exact replacements are safe to
+    #: enable independently of the experimental model prompt below.
+    context_hints_enabled: bool = False
+    #: Experimental prompt to the ASR model. Separate from deterministic
+    #: replacements because the real-sermon smoke run did not show a benefit.
+    context_prompt_enabled: bool = False
     #: Revisable-preview cadence (docs/07「輕量化與排程」). A preview may start
     #: once `preview_min_audio_ms` of new audio has arrived since the last
     #: published one, and no sooner than
@@ -267,6 +296,12 @@ class ServiceConfig:
     preview_min_interval_ms: int = 300
     preview_min_audio_ms: int = 300
     preview_load_factor: float = 2.0
+    #: Audio before a new final's segment start to include as left context.
+    #: Kept off until the speaker/music gold evaluation meets its quality gate.
+    carry_context_s: float = 0.0
+    #: Maximum silence/gap after the previous final for its text/audio to be
+    #: eligible as left context. This does not change segment sample clocks.
+    carry_context_max_gap_s: float = 1.5
     #: Diagnostics only, off by default: keep the most recent
     #: `debug_capture_minutes` of every `/v1/stream` session's received 16 kHz
     #: PCM as rolling WAV files under `<logs>/captures/`, so the exact audio
@@ -282,6 +317,14 @@ class ServiceConfig:
         source = os.environ if env is None else env
         config = cls()
         return _apply_env(config, source)
+
+    def __post_init__(self) -> None:
+        if min(
+            self.repetition_single_char_limit,
+            self.repetition_multi_char_limit,
+            self.repetition_numeral_loop_limit,
+        ) < 1:
+            raise ValueError("repetition limits must be at least 1")
 
     @classmethod
     def load(
@@ -327,11 +370,26 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
         config = replace(config, revisable_preview=preview not in {"0", "false", "no"})
     elif get("TEA_ASR_EXPERIMENTAL_REVISABLE_PREVIEW") == "1":
         config = replace(config, revisable_preview=True)
+    singing_detection = get("TEA_ASR_SINGING_DETECTION")
+    if singing_detection is not None:
+        config = replace(
+            config,
+            singing_detection_enabled=singing_detection not in {"0", "false", "no", ""},
+        )
     if get("TEA_ASR_KEEP_WARM") == "1":
         config = replace(config, keep_warm=True)
     filter_pua = get("TEA_ASR_FILTER_PUA")
     if filter_pua is not None:
         config = replace(config, filter_pua=filter_pua not in {"0", "false", "no"})
+    repetition_single_char_limit = get("TEA_ASR_REPETITION_SINGLE_CHAR_LIMIT")
+    if repetition_single_char_limit is not None:
+        config = replace(config, repetition_single_char_limit=int(repetition_single_char_limit))
+    repetition_multi_char_limit = get("TEA_ASR_REPETITION_MULTI_CHAR_LIMIT")
+    if repetition_multi_char_limit is not None:
+        config = replace(config, repetition_multi_char_limit=int(repetition_multi_char_limit))
+    repetition_numeral_loop_limit = get("TEA_ASR_REPETITION_NUMERAL_LOOP_LIMIT")
+    if repetition_numeral_loop_limit is not None:
+        config = replace(config, repetition_numeral_loop_limit=int(repetition_numeral_loop_limit))
     allow_lan = get("TEA_ASR_ALLOW_LAN")
     if allow_lan is not None:
         config = replace(config, allow_lan=allow_lan not in {"0", "false", "no", ""})
@@ -358,6 +416,12 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
     translation = get("TEA_ASR_TRANSLATION")
     if translation is not None:
         config = replace(config, translation_enabled=translation not in {"0", "false", "no", ""})
+    context_hints = get("TEA_ASR_CONTEXT_HINTS")
+    if context_hints is not None:
+        config = replace(config, context_hints_enabled=context_hints == "1")
+    context_prompt = get("TEA_ASR_CONTEXT_PROMPT")
+    if context_prompt is not None:
+        config = replace(config, context_prompt_enabled=context_prompt == "1")
     translation_path = get("TEA_ASR_TRANSLATION_MODEL_PATH")
     if translation_path is not None:
         config = replace(config, translation_model_path=translation_path.strip())
@@ -370,6 +434,12 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
     load_factor = get("TEA_ASR_PREVIEW_LOAD_FACTOR")
     if load_factor is not None:
         config = replace(config, preview_load_factor=float(load_factor))
+    carry_context = get("TEA_ASR_CARRY_CONTEXT_S")
+    if carry_context is not None:
+        config = replace(config, carry_context_s=float(carry_context))
+    carry_max_gap = get("TEA_ASR_CARRY_CONTEXT_MAX_GAP_S")
+    if carry_max_gap is not None:
+        config = replace(config, carry_context_max_gap_s=float(carry_max_gap))
     capture = get("TEA_ASR_DEBUG_CAPTURE_AUDIO")
     if capture is not None:
         config = replace(config, debug_capture_audio=capture not in {"0", "false", "no", ""})
@@ -399,6 +469,33 @@ def validate_preview_cadence_or_raise(config: ServiceConfig) -> None:
             f"preview_load_factor={config.preview_load_factor} 超出範圍"
             f"（必須介於 0 與 {PREVIEW_LOAD_FACTOR_MAX:g} 之間，0 表示關閉負載保護）。"
         )
+
+
+CARRY_CONTEXT_S_RANGE = (0.0, 5.0)
+CARRY_CONTEXT_MAX_GAP_S_RANGE = (0.0, 30.0)
+
+
+def validate_carry_context_or_raise(config: ServiceConfig) -> None:
+    """Refuse carry-over windows outside the memory and timing bounds."""
+
+    for name, value, limits in (
+        ("carry_context_s", config.carry_context_s, CARRY_CONTEXT_S_RANGE),
+        (
+            "carry_context_max_gap_s",
+            config.carry_context_max_gap_s,
+            CARRY_CONTEXT_MAX_GAP_S_RANGE,
+        ),
+    ):
+        low, high = limits
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not low <= value <= high
+        ):
+            raise RuntimeError(
+                f"{name}={value!r} 超出範圍（必須介於 {low:g} 與 {high:g} 秒之間）。"
+            )
 
 
 #: Ceiling on `debug_capture_minutes` (docs/06 #4). An hour of 16 kHz PCM is

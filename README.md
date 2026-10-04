@@ -2,7 +2,7 @@
 
 在 Apple Silicon Mac 上運行的本機語音辨識服務，讓輸入工具、字幕工具、OBS 與會議紀錄共用一份模型。
 
-**目前狀態：P0–P3與P2a已完成並實測，Mac選單列client可用。** 指定模型已在M4 Pro真實載入與推論。私用區字元的成因已定位在MLX量化本身（上游BF16為0%），服務端預設過濾，見 [PUA A/B報告](docs/benchmarks/pua-bf16-ab-report.md)。Silero VAD已接上並用真實口語校準，串流預覽通過驗收且預設開啟。
+**目前狀態：P0–P3與P2a已完成並實測，Mac選單列client可用。** 指定模型已在M4 Pro真實載入與推論。私用區字元的成因已定位在MLX量化本身（上游BF16為0%），服務端預設過濾，見 [PUA A/B報告](docs/benchmarks/pua-bf16-ab-report.md)。Silero VAD已接上並用真實口語校準，串流預覽通過驗收且預設開啟。Final 左上下文 carry 已實作但預設關閉，等待 speakers／music-8900 真模型品質驗收。
 
 ## 先看這裡
 
@@ -28,6 +28,7 @@
 | 開 OBS 直播字幕外掛的 repo | [08 OBS 外掛規格](docs/08-obs-plugin.md) |
 | 用 Mac 選單列 app 聽寫或做會議記錄 | [clients/macos](clients/macos/) |
 | 實際測試與回報問題 | [09 測試指南](docs/09-testing-guide.md) |
+| 用真實錄音覆驗 OBS live subtitles 與字幕畫面 | [09 真實錄音字幕 soak](docs/09-testing-guide.md#六真實錄音字幕-soak) |
 
 建議先閱讀 01 的「範圍」，再把 06 最後的開發提示交给實作模型。API 定義以 04 為準；不確定事項以 05 的驗證關卡為準。
 
@@ -69,6 +70,8 @@ uv run tea-asr service uninstall
 port = 8327
 idle_unload_s = 900   # 閒置這麼久就卸載模型釋放記憶體；0 或 keep_warm 可關閉
 keep_warm = false
+carry_context_s = 0.0  # final 左上下文；未通過 gold 品質門檻前維持關閉
+carry_context_max_gap_s = 1.5
 ```
 
 服務啟動時會檢查 port 與 singleton lock，第二份實例會被拒絕並告訴你是誰占著。
@@ -105,7 +108,7 @@ TEA_ASR_REVISABLE_PREVIEW=0 uv run tea-asr serve
 say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o /tmp/demo.aiff && ffmpeg -y -i /tmp/demo.aiff -ar 16000 -ac 1 /tmp/demo.wav && uv run python examples/stream_wav.py /tmp/demo.wav
 ```
 
-體驗時會看到的已知限制：一直講不停會在 12 秒附近硬切（`boundary="max_duration"`，會先找安靜點）、utterance 單段最多 30 秒。辨識結果原本會夾帶私用區字元，根因已定位在 `Alkd/TEA-ASR-1.1-MLX-4bit` 的 4bit 量化本身（上游 BF16 checkpoint 是 0%，見 [PUA vs BF16 A/B 報告](docs/benchmarks/pua-bf16-ab-report.md)），現在服務預設會把這些字元從 `text` 過濾掉（`filter_pua` 設定／`TEA_ASR_FILTER_PUA` 環境變數可關閉），`raw_text` 與 `warnings:["private_use_characters"]` 仍保留原始資訊供除錯；這是繞過量化缺陷的暫時措施，換掉模型量化方式才是根本解。VAD 參數（句尾靜音 500 ms、最短語音 160 ms、pre-roll 600 ms、最大 12 秒）已用真實口語校準過一次，但只有單一語者與單一麥克風。
+體驗時會看到的已知限制：一直講不停會在 12 秒附近硬切（`boundary="max_duration"`，會先找安靜點）、utterance 單段最多 30 秒。辨識結果原本會夾帶私用區字元，根因已定位在 `Alkd/TEA-ASR-1.1-MLX-4bit` 的 4bit 量化本身（上游 BF16 checkpoint 是 0%，見 [PUA vs BF16 A/B 報告](docs/benchmarks/pua-bf16-ab-report.md)），現在服務預設會把這些字元從 `text` 過濾掉（`filter_pua` 設定／`TEA_ASR_FILTER_PUA` 環境變數可關閉），`raw_text` 與 `warnings:["private_use_characters"]` 仍保留原始資訊供除錯。串流文字會把一般重複單位限制為預設 3 次；可用 `repetition_single_char_limit`、`repetition_multi_char_limit` 與對應的 `TEA_ASR_REPETITION_*_LIMIT` 環境變數調整。含數字或 CJK 數字的 1–6 字元單位連續超過預設 6 次時會修剪到 3 次，可用 `repetition_numeral_loop_limit`／`TEA_ASR_REPETITION_NUMERAL_LOOP_LIMIT` 調整；單一十進位數字至少要連續 10 次才修剪，且緊鄰其他數字或 CJK 數字的單位會保留，因此 `1000000元`、`0999999999`、`一九九九年` 與 `零零七` 不會被截斷。ASCII 字母單位只在兩側都沒有 ASCII 字母時修剪。final 的 `raw_text` 不變，`warnings` 會帶 `repetition_trimmed`。VAD 參數（句尾靜音 500 ms、最短語音 160 ms、pre-roll 600 ms、最大 12 秒）已用真實口語校準過一次，但只有單一語者與單一麥克風。
 
 模型與 VAD 資產放在倉庫內的 `models/`（已 gitignore，可用 `TEA_ASR_MODELS_DIR` 改），**不放 `~/Library/Caches`**——macOS 會在磁碟吃緊時把那裡整個清掉，實際發生過一次。服務只監聽 `127.0.0.1:8327`（電話鍵盤上的 T-E-A；刻意避開 8765 那類 AI 工具常用的 port）。首次啟動會在 `~/Library/Application Support/TEA ASR/token` 建立權限0600的token。短音訊端點與WS utterance session都接受最多30秒、16 kHz mono PCM s16le；詳見 [API契約](docs/04-api.md)，機器可讀版本在 [docs/api/](docs/api/)（`uv run tea-asr export-schemas` 重新產生，測試會檢查是否過期）。本機結果見 [P0報告](docs/benchmarks/p0-report.md)。
 
@@ -118,6 +121,9 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 | P2 即時音訊 | 已實作、已校準、已長跑 | WS utterance與continuous皆可用：Silero VAD自動斷句、有序片段管線、推論不阻塞收音。真人口語MER 3.97%（[切段報告](docs/benchmarks/p2-segmentation-report.md)）；連續一小時386段0錯誤、延遲p95 0.57秒、記憶體平穩（[長跑報告](docs/benchmarks/p2-soak-report.md)）。多路併發已實測，N=1..4零錯誤，預設上限2（[併發報告](docs/benchmarks/concurrency-report.md)）|
 | P2a 串流修訂 | 已驗收，預設開啟 | 首次可見延遲 p95 0.91 秒、final 與 final-only 完全一致、混合負載不互相阻塞，見 [P2a 報告](docs/benchmarks/p2a-preview-report.md)。`TEA_ASR_REVISABLE_PREVIEW=0` 可關閉 |
 | P3 服務管理 | 完成 | LaunchAgent install/uninstall/status、singleton lock、port 檢查、idle unload 與重新載入、TOML 設定、JSON log 輪替、關閉時 drain、睡眠喚醒偵測與 worker 健康探測 |
+| Recognition hints | 已實作，預設關閉 | `TEA_ASR_CONTEXT_HINTS=1` 開啟 dictionaries、profiles 與 deterministic replacements；`GET /v1/dictionaries` 逐檔回報無效字典而保留有效項目，session start 仍拒絕無效 profile。Model prompt 需另外開啟 `TEA_ASR_CONTEXT_PROMPT=1`，且只有 hints 已開時生效；prompt 預設關閉、仍屬 experimental，prompt token 數只記 server log。4段真實講道音訊 smoke 未見改善。見 [04 API 契約](docs/04-api.md) |
+| Singing labels | 已實作，預設開啟（需 YAMNet 資產） | server 用 YAMNet（Apache-2.0，ONNX，約 16 MB，`tea-asr model-prepare` 下載並釘 hash）為每段標 `speech`／`singing`（`segment.audio_class`，約 1.5 秒首判、最多修訂一次；final 帶 `audio_class`），只標記不改轉錄，隱藏字幕由 client 決定。留一檔驗證：speech 視窗誤判 0.0%、歌唱片段首判 83%／最終 95%、29 分鐘講道 0 次誤判；但只有 3 首歌（同一樂團）、1 段背景音樂下講話，**未在真實 OBS 實機驗收**。缺資產時不宣告能力；`TEA_ASR_SINGING_DETECTION=0` 關閉。見 [評估報告](docs/benchmarks/singing-eval-report.md)、授權見 [NOTICE](NOTICE) |
+| Final 左上下文 carry | 已實作，預設關閉，等待真模型評估 | Final 最多帶前段尾音 0–5 秒，去除前一 final 尾端重疊；無可信重疊時重跑 segment-only。preview 不帶 carry。答案間隔統計及評估方式見 [07](docs/07-contextual-streaming.md)；品質門檻未通過前不可開啟 |
 | P4 長檔案與保存 | 未開始 | `/v1/jobs` 不存在，回404 |
 | P5a Mac client | 可用，未完整驗收 | 選單列 app：聽寫（定稿後貼進前景 app）與會議記錄（即時視窗＋Markdown 匯出），見 [clients/macos](clients/macos/)。P5b 輸入法組字區整合未做 |
 
@@ -133,8 +139,9 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
   機器睡眠醒來後服務會主動送 `timeline_gap` 並關閉連線，而不是把缺口兩側接起來假裝連續。
 - **沒有精準時間戳**：`timestamp_quality` 永遠是 `segment`，只有片段的起迄範圍，
   沒有逐字對齊。字幕可用，但不要拿它做逐字高亮。
-- **沒有翻譯、沒有語者分離、沒有熱詞**：`capabilities` 裡這些 feature 都是 false，
+- **沒有翻譯、沒有語者分離**：`capabilities` 裡這些 feature 都是 false，
   請求相關選項會被拒絕而不是被忽略。
+- **Recognition hints 預設不可用**：需 server 明確設定 `TEA_ASR_CONTEXT_HINTS=1`。Model prompt 還需 `TEA_ASR_CONTEXT_PROMPT=1`；它維持 experimental 並預設關閉，因為4段真實講道音訊 smoke 未見改善。審閱過的 deterministic replacements 是建議工具。
 - **單機單模型**：一台機器一份服務、一個 worker、一份模型。第二個實例會被拒絕。
 
 ## 安裝

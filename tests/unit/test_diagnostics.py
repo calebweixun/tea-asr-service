@@ -165,6 +165,21 @@ def test_heartbeat_window_resets_and_an_open_receive_gap_is_counted() -> None:
     assert fields["max_gap_ms"] == 4_000
 
 
+def test_heartbeat_includes_latest_singing_score() -> None:
+    diag = SessionDiagnostics("session-1234")
+    diag.singing_score = 0.87654
+    assert diag.heartbeat()["singing_score"] == 0.877
+
+
+def test_audio_class_diagnostic_logs_counts_only() -> None:
+    with records() as collected:
+        diag = SessionDiagnostics("session-1234")
+        diag.audio_class(speech=4, singing=2)
+    assert named(collected, "stream.audio_class") == [
+        {"session_id": "session-1234", "speech": 4, "singing": 2}
+    ]
+
+
 def test_heartbeat_distinguishes_silence_from_quiet_audio() -> None:
     clock = Clock()
     diag = make(clock)

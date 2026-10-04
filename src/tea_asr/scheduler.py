@@ -28,7 +28,13 @@ class StaleTaskDropped(Exception):
 class InferenceWorker(Protocol):
     state: str
 
-    async def transcribe(self, pcm: bytes, *, language: str = "Chinese") -> dict[str, Any]: ...
+    async def transcribe(
+        self,
+        pcm: bytes,
+        *,
+        language: str = "Chinese",
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(slots=True)
@@ -130,6 +136,7 @@ class Scheduler:
         language: str = "Chinese",
         kind: str = "interactive",
         is_stale: Callable[[], bool] | None = None,
+        system_prompt: str | None = None,
     ) -> tuple[dict[str, Any], int]:
         """Run one inference in priority order.
 
@@ -165,7 +172,12 @@ class Scheduler:
         # a request halfway, so the slot is freed only when it really is free.
         # Freeing it at the cancel would start the next task behind a worker
         # that is still busy, with its queue_ms and staleness checked too early.
-        work = asyncio.ensure_future(self._worker.transcribe(pcm, language=language))
+        if system_prompt is None:
+            work = asyncio.ensure_future(self._worker.transcribe(pcm, language=language))
+        else:
+            work = asyncio.ensure_future(
+                self._worker.transcribe(pcm, language=language, system_prompt=system_prompt)
+            )
         work.add_done_callback(self._work_done)
         return await asyncio.shield(work), queue_ms
 

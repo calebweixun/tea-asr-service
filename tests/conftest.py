@@ -28,6 +28,7 @@ class FakeSupervisor:
         self.generation = 1
         self.text = text
         self.calls = 0
+        self.system_prompts: list[str] = []
         self.failure: Exception | None = None
         self.delay_s = 0.0
 
@@ -37,8 +38,16 @@ class FakeSupervisor:
     async def stop(self) -> None:
         return None
 
-    async def transcribe(self, pcm: bytes, *, language: str = "Chinese") -> dict[str, Any]:
+    async def transcribe(
+        self,
+        pcm: bytes,
+        *,
+        language: str = "Chinese",
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
         self.calls += 1
+        if system_prompt is not None:
+            self.system_prompts.append(system_prompt)
         if self.delay_s:
             import asyncio
 
@@ -67,6 +76,58 @@ class FakeVad:
         return 1.0 if float(np.abs(window).max()) > 0.05 else 0.0
 
 
+class FakeYamnet:
+    """Deterministic YAMNet stand-in: loud frames look like worship singing.
+
+    A frame is "loud" when its patch has real energy (a tone); quiet frames
+    read as speech. No ONNX file is needed, so CI never touches the asset.
+    """
+
+    def __init__(self, *, fail: Exception | None = None) -> None:
+        self.calls: list[int] = []
+        self.fail = fail
+
+    def scores(self, waveform: np.ndarray) -> np.ndarray:
+        from tea_asr.yamnet import HOP_SAMPLES, NUM_CLASSES, PATCH_SAMPLES, complete_frames
+
+        if self.fail is not None:
+            raise self.fail
+        count = complete_frames(waveform.size)
+        self.calls.append(count)
+        out = np.zeros((count, NUM_CLASSES), dtype=np.float32)
+        for index in range(count):
+            patch = waveform[index * HOP_SAMPLES : index * HOP_SAMPLES + PATCH_SAMPLES]
+            if float(np.abs(patch).max()) > 0.05:
+                out[index, FAKE_MUSIC] = 0.9
+                out[index, FAKE_SINGING] = 0.1
+            else:
+                out[index, FAKE_SPEECH] = 0.95
+        return out
+
+
+FAKE_SPEECH, FAKE_MUSIC, FAKE_SINGING = 0, 132, 24
+
+
+def fake_class_names() -> list[str]:
+    from tea_asr.singing import MUSIC_CLASSES, SPEECH_CLASSES, VOCAL_CLASSES
+    from tea_asr.yamnet import NUM_CLASSES
+
+    names = [f"class-{index}" for index in range(NUM_CLASSES)]
+    for offset, name in enumerate(SPEECH_CLASSES):
+        names[FAKE_SPEECH + offset] = name
+    names[FAKE_MUSIC] = MUSIC_CLASSES[0]
+    for offset, name in enumerate(VOCAL_CLASSES):
+        names[FAKE_SINGING + offset] = name
+    return names
+
+
+def fake_singing_runtime(model: Any | None = None) -> Any:
+    from tea_asr.singing import ClassGroups
+    from tea_asr.singing_session import SingingRuntime
+
+    return SingingRuntime(model or FakeYamnet(), ClassGroups.from_names(fake_class_names()))
+
+
 def build_client(
     supervisor: FakeSupervisor,
     *,
@@ -84,6 +145,11 @@ def build_client(
     preview_min_audio_ms: int = _DEFAULTS.preview_min_audio_ms,
     preview_load_factor: float = _DEFAULTS.preview_load_factor,
     debug_capture_audio: bool = False,
+    context_hints_enabled: bool = False,
+    context_prompt_enabled: bool = False,
+    singing_runtime: Any = None,
+    carry_context_s: float = _DEFAULTS.carry_context_s,
+    carry_context_max_gap_s: float = _DEFAULTS.carry_context_max_gap_s,
 ) -> TestClient:
     app = create_app(
         Path("unused"),
@@ -101,10 +167,16 @@ def build_client(
             preview_min_audio_ms=preview_min_audio_ms,
             preview_load_factor=preview_load_factor,
             debug_capture_audio=debug_capture_audio,
+            context_hints_enabled=context_hints_enabled,
+            context_prompt_enabled=context_prompt_enabled,
+            carry_context_s=carry_context_s,
+            carry_context_max_gap_s=carry_context_max_gap_s,
         ),
         vad_model=vad,
         rate_limiter=rate_limiter,
         paths=paths,
+        # Hermetic: never load the real YAMNet asset unless a test injects a runtime.
+        singing_runtime=singing_runtime,
     )
     # The service only ever binds 127.0.0.1 (docs/03-architecture.md), and
     # HostValidationMiddleware enforces that Host allowlist on every HTTP

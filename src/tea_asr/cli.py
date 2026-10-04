@@ -27,6 +27,7 @@ from .service import (
 )
 from .vad import VAD_REVISION, VAD_SHA256, locate_vad, prepare_vad, sha256
 from .wire import MAX_UTTERANCE_PCM_BYTES, SAMPLE_RATE, ws_event_schema
+from .yamnet import YAMNET_REVISION, locate_yamnet, prepare_yamnet, verify_assets
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8327"
 
@@ -156,6 +157,10 @@ def _doctor(url: str) -> int:
         vad_ok = sha256(vad_path) == VAD_SHA256
     except (LocalEntryNotFoundError, OSError):
         vad_ok = False
+    try:
+        yamnet_ok = verify_assets(*locate_yamnet())
+    except (LocalEntryNotFoundError, OSError):
+        yamnet_ok = False
     checks = {
         "machine": platform.machine(),
         "macos": platform.mac_ver()[0],
@@ -167,6 +172,9 @@ def _doctor(url: str) -> int:
         "model_path": model_path,
         "vad_revision": VAD_REVISION,
         "vad_prepared": vad_ok,
+        # Optional: without it the service runs but offers no singing labels.
+        "yamnet_revision": YAMNET_REVISION,
+        "yamnet_prepared": yamnet_ok,
         "service": _probe_service(url),
     }
     print(json.dumps(checks, ensure_ascii=False, indent=2))
@@ -178,7 +186,9 @@ def _export_schemas(out: Path) -> int:
     from .api.app import create_app
 
     out.mkdir(parents=True, exist_ok=True)
-    app = create_app(Path("unused"), token="schema-export-only", vad_model=None)
+    app = create_app(
+        Path("unused"), token="schema-export-only", vad_model=None, singing_runtime=None
+    )
     (out / "openapi.json").write_text(
         json.dumps(app.openapi(), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     )
@@ -328,6 +338,15 @@ def main() -> int:
             print(f"VAD 資產 hash 不符 models.lock：{digest}", file=sys.stderr)
             return 2
         print(vad_path)
+        try:
+            model_path, class_map_path = prepare_yamnet()
+        except Exception as exc:  # noqa: BLE001 - optional asset, never blocks ASR setup
+            print(f"YAMNet 下載失敗（選用，singing 標籤不會啟用）：{exc}", file=sys.stderr)
+            return 0
+        if not verify_assets(model_path, class_map_path):
+            print("YAMNet 資產 hash 不符 models.lock，singing 標籤不會啟用。", file=sys.stderr)
+            return 2
+        print(model_path)
         return 0
     return 2
 

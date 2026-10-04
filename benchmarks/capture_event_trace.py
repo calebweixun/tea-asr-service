@@ -148,7 +148,9 @@ async def capture(args: argparse.Namespace) -> int:
     from websockets.asyncio.client import connect
 
     pcm = read_wav(args.wav)
-    token = args.token_file.read_text().strip()
+    token = getattr(args, "token", None)
+    if token is None:
+        token = args.token_file.read_text().strip()
     start: dict[str, Any] = {
         "type": "session.start",
         "request_id": "trace",
@@ -161,8 +163,12 @@ async def capture(args: argparse.Namespace) -> int:
     }
     if args.end_silence_ms is not None:
         start["segmentation"] = {"end_silence_ms": args.end_silence_ms}
+    if getattr(args, "context_profile", None):
+        # What the OBS plugin sends for its "hints_profile" setting.
+        start["context"] = {"profile": args.context_profile}
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    wall_t0_epoch_s = time.time()
     origin = time.monotonic()
 
     def now_ms() -> float:
@@ -239,6 +245,7 @@ async def capture(args: argparse.Namespace) -> int:
         "wav_duration_s": round(len(pcm) / 2 / SAMPLE_RATE, 2),
         "frame_samples": FRAME_SAMPLES,
         "audio_t0_ms": audio_t0_ms,
+        "wall_t0_epoch_s": wall_t0_epoch_s,
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
     args.out.with_suffix(".meta.json").write_text(
@@ -428,9 +435,15 @@ def main() -> int:
     cap = commands.add_parser("capture")
     cap.add_argument("--wav", type=Path, required=True)
     cap.add_argument("--url", default="ws://127.0.0.1:8399/v1/stream")
-    cap.add_argument("--token-file", type=Path, required=True)
+    token = cap.add_mutually_exclusive_group(required=True)
+    token.add_argument("--token", help="bearer token; prefer --token-file to avoid shell history")
+    token.add_argument("--token-file", type=Path)
     cap.add_argument("--end-silence-ms", type=int, default=None, help="omit to use the default")
     cap.add_argument("--agreement", type=int, default=2)
+    cap.add_argument(
+        "--context-profile",
+        help="server dictionary name sent as session.start.context.profile (server needs hints on)",
+    )
     cap.add_argument("--out", type=Path, required=True)
 
     summary = commands.add_parser("summarize")

@@ -3,6 +3,10 @@
 > 原始交付為文件。**2026-09-19更新：** P0–P3與P2a已完成並實測；P2一小時soak與N=1..4併發容量測試已完成，進度表見 [README](../README.md#實作進度)。
 > 以下各階段的完成條件仍然有效，勾選狀態寫在每節開頭。
 
+**2026-10-03 singing detection 狀態：** 改用 YAMNet（ONNX、Apache-2.0，釘版於 `models.lock.json`，`tea-asr model-prepare` 下載）；`singing.py`（特徵、logistic、session 遲滯、片段決策）與 `singing_session.py`（背景 executor，不阻塞收音）取代先前失敗的 DSP heuristic。`segment.audio_class` 與 `transcript.final.audio_class` 預設開啟，但只有 YAMNet 資產載入且 hash 符合時才送事件與宣告 `features.singing_detection`（約束 6）。Held-out 留一檔：speech 視窗誤判 0.0%（兩組 speech）、歌唱片段首判 83.1%／最終 94.9%、29 分鐘講道 0 誤判、首判 1.5 秒，達成目標；證據只有 3 首同一樂團的歌、1 段背景音樂下講話與 1 場講道，**真實 OBS 與其他敬拜團／場地未驗證**，詳見 [評估報告](benchmarks/singing-eval-report.md)。實作完成與實機驗收分開記錄：後者尚待使用者在真實 OBS 上確認。
+
+**2026-10-04 整場主日 SRT 評估（church-eval）：** 用使用者人工訂正的三場主日（各約 2 小時）量離線 CER、串流字幕與歌唱偵測，工具見 [docs/09](09-testing-guide.md)，數字與決策見 [報告](benchmarks/church-eval-2026-10.md)。結論：replacement 顯著有益（-0.10 pp）、prompt 在 4-bit 無效、carry 3 s 離線不顯著／串流略好、870 ms 句尾靜音優於 600 ms；**歌唱偵測的誤藏率約每個有字幕小時 3.1 次（目標近 0，未達成，門檻與遲滯無法在不損失偵測的情況下消除）**。串流延遲是兩個併發 session 下的上限（單 session 重跑 p95 0.7–1.8 秒）；真實 OBS 畫面未驗收。
+
 ## 開發方式
 
 採單一repo、Python package、逐階段垂直切片。每個階段都交付可重現結果，前一個關卡沒通過就不要把後續功能當成完成。使用專案的codebase-memory-mcp做程式探索；尚無程式時不需要硬建空索引，有程式後建立／更新索引。
@@ -92,9 +96,16 @@ tea-asr-service/
 final 與 final-only 模式完全一致、混合負載下 23/23 HTTP 辨識成功且 10 段 final 全數產生。
 `TEA_ASR_REVISABLE_PREVIEW=0` 或 config.toml 可關閉，關閉時 revisable 請求回 `unsupported_option` 而非靜默降級。
 未涵蓋：單一語者與單一機器、預覽降級路徑未在真實過載下觸發。
+**2026-09-28｜重複輸出 guard：**partial/final 的 `text` 預設最多保留三個連續重複單位；單字元與 2–6 字元單位可分別用 `repetition_single_char_limit`／`repetition_multi_char_limit` 及對應的 `TEA_ASR_REPETITION_*_LIMIT` 環境變數調整。當時含十進位數字或 CJK 數字字元的重複單位會整段保留。ASCII 字母單位只在兩側都沒有 ASCII 字母時修剪。final 的 `raw_text` 保持原樣並以 `repetition_trimmed` 警告標記；INFO log 只記 segment index、類型、單位長度與移除字元數。trim 後 partial 若短於已提交 stable 前綴，tracker 會保留原前綴、不發縮短的 stable 更新。
+
 **2026-09-27：** 預覽節奏改為 server 設定 `preview_min_audio_ms`／`preview_min_interval_ms`（預設 300／300，原固定 800／800）加負載保護 `preview_load_factor`（預設 2，間隔至少 2×上次解碼時間）；封口時排隊中的預覽直接從 scheduler 移除，不再排在 final 後面跑。`preview_policy` 回報實際值，wire 欄位不變。實測（[預覽節奏報告](benchmarks/preview-cadence-report.md)）stable 提交延遲中位數 0.87→0.10 秒、兩 session 合計 worker 忙碌 0.49、final 延遲不變；partial 改寫率 20–23%→26–27%。語料是拼接的朗讀句，自然快語速與真實 OBS 畫面未驗證。
 
 **已知限制（stable diverged）：** continuous 預覽快照涵蓋最新分析過的 VAD window，包含句尾 grace 期間的靜音；final 片段則依最後語音位置只保留 `tail_ms`。因此預覽確實可能看見比 final 範圍更多的音訊。這符合 partial 的暫定語意：長度隨即時快照前進，final 仍是唯一正式稿。當 length-proportional 假 worker 的預覽文字因此比 final 長，穩定前綴保留已提交內容並以 `diverged` 收尾是正確結果。`tests/unit/test_segmenter.py::test_live_preview_may_include_silence_trimmed_from_the_final_range` 確認此範圍差；`tests/unit/test_scheduler.py::test_next_worker_call_starts_after_finished_result_is_handled` 確認 PR #11 沒有把下一次 worker 呼叫移到前一結果處理之前。真實音訊上的這類差異尚未單獨量測。
+**2026-09-28｜Recognition hints：** server dictionaries、profiles 與 deterministic replacements 由預設關閉的 `TEA_ASR_CONTEXT_HINTS=1` 啟用；replacement 保留 `raw_text`，stable 遇到已提交邊界時保持 append-only。`GET /v1/dictionaries` 會逐檔回報錯誤字典，不影響有效項目，並以 `context.dictionary_invalid` WARNING 記錄 name/reason；`session.start` 仍拒絕無效 profile。Domain/hotwords prompt 分離為 `TEA_ASR_CONTEXT_PROMPT=1`，且需 hints 已啟用；prompt 預設關閉且維持 experimental。`session.started.context` 不含 prompt token count；backend 每次 request 回報的數量只寫 server log。4段真實講道音訊 smoke 未見 prompt 改善（約多150 tokens；一處聖經→聖家、一處失去標點，住棚節變體未修正），已審閱的 deterministic replacement 是建議工具。完整 CER、數字／否定詞與錯誤替換風險仍未評估。`use_previous_finals` 延後。
+
+**2026-10-03｜Final 左上下文 carry：** 已實作 server 端 final-only PCM 前綴與共用 overlap stripper；無可信重疊時保守重跑 segment-only，`raw_text` 保留實際採用那次解碼的原文，warning 為 `carry_overlap_stripped`／`carry_overlap_uncertain`。preview 不帶前文，避免多次推論都增加 L 秒，stable 仍逐段 append-only。答案集轉段間隔在 1.5 秒內：speakers 35/39、music-8900 15/20。離線 MLX 評估尚未執行；`carry_context_s` 預設 **0（關閉）**，不得在未驗收 speakers 的 paired bootstrap CI、music CER 與 duplication count 前打開。Coordinator 執行 `/Users/c2leb/Codes/tea-asr-service/.soak/gold/run-carry-eval.sh`；方法見 [07](07-contextual-streaming.md)。
+
+**2026-10-04｜數字迴圈 guard：**含數字或 CJK 數字的 1–6 字元單位，連續超過 `[service].repetition_numeral_loop_limit`（預設 6）後會保留三份；環境變數為 `TEA_ASR_REPETITION_NUMERAL_LOOP_LIMIT`。單一十進位數字需至少連續 10 次才修剪，且單位緊鄰其他十進位／CJK 數字時保留，以免切斷長數字。數字候選規則移至 dict miner review 的 `Number formatting (style)` 區，不會寫進安全 TOML；一般單詞中偶然含一個中文數字字元的候選仍可保留。2026-10-04 離線掃描 OBS trace 與 traces 目錄的 13 份 JSONL、共 19,944 個文字欄位，沒有新增數字迴圈修剪；共重現 42 個一般重複修剪事件、移除 6,670 字元。這是舊輸出的離線分析，不代表新版 server 的真實模型品質已驗收。
 
 **完成條件：** 能呈現「先出字→後文修正→定稿」；partial不重複append、不改已final內容；重跑總RTF與品質、延遲符合07或有明確未達標報告；preview超載不阻塞收音與正式排程。測試同音詞、數字、否定詞、中英混用與cancel/final競態。
 
@@ -113,6 +124,9 @@ log 為 JSON lines 並輪替，明確過濾 token、PCM 與逐字稿。關閉時
 **2026-09-27：** `/v1/stream` 每條 session 寫診斷日誌（docs/04「W11」）：lifecycle 行、每 5 秒一行音訊／VAD heartbeat（收件數與間隔、RMS／峰值 dBFS、VAD 最大／平均機率、segmenter 狀態、預覽帳、worker 忙碌比例），以及斷流、太小聲、有聲音但 VAD 判定非語音、排隊過久四種 WARNING（每種每 30 秒最多一行）。只記字數不記文字，不額外呼叫模型；INFO 約 1 MB／小時／session。另有預設關閉的除錯錄音 `debug_capture_audio`（滾動 WAV、有上限），開啟時會落音訊，是 #7 的明確例外，只供使用者自己排查。已用真實模型在測試 port 驗證四種情況可區分；在使用者真實 OBS 串流上的效果未驗證。
 **2026-09-28：** 修正 worker IPC 失去同步：session 在預覽推論中途關閉（OBS 改設定後重連）時，被取消的預覽沒讀走自己的 response，之後每個請求都讀到上一個的 response，整個 process 永久回 `invalid_ipc`（實機 heartbeat `preview_failed=16 preview_published=0`）。現在一次寫入＋讀回不受 caller 取消影響（shield，鎖持有到讀完），scheduler 同步到真正結束才放行；另加防線：ID 不符或 frame 壞掉就記 `worker.ipc_desync`、重啟 worker、只讓當下請求失敗。翻譯 worker 同樣補上防線（它原本就有 shield）。已用真實模型在測試 port 以「中途硬斷 A、立刻開 B」重現舊版 bug 並驗證新版不再發生；在使用者真實 OBS 重連流程上未驗證。
 **2026-09-28 follow-up：** supervisor 將並行 `start()` 共用同一個內部啟動 task；`stop()` 只取消並等待 restart／內部啟動 task，並清理由 spawn 中途返回的子程序。被 stop supersede 的 `start()` caller 收到 `model_unavailable`，不會被取消；caller 自己被外部取消時仍收到 `CancelledError`，最後一位 caller 離開會取消並回收尚未完成的 spawn。這避免 wake、reload 與 restart 重複啟動或在 shutdown 留下 pipe transport。推論 timeout 立即 kill hung worker，正常 stop/unload 仍保留 graceful wait。單元測試驗證 lifecycle 與 timeout；真實模型 timeout／睡眠喚醒流程尚未實機驗證。
+
+**2026-09-28｜real-audio live-subtitle soak harness：** 新增 `benchmarks/soak_real_audio.py` 的 extract/capture/analyze/replay/report，`benchmarks/replay_regression.py` 對保存的 trace 重跑 plugin caption state machine，並加合成 trace 的 metrics／重複字串測試。Replay 會在 `.soak/build/` 編譯 OBS plugin 測試工具；音訊、trace、session log sidecar 與 review 均留在 `.soak/`，metrics report 不包含逐字稿。合成 trace 的 extract 前置、replay、analyze、report、threshold PASS/FAIL 與 regression replay 已執行；live fake-backend capture 嘗試 bind `127.0.0.1:8422` 時收到 `Operation not permitted`，沒有換 port 重試。**真實模型的 300／600 ms 兩次完整 soak 尚未執行，真實音訊品質與 OBS 畫面尚未驗收**；外部可執行命令見 [09 測試指南](09-testing-guide.md#六真實錄音字幕-soak)。
+**2026-09-28｜soak duplication reclassification：**既有 church trace 重新跑 `analyze`／`report`，church-300 的 overall 為 plugin/model/speech 1/1/7，church-600 為 1/3/7；只有 plugin-origin 納入 hard threshold。離線 repetition guard 掃描對 church-300 有4個 trimmed events（3個單位在 final 出現至少兩次），church-600 有22個（20個單位在 final 出現至少兩次）。這些是既有 trace 的離線分析，不代表新版 server 的即時模型品質已驗收；完整 metrics 見 [real-audio soak 報告](benchmarks/soak-real-audio-2026-09-28.md)。
 睡眠偵測比較 wall clock 與 monotonic clock 的差距（Darwin 的 monotonic 在睡眠期間不前進），
 不必為此引進 pyobjc。喚醒後對進行中的 session 送 `timeline_gap` 並 close 1012——v0.1 沒有 resume，
 把缺口兩側的音訊接在同一個 sample clock 上是說謊；接著用一次真實推論探測 worker，
@@ -147,7 +161,7 @@ server repo只放reference clients与protocol測試；正式Swift app／OBS plug
 | 功能 | 開始之前要有的證據 |
 |---|---|
 | 跨句全文校訂／可選LLM潤飾 | P2a同片段修訂完成，另定document revision與原稿保存；不可回改ASR final |
-| 熱詞 | 固定模型system_prompt實測；未支援時要拒絕而非忽略 |
+| Recognition hints（domain、hotwords、replacement） | **機制已實作，預設關閉**；審閱後的 deterministic replacements 是建議工具。Model prompt 由 `TEA_ASR_CONTEXT_PROMPT=1` 分開啟用且需 hints 已開、預設關閉並 experimental；目標語料 CER、數字、否定詞、prompt echo 與 replacement 誤傷仍待評估 |
 | 翻譯 | 來源／目標語言、使用者是否接受雲端、獨立provider／保留原稿。**2026-09-24 已接入（opt-in，預設關閉）**：`netease-youdao/Confucius4-T3PO` 4-bit，獨立 worker 子程序，**只提供 zh→en**（en→zh 回譯 20 句有 18 句含簡體字，不宣告）。只翻 `transcript.final`，譯文走新事件（`translation.started`／`.segment`／`.error`），既有事件與原稿不動。開啟時 ASR final 延遲 p95 約多 0.2–0.3 s（GPU 爭用）。翻譯品質尚無量化分數（缺平行語料），見 `docs/benchmarks/t3po-eval-report.md` |
 | Forced alignment | 後端相容性、額外模型memory與對齊品質 |
 | Diarization | 多人會議需求、額外模型與重疊發話處理，不以來源軌代替 |

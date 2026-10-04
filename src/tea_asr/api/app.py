@@ -28,16 +28,20 @@ from tea_asr.config import (
     AppPaths,
     ServiceConfig,
     TokenAuthenticator,
+    validate_carry_context_or_raise,
     validate_debug_capture_or_raise,
     validate_preview_cadence_or_raise,
     validate_translation_or_raise,
 )
+from tea_asr.context import ContextDictionaryStore, InvalidDictionary
 from tea_asr.errors import ApiError
 from tea_asr.logs import MAX_LOG_EVENTS, event, read_recent_events, split_log_payload
 from tea_asr.model_spec import TEA_ASR_1_1_MLX_4BIT
 from tea_asr.rate_limit import AuthRateLimiter
 from tea_asr.scheduler import Scheduler
 from tea_asr.segmenter import SegmenterConfig
+from tea_asr.singing import ClassGroups
+from tea_asr.singing_session import SingingRuntime
 from tea_asr.translation.session import MAX_PENDING_SEGMENTS
 from tea_asr.translation.simt import LATENCY_MODES, VERIFIED_DIRECTIONS
 from tea_asr.translation.supervisor import TranslationSupervisor
@@ -47,6 +51,8 @@ from tea_asr.wire import (
     Capabilities,
     CapabilityFeatures,
     CapabilityLimits,
+    ContextLimits,
+    DictionarySummary,
     EndSilenceRange,
     ErrorEnvelope,
     LogEntry,
@@ -62,6 +68,13 @@ from tea_asr.wire import (
     parse_host_header,
 )
 from tea_asr.worker.supervisor import WorkerSupervisor
+from tea_asr.yamnet import (
+    YAMNET_SHA256,
+    YamnetModel,
+    load_class_names,
+    locate_yamnet,
+    verify_assets,
+)
 
 #: W9: the plain-text warning shown whenever `ServiceConfig.allow_lan` is on.
 #: Repeated in three places on purpose (startup log, HTTP response header,
@@ -160,6 +173,8 @@ class InsecureLanWarningMiddleware:
 _AUTO_VAD: Any = object()
 #: Sentinel: build the translation provider from `ServiceConfig` (tests inject one).
 _AUTO_TRANSLATION: Any = object()
+#: Sentinel: build the singing runtime from `ServiceConfig` (tests inject one or None).
+_AUTO_SINGING: Any = object()
 
 
 def _load_vad() -> SileroVad | None:
@@ -176,6 +191,34 @@ def _load_vad() -> SileroVad | None:
 
 
 logger = logging.getLogger("tea_asr.api")
+
+
+def _load_singing(settings: ServiceConfig) -> SingingRuntime | None:
+    """Load the pinned YAMNet asset, or run without singing labels.
+
+    Constraint 6: the capability is advertised only when the model really
+    loaded and matches the lock, so a missing or tampered asset just turns the
+    feature off (transcription is unaffected) and says why in the log.
+    """
+
+    if not settings.singing_detection_enabled:
+        return None
+    try:
+        model_path, class_map_path = locate_yamnet()
+        if not verify_assets(model_path, class_map_path):
+            raise ValueError("asset hash does not match models.lock.json")
+        groups = ClassGroups.from_names(load_class_names(class_map_path))
+        return SingingRuntime(
+            YamnetModel(model_path, expected_sha256=YAMNET_SHA256), groups
+        )
+    except Exception as exc:  # noqa: BLE001 - any lookup or load failure means no labels
+        event(
+            logger,
+            "singing.unavailable",
+            reason=type(exc).__name__,
+            hint="run `tea-asr model-prepare` to fetch the YAMNet asset",
+        )
+        return None
 
 
 async def detect_sleep(
@@ -239,6 +282,7 @@ def create_app(
     rate_limiter: AuthRateLimiter | None = None,
     paths: AppPaths | None = None,
     translation_provider: Any = _AUTO_TRANSLATION,
+    singing_runtime: Any = _AUTO_SINGING,
 ) -> FastAPI:
     # A fixed `token` string (tests, `export-schemas`) is checked with a
     # constant-time comparison and never touches the filesystem. Otherwise a
@@ -256,6 +300,7 @@ def create_app(
     limiter = rate_limiter or AuthRateLimiter()
     settings = config or ServiceConfig.from_env()
     log_paths = paths or AppPaths.macos_default()
+    dictionaries = ContextDictionaryStore(log_paths.dictionaries_dir)
     host_allowed = make_host_allowlist(
         allow_lan=settings.allow_lan, extra_hosts=frozenset(settings.extra_allowed_hosts)
     )
@@ -266,6 +311,7 @@ def create_app(
     #: Opt-in, separate translation provider (docs/06 #2). `None` when off,
     #: which leaves every ASR code path exactly as it was.
     validate_translation_or_raise(settings)
+    validate_carry_context_or_raise(settings)
     validate_preview_cadence_or_raise(settings)
     validate_debug_capture_or_raise(settings)
     #: Opt-in rolling WAV capture of every stream (`debug_capture_audio`),
@@ -281,6 +327,10 @@ def create_app(
         )
     scheduler = Scheduler(worker)
     vad = _load_vad() if vad_model is _AUTO_VAD else vad_model
+    #: `None` when disabled or the asset is unavailable (see `_load_singing`).
+    singing: SingingRuntime | None = (
+        _load_singing(settings) if singing_runtime is _AUTO_SINGING else singing_runtime
+    )
     activity = Activity()
     loading = asyncio.Lock()
     sessions: set[StreamSession] = set()
@@ -389,6 +439,8 @@ def create_app(
         while scheduler.waiting_tasks and time.monotonic() < deadline:
             await asyncio.sleep(0.1)
         await worker.stop()
+        if singing is not None:
+            singing.close()
         event(logger, "service.stopped")
 
     app = FastAPI(
@@ -476,6 +528,9 @@ def create_app(
                     else None
                 ),
                 translation=translation is not None and translation.state == "ready",
+                context_biasing=settings.context_hints_enabled,
+                context_limits=ContextLimits() if settings.context_hints_enabled else None,
+                singing_detection=True if singing is not None else None,
             ),
             limits=CapabilityLimits(
                 max_continuous_sessions=settings.max_continuous_sessions if vad is not None else 0,
@@ -497,6 +552,18 @@ def create_app(
                 else None
             ),
         )
+
+    @app.get(
+        "/v1/dictionaries",
+        dependencies=[Depends(authorize)],
+        response_model=list[DictionarySummary],
+        response_model_exclude_none=True,
+    )
+    async def dictionaries_list() -> list[DictionarySummary]:
+        try:
+            return [DictionarySummary(**item) for item in dictionaries.summaries()]
+        except InvalidDictionary as exc:
+            raise ApiError("internal_error", "A server dictionary is invalid.") from exc
 
     @app.get("/v1/status", dependencies=[Depends(authorize)])
     async def service_status() -> StatusResponse:
@@ -590,6 +657,8 @@ def create_app(
                 connection_admission=connection_admission,
                 translation=translation,
                 capture_root=capture_root,
+                dictionaries=dictionaries,
+                singing=singing,
             )
         finally:
             activity.sessions -= 1

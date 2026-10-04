@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_serializer
 
 #: docs/04-api.md keeps every sample/seq integer inside the JavaScript safe range.
 MAX_SAFE_INT = (2**53) - 1
@@ -232,6 +232,14 @@ class SegmentationControl(ServerModel):
     end_silence_ms: EndSilenceRange
 
 
+class ContextLimits(ServerModel):
+    max_domain_chars: int = 300
+    max_hotwords: int = 200
+    max_hotword_chars: int = 32
+    max_replacements: int = 500
+    max_replacement_chars: int = 32
+
+
 class CapabilityFeatures(ServerModel):
     native_audio_streaming: bool = False
     partial_transcripts: bool = False
@@ -240,6 +248,11 @@ class CapabilityFeatures(ServerModel):
     diarization: bool = False
     hotwords: bool = False
     context_biasing: bool = False
+    context_limits: ContextLimits | None = None
+    #: `segment.audio_class` labels from the YAMNet classifier. Advertised only
+    #: when the pinned model really loaded (docs/06 constraint 6); `None` is
+    #: left out of the response, so a server without it shows nothing.
+    singing_detection: bool | None = None
     #: Opt-in append-only `transcript.stable` (docs/07「只增不改的穩定前綴」).
     #: Derived from revisable partials, so it is only offered with them. `None`
     #: is left out of the response (exclude_none), so a server without
@@ -368,6 +381,54 @@ class SegmentationOptions(ClientModel):
     )
 
 
+class ContextReplacement(ClientModel):
+    """A deterministic exact substring replacement (`from` is a JSON key)."""
+
+    from_: str = Field(alias="from", min_length=1, max_length=32)
+    to: str = Field(max_length=32)
+
+
+ContextHotword = Annotated[str, Field(min_length=1, max_length=32)]
+
+
+class ContextOptions(ClientModel):
+    profile: str | None = Field(default=None, min_length=1)
+    domain: str | None = Field(default=None, max_length=300)
+    hotwords: list[ContextHotword] | None = Field(default=None, max_length=200)
+    replacements: list[ContextReplacement] | None = Field(default=None, max_length=500)
+
+
+class ContextDictionaryFile(BaseModel):
+    """Strict TOML dictionary document stored under the service support dir."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    domain: str = Field(max_length=300)
+    hotwords: list[ContextHotword] = Field(max_length=200)
+    replacements: list[ContextReplacement] = Field(default_factory=list, max_length=500)
+
+
+class ContextEcho(ServerModel):
+    profile: str | None = None
+    domain_chars: int
+    hotwords_count: int
+    replacements_count: int
+    prompt_applied: bool
+
+    @model_serializer(mode="wrap")
+    def omit_none_fields(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        return {key: value for key, value in data.items() if value is not None}
+
+
+class DictionarySummary(ServerModel):
+    name: str
+    domain: str | None = None
+    hotwords_count: int | None = None
+    replacements_count: int | None = None
+    error: str | None = None
+
+
 class SessionStart(ClientModel):
     type: Literal["session.start"]
     request_id: str = Field(min_length=1, max_length=64)
@@ -381,6 +442,7 @@ class SessionStart(ClientModel):
     stable: StableOptions | None = None
     #: Needs `profile="continuous"`; omitted keeps the server's end silence.
     segmentation: SegmentationOptions | None = None
+    context: ContextOptions | None = None
 
 
 class AudioCommit(ClientModel):
@@ -449,6 +511,14 @@ class SessionStarted(SessionEvent):
     next_sample: int
     send_until_sample: int
     preview_policy: PreviewPolicy | None = None
+    context: ContextEcho | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_context_when_disabled(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if self.context is None:
+            data.pop("context", None)
+        return data
 
 
 class AudioAck(SessionEvent):
@@ -491,6 +561,7 @@ class TranscriptPartial(SessionEvent):
     end_sample: int
     text: str
     timestamp_quality: TimestampQuality = "segment"
+    warnings: list[str] = Field(default_factory=list)
 
 
 class TranscriptFinal(SessionEvent):
@@ -507,6 +578,18 @@ class TranscriptFinal(SessionEvent):
     queue_ms: int
     inference_ms: int
     warnings: list[str] = Field(default_factory=list)
+    audio_class: Literal["speech", "singing"] | None = None
+
+
+class SegmentAudioClass(SessionEvent):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    type: Literal["segment.audio_class"] = "segment.audio_class"
+    segment_id: str
+    segment_index: int
+    class_: Literal["speech", "singing"] = Field(alias="class")
+    confidence: float = Field(ge=0.0, le=1.0)
+    revision: int = Field(ge=0, le=1)
 
 
 StableState = Literal["open", "final", "diverged", "abandoned"]
@@ -640,6 +723,7 @@ ServerEvent = Annotated[
     | SpeechStarted
     | AudioCommitted
     | SegmentQueued
+    | SegmentAudioClass
     | TranscriptPartial
     | TranscriptFinal
     | TranscriptStable

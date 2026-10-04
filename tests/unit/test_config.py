@@ -12,6 +12,7 @@ from tea_asr.config import (
     revoke_token,
     rotate_token,
     validate_bind_or_raise,
+    validate_carry_context_or_raise,
 )
 
 
@@ -28,10 +29,45 @@ def test_defaults_match_what_has_been_accepted() -> None:
     # docs/benchmarks/pua-bf16-ab-report.md: the deployed MLX 4bit checkpoint
     # leaks PUA characters into 70% of sentences, so filtering ships on.
     assert config.filter_pua is True
+    assert config.repetition_single_char_limit == 3
+    assert config.repetition_multi_char_limit == 3
+    assert config.repetition_numeral_loop_limit == 6
     # docs/benchmarks/concurrency-report.md: measured safe up to 4 concurrent
     # continuous sessions; ships at 2 for latency-budget reasons on a
     # single-user desktop service, not because more was found unsafe.
     assert config.max_continuous_sessions == 2
+    assert config.context_hints_enabled is False
+    # Labels only; effective only when the pinned YAMNet asset is present.
+    assert config.singing_detection_enabled is True
+    assert config.carry_context_s == 0.0
+    assert config.carry_context_max_gap_s == 1.5
+
+
+@pytest.mark.parametrize(
+    ("value", "enabled"), [("1", True), ("0", False), ("false", False), ("no", False)]
+)
+def test_singing_detection_environment_gate(value: str, enabled: bool) -> None:
+    config = ServiceConfig.load(env={"TEA_ASR_SINGING_DETECTION": value})
+    assert config.singing_detection_enabled is enabled
+
+
+@pytest.mark.parametrize(("value", "enabled"), [("1", True), ("0", False), ("true", False)])
+def test_context_hints_environment_requires_exact_one(value: str, enabled: bool) -> None:
+    config = ServiceConfig.load(env={"TEA_ASR_CONTEXT_HINTS": value})
+    assert config.context_hints_enabled is enabled
+
+
+def test_context_hints_can_be_set_in_config_file(tmp_path: Path) -> None:
+    paths = app_paths(tmp_path)
+    paths.support.mkdir(parents=True)
+    paths.config_file.write_text("[service]\ncontext_hints_enabled = true\n")
+    assert ServiceConfig.load(paths, env={}).context_hints_enabled is True
+
+
+def test_context_prompt_is_off_by_default_and_requires_exact_one() -> None:
+    assert ServiceConfig.load(env={}).context_prompt_enabled is False
+    assert ServiceConfig.load(env={"TEA_ASR_CONTEXT_PROMPT": "1"}).context_prompt_enabled is True
+    assert ServiceConfig.load(env={"TEA_ASR_CONTEXT_PROMPT": "true"}).context_prompt_enabled is False
 
 
 def test_max_continuous_sessions_is_configurable(tmp_path: Path) -> None:
@@ -45,6 +81,71 @@ def test_max_continuous_sessions_is_configurable(tmp_path: Path) -> None:
 def test_pua_filter_can_be_turned_off_explicitly() -> None:
     config = ServiceConfig.load(env={"TEA_ASR_FILTER_PUA": "0"})
     assert config.filter_pua is False
+
+
+def test_repetition_limits_are_configurable_with_environment_variables() -> None:
+    config = ServiceConfig.load(
+        env={
+            "TEA_ASR_REPETITION_SINGLE_CHAR_LIMIT": "2",
+            "TEA_ASR_REPETITION_MULTI_CHAR_LIMIT": "4",
+            "TEA_ASR_REPETITION_NUMERAL_LOOP_LIMIT": "8",
+        }
+    )
+
+    assert config.repetition_single_char_limit == 2
+    assert config.repetition_multi_char_limit == 4
+    assert config.repetition_numeral_loop_limit == 8
+
+
+def test_numeral_loop_limit_is_configurable_in_config_file(tmp_path: Path) -> None:
+    paths = app_paths(tmp_path)
+    paths.support.mkdir(parents=True)
+    paths.config_file.write_text("[service]\nrepetition_numeral_loop_limit = 9\n")
+
+    config = ServiceConfig.load(paths, env={})
+
+    assert config.repetition_numeral_loop_limit == 9
+
+
+def test_numeral_loop_limit_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="at least 1"):
+        ServiceConfig(repetition_numeral_loop_limit=0)
+
+
+def test_carry_context_is_configurable_from_environment_and_file(tmp_path: Path) -> None:
+    env_config = ServiceConfig.load(
+        env={
+            "TEA_ASR_CARRY_CONTEXT_S": "2",
+            "TEA_ASR_CARRY_CONTEXT_MAX_GAP_S": "5",
+        }
+    )
+    assert env_config.carry_context_s == 2.0
+    assert env_config.carry_context_max_gap_s == 5.0
+
+    paths = app_paths(tmp_path)
+    paths.support.mkdir(parents=True)
+    paths.config_file.write_text(
+        "[service]\ncarry_context_s = 3.0\ncarry_context_max_gap_s = 1.5\n"
+    )
+    file_config = ServiceConfig.load(paths, env={})
+    assert file_config.carry_context_s == 3.0
+    assert file_config.carry_context_max_gap_s == 1.5
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        ServiceConfig(carry_context_s=-0.1),
+        ServiceConfig(carry_context_s=5.1),
+        ServiceConfig(carry_context_s=float("nan")),
+        ServiceConfig(carry_context_max_gap_s=-0.1),
+        ServiceConfig(carry_context_max_gap_s=30.1),
+        ServiceConfig(carry_context_max_gap_s=float("inf")),
+    ],
+)
+def test_carry_context_outside_bounds_is_rejected(config: ServiceConfig) -> None:
+    with pytest.raises(RuntimeError, match="carry_context"):
+        validate_carry_context_or_raise(config)
 
 
 def test_pua_filter_environment_wins_over_the_file(tmp_path: Path) -> None:

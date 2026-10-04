@@ -1,0 +1,8 @@
+{
+  "source_start_s": 1800.0,
+  "duration_s": 6.0,
+  "sections": [
+    {"name":"first","start_s":0.0,"end_s":3.0},
+    {"name":"second","start_s":3.0,"end_s":6.0}
+  ]
+}
