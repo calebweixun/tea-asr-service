@@ -12,7 +12,8 @@
 
 | 元件 | 狀態 |
 |---|---|
-| Server（`src/tea_asr/`） | P0–P3、P2a 完成並實測；recognition hints 預設關閉，deterministic replacements 審閱後建議使用，model prompt experimental 且預設關閉。585 個測試通過（`pytest tests/unit tests/integration -q`，2026-10-03；fallback venv Python） |
+| Server（`src/tea_asr/`） | P0–P3、P2a 完成並實測；recognition hints 預設關閉，deterministic replacements 審閱後建議使用，model prompt experimental 且預設關閉。明確模型變體設定已實作：4-bit 維持預設，8-bit 為本機 hash-pinned 衍生檔，載入失敗不替換模型；`pytest tests/unit tests/integration -q` 通過 636 tests（2026-10-04，fallback venv Python），`ruff check .` 通過。 |
+| ASR model variant | 8-bit + carry 3 s 在三場人工訂正 SRT 離線評估中比 4-bit + carry 3 s 低 0.27 pp CER（95% CI −0.44 至 −0.10），模型檔大 92%。這不是即時延遲或記憶體證據；10 分鐘真模型比較與 RSS、decode、busy、final latency 結果待 coordinator 執行 `.soak/run-8bit-check.sh`。 |
 | Mac client（`clients/macos/`） | 可用：聽寫、會議記錄、選單列狀態、服務啟停。P5a 的收音裝置／聲道、可設定快捷鍵／PTT、feedback、non-activating overlay 與 deterministic 後處理都已實作。主視窗已做過一輪原生 macOS 設計整理（拿掉每頁大標與描邊卡片、設定頁走 NSGridView、間距收斂成 Metrics 常數），右欄改為 build-once + update 閉包、不再每次狀態更新重建整欄，側欄固定寬度不可收折。「權限」已併入「診斷與權限」頁；macOS 26 起的「裝置控制和資料取用」改名已依 runtime 版本處理。輸入裝置改為嚴格依 UID 路由並 read-back 驗證，附獨立於 session 的電平監看元件。`swift build` 無 warning、93 個 client 測試通過。**仍待實機驗收**：overlay 焦點、跨 app key-up、熱鍵衝突、實際收音品質。P5b 尚未開始 |
 | OBS 外掛（`calebweixun/tea-live-subtitle`，本機 `~/Codes/obs-plugins/tea-live-subtitle`） | **2026-09-25 可接目前的 server 提供 live subtitle。** 相容性修正（tea-live-subtitle#1）：帶 token 的 preflight、退避上限且每來源每 60 秒最多 2 次認證失敗（低於 server 的 10 次門檻）、server 重啟後會重連；原版 partial 永遠不出現、token 錯 5 秒自鎖、重啟後不再重連，e2e 僅 1/11。穩定字幕（tea-live-subtitle#2）：使用 server 的 `transcript.stable`，預設開啟，畫面只增不改，斷線凍結 10 秒。e2e 17/17、CI 三平台建置通過。**尚未在真實 OBS 裡實機驗收**；本機 Xcode 27 的 `cmake --preset macos` 無法 configure，正式 bundle 請用 CI artifact。設定標籤仍是英文 fallback |
 | 穩定字幕流（server） | `transcript.stable`（opt-in，LocalAgreement-2）：只增不改，鎖定延遲 p95 1.70 s，字幕準確度與 final 無顯著差異。現況 partial 有 78.8% 會改掉已顯示的字。見 `docs/benchmarks/stable-prefix-report.md` |
@@ -33,7 +34,7 @@
 |---|---|
 | LAN 安全層（W1 凍結契約 + W9 token lifecycle／rate limit／Host-Origin／連線上限／TLS） | 派工中。預設仍只 bind 127.0.0.1；能力未齊備前開放外部監聽必須明確拒絕，不得靜默 bind 0.0.0.0 |
 | 設定頁電平 bar 接線 | 派工中。元件已 commit，僅差 UI 接線 |
-| 模型切換 | 已收斂範圍：只在 `JacobLinCool/TEA-ASR-1.1-mini` 的原版與 MLX 版之間切換，走既有 `tea-asr model-prepare`，不引入第二套 runtime。GGUF 已排除 |
+| ASR 模型變體 | **已實作**：`[service].asr_model`／`TEA_ASR_MODEL` 明確選擇 pinned 4-bit（預設）或本機 pinned 8-bit；`model-prepare --variant 8bit` 驗證本機副本，缺檔／hash 不符時 `model_unavailable`、doctor 紅燈，不 fallback。離線品質數字見上列，即時成本仍待真模型 soak。 |
 | dashboard（W6 server diagnostics contract → W7 telemetry → W8 總覽改版） | 已規劃未派，依賴 W1 先完成 |
 | 快捷鍵浮動錄製 modal + 衝突偵測 | 已規劃未派。macOS 無公開 API 可列舉其他 app 的全域快捷鍵，可靠的只有「系統保留清單」+「實際 RegisterEventHotKey 失敗即被占用」 |
 | Thaw 選單列圖示消失 | **擱置**。Thaw 能列舉我們的 item，但取不到可繪製圖像（其 MenuBarItemImageCache 會丟棄 capture 失敗／bounds 退化／全透明的結果）。固定 18pt 寬度的推測性修法經實測無效。需量到 runtime window bounds 才能定案 |

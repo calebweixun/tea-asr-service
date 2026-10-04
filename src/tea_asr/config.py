@@ -7,6 +7,8 @@ import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .model_spec import ASR_MODEL_DEFAULT, ASR_MODEL_VARIANTS
+
 
 @dataclass(frozen=True, slots=True)
 class AppPaths:
@@ -187,6 +189,9 @@ class ServiceConfig:
     """
 
     revisable_preview: bool = True
+    #: The one ASR model loaded by the service. Selection is explicit; a local
+    #: model pin failure is surfaced and never falls back to another variant.
+    asr_model: str = ASR_MODEL_DEFAULT
     #: `segment.audio_class` labels (docs/04). On since the held-out YAMNet
     #: evaluation in docs/benchmarks/singing-eval-report.md met its targets.
     #: It only takes effect when the pinned YAMNet asset is present (fetched by
@@ -319,6 +324,9 @@ class ServiceConfig:
         return _apply_env(config, source)
 
     def __post_init__(self) -> None:
+        if self.asr_model not in ASR_MODEL_VARIANTS:
+            allowed = ", ".join(sorted(ASR_MODEL_VARIANTS))
+            raise ValueError(f"asr_model must be one of: {allowed}")
         if min(
             self.repetition_single_char_limit,
             self.repetition_multi_char_limit,
@@ -365,6 +373,9 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
     """Environment overrides the file, so a shell flag always wins."""
 
     get = source.get  # type: ignore[attr-defined]
+    asr_model = get("TEA_ASR_MODEL")
+    if asr_model is not None:
+        config = replace(config, asr_model=asr_model)
     preview = get("TEA_ASR_REVISABLE_PREVIEW")
     if preview is not None:
         config = replace(config, revisable_preview=preview not in {"0", "false", "no"})

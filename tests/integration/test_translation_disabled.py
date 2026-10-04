@@ -1,8 +1,9 @@
-"""With translation off (the default), the wire is exactly what it was before.
+"""With translation off (the default), keep the earlier ASR dialogue contract.
 
 These goldens were captured from the pre-translation code (d3bd900) and run
 unchanged against it; they only use APIs that existed then, so a regression in
 the default path shows up as a diff here rather than as a vague behaviour change.
+The explicit model identity fields on `session.started` are checked as well.
 """
 
 from __future__ import annotations
@@ -42,8 +43,9 @@ GOLDEN_CAPABILITIES = {
 #: IDs and timings are replaced by placeholders; ACK/flow events are left out
 #: because the writer legitimately merges them depending on timing.
 GOLDEN_DIALOGUE = [
-    {"type": "session.started", "event_id": 0, "request_id": "start-1", "profile": "utterance",
-     "transcript_mode": "final_only", "next_seq": 0, "next_sample": 0,
+    {"type": "session.started", "event_id": 0, "request_id": "start-1",
+     "model": "fake-backend", "model_revision": "test-only", "model_variant": "fake",
+     "profile": "utterance", "transcript_mode": "final_only", "next_seq": 0, "next_sample": 0,
      "send_until_sample": 80000, "preview_policy": None},
     {"type": "audio.committed", "request_id": "c1", "segment_id": "<segment-0>",
      "reason": "committed"},
@@ -97,7 +99,7 @@ def test_capabilities_are_unchanged_without_translation(client: TestClient) -> N
     assert "translation" not in body
 
 
-def test_utterance_dialogue_is_unchanged_without_translation(client: TestClient) -> None:
+def test_utterance_dialogue_reports_fake_model_without_translation(client: TestClient) -> None:
     with client as http, http.websocket_connect("/v1/stream", headers=AUTH) as socket:
         assert socket.receive_json() == {
             "type": "hello",

@@ -541,6 +541,10 @@
             "title": "Model State",
             "type": "string"
           },
+          "model_variant": {
+            "title": "Model Variant",
+            "type": "string"
+          },
           "queue": {
             "$ref": "#/components/schemas/QueueStatus"
           },
@@ -564,6 +568,7 @@
           "model_state",
           "model",
           "model_revision",
+          "model_variant",
           "worker_generation",
           "worker_load_ms",
           "last_error",

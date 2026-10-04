@@ -28,3 +28,21 @@ Citations:
 
 This project only runs the unmodified weights; the singing decision logic
 (src/tea_asr/singing.py) is original to this project.
+
+TEA-ASR-1.1 local MLX 8-bit derivative
+--------------------------------------
+The optional 8-bit ASR artifact is generated locally from
+JacobLinCool/TEA-ASR-1.1 at revision
+bda08df76d4fd6b487b4a1dd7f0bddf8541696f8 using the conversion recipe and
+tool versions pinned in models.lock.json. The upstream TEA-ASR-1.1 model card
+identifies its license as MIT:
+  https://huggingface.co/JacobLinCool/TEA-ASR-1.1/blob/bda08df76d4fd6b487b4a1dd7f0bddf8541696f8/README.md
+
+This local quantized derivative follows the upstream MIT license. TEA-ASR-1.1
+is based on Qwen/Qwen3-ASR-1.7B, whose license is Apache-2.0; retain the
+upstream Qwen license and notices when distributing the derivative:
+  https://huggingface.co/Qwen/Qwen3-ASR-1.7B
+
+The model payload is a local artifact and is not included in this repository.
+Its file SHA-256 values, source revision, conversion command and MLX versions
+are recorded in models.lock.json.

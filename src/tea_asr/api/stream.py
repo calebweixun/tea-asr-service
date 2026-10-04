@@ -409,11 +409,17 @@ class StreamSession:
         capture_root: Path | None = None,
         dictionaries: ContextDictionaryStore | None = None,
         singing: SingingRuntime | None = None,
+        model: str = "fake-backend",
+        model_revision: str = "test-only",
+        model_variant: str = "fake",
     ) -> None:
         self._websocket = websocket
         self._scheduler = scheduler
         self._config = config
         self._model_state = model_state
+        self._model = model
+        self._model_revision = model_revision
+        self._model_variant = model_variant
         self._vad = vad
         #: Other live sessions on this service, used by the sleep watcher.
         self._registry = registry
@@ -1561,6 +1567,9 @@ class StreamSession:
                 session_id=self._state.session_id,
                 event_id=0,
                 request_id=start.request_id,
+                model=self._model,
+                model_revision=self._model_revision,
+                model_variant=self._model_variant,
                 profile=start.profile,
                 transcript_mode=start.transcript_mode,
                 next_seq=0,
@@ -1974,6 +1983,9 @@ async def run_stream(
     capture_root: Path | None = None,
     dictionaries: ContextDictionaryStore | None = None,
     singing: SingingRuntime | None = None,
+    model: str = "fake-backend",
+    model_revision: str = "test-only",
+    model_variant: str = "fake",
 ) -> None:
     """Authenticate and admit one `/v1/stream` connection.
 
@@ -2062,6 +2074,9 @@ async def run_stream(
         capture_root=capture_root,
         dictionaries=dictionaries,
         singing=singing,
+        model=model,
+        model_revision=model_revision,
+        model_variant=model_variant,
     )
     if registry is not None:
         registry.add(session)

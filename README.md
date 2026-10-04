@@ -7,7 +7,7 @@
 ## 先看這裡
 
 - **技術選擇：** Python 3.12、MLX／mlx-audio、FastAPI、單一模型工作程序；原生 macOS 運行。
-- **優先模型：** `Alkd/TEA-ASR-1.1-MLX-4bit`，先驗證混合量化載入與本機品質。
+- **預設模型：** pinned `Alkd/TEA-ASR-1.1-MLX-4bit`；使用者可明確選用本機 pinned 8-bit 衍生檔 `tea-1.1-mlx-8bit`。
 - **第一個里程碑：** 一段音訊可靠地進來，一份繁體中文／中英混合逐字稿可靠地出去。
 - **即時能力路線：** v0.1先完成分段轉錄；v0.1.1／P2a緊接實作「邊說邊出字、依後文修訂、最後定稿」，P0就驗證其成本。
 - **輕量原則：** 一份模型、有限佇列、有限音訊緩衝；無 Docker、Redis、Celery、Electron 或常駐翻譯模型。
@@ -70,9 +70,18 @@ uv run tea-asr service uninstall
 port = 8327
 idle_unload_s = 900   # 閒置這麼久就卸載模型釋放記憶體；0 或 keep_warm 可關閉
 keep_warm = false
+asr_model = "tea-1.1-mlx-4bit"  # 可明確改成 tea-1.1-mlx-8bit
 carry_context_s = 0.0  # final 左上下文；未通過 gold 品質門檻前維持關閉
 carry_context_max_gap_s = 1.5
 ```
+
+### 選擇 8-bit ASR 模型
+
+模型選擇只影響服務載入的那一份 ASR worker。預設仍是 4-bit；你可以在設定檔設 `asr_model = "tea-1.1-mlx-8bit"`，或啟動服務前執行 `export TEA_ASR_MODEL=tea-1.1-mlx-8bit`。改回預設值可設 `tea-1.1-mlx-4bit`。`tea-asr model-prepare --variant 8bit` 只驗證 `TEA_ASR_MODELS_DIR/mlx-8bit-selfconv` 的完整檔案集與 SHA-256，不會下載 8-bit 模型；若缺檔或 hash 不符，`tea-asr serve` 會以 `model_unavailable` 停止、寫錯誤日誌，`tea-asr doctor` 會顯示所選變體及原因，不會載入 4-bit。需要重製時，請在 repository root 執行錯誤訊息中印出的 `benchmarks/convert_quant.py` 命令。
+
+8-bit 檔案由 `JacobLinCool/TEA-ASR-1.1` revision `bda08df76d4fd6b487b4a1dd7f0bddf8541696f8` 以 `mlx 0.32.2`、`mlx-audio 0.4.5`、`mlx-lm 0.31.3` 本機轉換；每個輸出檔案 pin 與轉換命令記在 [`models.lock.json`](models.lock.json)。授權鏈是 TEA-ASR-1.1 的 MIT 授權衍生檔，並保留底層 `Qwen/Qwen3-ASR-1.7B` 的 Apache-2.0 通知，見 [`NOTICE`](NOTICE)。
+
+在使用者人工訂正的三場教會 SRT 離線評估中，8-bit + carry 3 秒相對 4-bit + carry 3 秒的 CER 低 **0.27 個百分點**（95% CI **−0.44 至 −0.10**）；模型檔大 **92%**。這不代表即時串流有同樣的速度或品質差異。真實 server 的 10 分鐘 8-bit／4-bit 對照尚未執行：load time、worker RSS、preview decode p50/p95、worker busy、final latency p95 與首 6 分鐘 CER **待填**。coordinator 的可重現檢查腳本為 [`/Users/c2leb/Codes/tea-asr-service/.soak/run-8bit-check.sh`](/Users/c2leb/Codes/tea-asr-service/.soak/run-8bit-check.sh)；結果與未驗證項目見 [church evaluation report](docs/benchmarks/church-eval-2026-10.md) 和 [06 handoff](docs/06-handoff.md)。
 
 服務啟動時會檢查 port 與 singleton lock，第二份實例會被拒絕並告訴你是誰占著。
 
