@@ -149,6 +149,8 @@ def build_client(
     context_hints_enabled: bool = False,
     context_prompt_enabled: bool = False,
     singing_runtime: Any = None,
+    punctuation_runtime: Any = None,
+    punctuation_restore_enabled: bool = False,
     carry_context_s: float = _DEFAULTS.carry_context_s,
     carry_context_max_gap_s: float = _DEFAULTS.carry_context_max_gap_s,
 ) -> TestClient:
@@ -173,12 +175,14 @@ def build_client(
             context_prompt_enabled=context_prompt_enabled,
             carry_context_s=carry_context_s,
             carry_context_max_gap_s=carry_context_max_gap_s,
+            punctuation_restore_enabled=punctuation_restore_enabled,
         ),
         vad_model=vad,
         rate_limiter=rate_limiter,
         paths=paths,
         # Hermetic: never load the real YAMNet asset unless a test injects a runtime.
         singing_runtime=singing_runtime,
+        punctuation_runtime=punctuation_runtime,
     )
     # The service only ever binds 127.0.0.1 (docs/03-architecture.md), and
     # HostValidationMiddleware enforces that Host allowlist on every HTTP

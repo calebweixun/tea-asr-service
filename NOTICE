@@ -29,6 +29,30 @@ Citations:
 This project only runs the unmodified weights; the singing decision logic
 (src/tea_asr/singing.py) is original to this project.
 
+FunASR CT-Transformer (punctuation restoration)
+-----------------------------------------------
+The optional punctuation restorer runs FunASR's CT-Transformer Chinese/English
+punctuation model.
+
+  Model:      iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch
+              (Alibaba DAMO Academy / Tongyi Lab, FunASR)
+  Licence:    Apache License 2.0, as stated on the model's ModelScope card
+              https://modelscope.cn/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch
+  Reference:  Chen et al., "Controllable Time-Delay Transformer for Real-Time
+              Punctuation Prediction and Disfluency Detection", ICASSP 2020.
+
+The ONNX int8 file is not part of this repository. `tea-asr model-prepare`
+downloads sherpa-onnx's conversion
+(https://github.com/k2-fsa/sherpa-onnx/releases/tag/punctuation-models,
+`sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8.tar.bz2`)
+and verifies the archive and file SHA-256 values pinned in `models.lock.json`
+and `src/tea_asr/punctuation.py`. The sherpa-onnx project (Apache-2.0) did the
+conversion and quantization; this project does not use its Python package.
+The tokenizer and windowed decoder in src/tea_asr/punctuation.py follow
+sherpa-onnx's offline-punctuation-ct-transformer-impl.h and FunASR's
+ct_transformer code, reimplemented on onnxruntime. Model and attribution are
+retained as the FunASR model license asks.
+
 TEA-ASR-1.1 local MLX 8-bit derivative
 --------------------------------------
 The optional 8-bit ASR artifact is generated locally from

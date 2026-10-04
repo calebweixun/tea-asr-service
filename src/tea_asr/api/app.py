@@ -47,6 +47,11 @@ from tea_asr.context import (
 from tea_asr.errors import ApiError
 from tea_asr.logs import MAX_LOG_EVENTS, event, read_recent_events, split_log_payload
 from tea_asr.model_spec import ModelSpec, asr_model_spec
+from tea_asr.punctuation import (
+    PunctuationModel,
+    PunctuationRuntime,
+    locate_punctuation,
+)
 from tea_asr.rate_limit import AuthRateLimiter
 from tea_asr.scheduler import Scheduler
 from tea_asr.segmenter import SegmenterConfig
@@ -192,6 +197,7 @@ _AUTO_VAD: Any = object()
 _AUTO_TRANSLATION: Any = object()
 #: Sentinel: build the singing runtime from `ServiceConfig` (tests inject one or None).
 _AUTO_SINGING: Any = object()
+_AUTO_PUNCTUATION: Any = object()
 
 
 def _load_vad() -> SileroVad | None:
@@ -283,6 +289,29 @@ def _load_singing(settings: ServiceConfig) -> SingingRuntime | None:
         return None
 
 
+def _load_punctuation(settings: ServiceConfig) -> PunctuationRuntime | None:
+    """Load the pinned punctuation model, or run without it.
+
+    Same rule as `_load_singing` (constraint 6): enabled but missing or hash
+    mismatch means no restoration and no capability, with the reason logged.
+    """
+
+    if not settings.punctuation_restore_enabled:
+        return None
+    try:
+        # PunctuationModel verifies the pinned sha256 itself.
+        model = PunctuationModel(locate_punctuation())
+        return PunctuationRuntime(model, tail_margin=settings.punctuation_tail_margin)
+    except Exception as exc:  # noqa: BLE001 - any lookup or load failure means no restoration
+        event(
+            logger,
+            "punctuation.unavailable",
+            reason=type(exc).__name__,
+            hint="run `tea-asr model-prepare` to fetch the punctuation asset",
+        )
+        return None
+
+
 async def detect_sleep(
     on_wake: Any,
     *,
@@ -346,6 +375,7 @@ def create_app(
     paths: AppPaths | None = None,
     translation_provider: Any = _AUTO_TRANSLATION,
     singing_runtime: Any = _AUTO_SINGING,
+    punctuation_runtime: Any = _AUTO_PUNCTUATION,
 ) -> FastAPI:
     # A fixed `token` string (tests, `export-schemas`) is checked with a
     # constant-time comparison and never touches the filesystem. Otherwise a
@@ -402,6 +432,12 @@ def create_app(
     #: `None` when disabled or the asset is unavailable (see `_load_singing`).
     singing: SingingRuntime | None = (
         _load_singing(settings) if singing_runtime is _AUTO_SINGING else singing_runtime
+    )
+    #: `None` when disabled or the asset is unavailable (see `_load_punctuation`).
+    punctuation: PunctuationRuntime | None = (
+        _load_punctuation(settings)
+        if punctuation_runtime is _AUTO_PUNCTUATION
+        else punctuation_runtime
     )
     activity = Activity()
     loading = asyncio.Lock()
@@ -513,6 +549,8 @@ def create_app(
         await worker.stop()
         if singing is not None:
             singing.close()
+        if punctuation is not None:
+            punctuation.close()
         event(logger, "service.stopped")
 
     app = FastAPI(
@@ -658,6 +696,7 @@ def create_app(
                 context_biasing=settings.context_hints_enabled,
                 context_limits=ContextLimits() if settings.context_hints_enabled else None,
                 singing_detection=True if singing is not None else None,
+                punctuation_restore=True if punctuation is not None else None,
             ),
             limits=CapabilityLimits(
                 max_continuous_sessions=settings.max_continuous_sessions if vad is not None else 0,
@@ -917,6 +956,7 @@ def create_app(
                 capture_root=capture_root,
                 dictionaries=dictionaries,
                 singing=singing,
+                punctuation=punctuation,
                 model=reported_model,
                 model_revision=reported_model_revision,
                 model_variant=reported_model_variant,

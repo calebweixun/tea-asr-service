@@ -131,5 +131,27 @@
         "tokenizer_config.json": "8f5085a5703220031e631066f463e2fea68247ea09b0348f8ae47be591ae7165"
       }
     }
+  },
+  "punctuation": {
+    "source": "https://github.com/k2-fsa/sherpa-onnx/releases/tag/punctuation-models",
+    "upstream": "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch (FunASR CT-Transformer), ONNX int8 export by sherpa-onnx, 2024-04-12",
+    "license": "Apache-2.0",
+    "license_source": "ModelScope model card of the upstream model (License: Apache License 2.0); FunASR code is MIT",
+    "optional": true,
+    "runtime": "onnxruntime CPUExecutionProvider, 1 thread",
+    "input": "inputs int32 [1, T] token ids, text_lengths int32 [1]; vocabulary, punctuation table and unk symbol are in the ONNX metadata",
+    "output": "logits float [1, T, 6] over <unk>|_|，|。|？|、",
+    "archive": {
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8.tar.bz2",
+      "size": 64717756,
+      "sha256": "c0d5aa5f8eeb686032345e180bedf39319dc2e0556781c6264bcadba8328a6e1",
+      "checksum_source": "release asset checksum.txt, identical"
+    },
+    "files": {
+      "model.int8.onnx": "65a3fb9f5ad7bfb96bf69e0dc4481df97f6ee60513c1d94ce981ba6effd524b1"
+    },
+    "file_sizes": {
+      "model.int8.onnx": 75519198
+    }
   }
 }

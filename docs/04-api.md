@@ -17,7 +17,7 @@
 - **WS Origin allowlist**：`/v1/stream` upgrade 驗證 `Origin` 僅限 `http://127.0.0.1`／`http://localhost`；省略 Origin（native client）視為合法；不符時在 `accept()` 之前拒絕，網路上實際收到的是空 body 的 HTTP 403，不是 WS close 1008（`src/tea_asr/api/stream.py::run_stream`；細節見下方「`accept()` 之前的拒絕」）。這與上一條 Host 檢查是兩段獨立程式碼，不是同一個中介層。
 - **`limits.max_continuous_sessions`**：伺服器實際 enforce，預設2，只算 `profile=continuous`；超過回 `concurrent_session_limit`，close 4029（`ContinuousSessionAdmission`）。
 - **`limits.max_total_connections`**：伺服器實際 enforce，預設4，涵蓋 `/v1/stream` 所有 profile 的連線總數；超過在 `accept()` 之前拒絕，網路上實際收到的是空 body 的 HTTP 403（不是 WS close 1013；收不到 `hello`；細節見下方「`accept()` 之前的拒絕」）（`ContinuousSessionAdmission` 重用於 `connection_admission`）。
-- **capabilities.features**：只有實際驗收過的功能才會宣告為 `true`；`partial_transcripts` 依 `TEA_ASR_REVISABLE_PREVIEW` 可能為 `true`；`translation` 只有在明確啟用 provider 且模型 ready 時為 `true`；`singing_detection` 只在 YAMNet 模型實際載入且 hash 符合 `models.lock.json` 時為 `true`（設定預設開啟，但缺資產就不宣告）；其餘固定布林欄位維持 `false`（`src/tea_asr/wire.py::CapabilityFeatures`）。另有可選欄位 `stable_transcripts`（只在 revisable 預覽開啟時出現）、`segmentation_control`（只有 continuous profile 可用時出現），細節見下方各節。
+- **capabilities.features**：只有實際驗收過的功能才會宣告為 `true`；`partial_transcripts` 依 `TEA_ASR_REVISABLE_PREVIEW` 可能為 `true`；`translation` 只有在明確啟用 provider 且模型 ready 時為 `true`；`singing_detection` 只在 YAMNet 模型實際載入且 hash 符合 `models.lock.json` 時為 `true`（設定預設開啟，但缺資產就不宣告）；`punctuation_restore` 只在啟用且標點模型實際載入、hash 符合時為 `true`（設定預設關閉）；其餘固定布林欄位維持 `false`（`src/tea_asr/wire.py::CapabilityFeatures`）。另有可選欄位 `stable_transcripts`（只在 revisable 預覽開啟時出現）、`segmentation_control`（只有 continuous profile 可用時出現），細節見下方各節。
 - **flow.control 節奏**：只在流控窗口實際往前推進時送出，不是固定週期輪詢（`src/tea_asr/api/stream.py::_handle_frame`）。
 - **WS 心跳**：server 每15秒送 WS-layer ping，30秒未收到 pong 判定斷線（`uvicorn.run(..., ws_ping_interval=15, ws_ping_timeout=30)`，`src/tea_asr/cli.py`）。
 - **v0.2 端點**：`/v1/jobs*` 未實作，一律404，不回假 202（`tests/integration/test_schema_export.py::test_v0_2_endpoints_are_absent_not_faked`）。
@@ -244,6 +244,18 @@ server 為每個語音片段標記 `speech` 或 `singing`，讓 client（OBS 外
 
 **品質（held-out，留一檔交叉驗證）。** 2 個 speech 集合的 1.5 秒視窗誤判 singing 0.0%（目標 <1%）、歌唱片段首判抓到 83.1%（最終 94.9%，目標 ≥80%）、29 分鐘完整講道 0 次誤判、首判延遲 1.5 秒。證據範圍很窄：3 首歌（同一樂團與場地）、1 段背景音樂下講話、1 場講道；未涵蓋其他敬拜團、純人聲、詩班、牧師在樂器伴奏下禱告的長段落，也未在真實 OBS 實機驗證。完整 per-file 矩陣、trade-off、CPU 與未驗證清單見 [singing evaluation report](benchmarks/singing-eval-report.md)。
 
+## 標點補回（`punctuation_restore`，預設關閉、需標點模型資產）
+
+ASR 在快語速時會一長串不出標點，OBS 外掛以標點換行就變成整面文字牆（8-bit 實測每 52 字才 1 個標點）。server 可用 FunASR CT-Transformer（ONNX int8，Apache-2.0，約 65 MB 壓縮／76 MB，onnxruntime CPU 1 thread）補上缺的 `，。？、`。
+
+**啟用條件。** `[service].punctuation_restore_enabled = true` 或 `TEA_ASR_PUNCTUATION=1`（預設 `false`，依 [評估](benchmarks/punctuation-report.md) 在使用者確認 OBS 觀感前不預設開啟）；需要 `tea-asr model-prepare` 下載的資產（壓縮檔與 `model.int8.onnx` 的 sha256 都釘在 `models.lock.json`，授權見 `NOTICE`，是選用資產，失敗不影響 ASR 準備）。資產缺少或 hash 不符時 server 照常啟動、不補標點、不宣告 `features.punctuation_restore`，並寫 `punctuation.unavailable`。`[service].punctuation_tail_margin`（0–20，預設 2）見下。
+
+**規則（只插入）。** 只在 ASR 文字沒有標點的位置插入 `，。？、`；不刪除、不替換既有標點，不改任何非標點字元（測試與評估都驗證「移除新增標點後與原文逐字相同」，所以 CER 不變）。與既有或其他新增標點至少相隔 3 個 token。少於 6 個字或以英文為主（CJK 少於一半）的文字跳過。final 沒有句尾標點時補 `。`（模型預測 `？` 則補 `？`）。`raw_text` 不變；有插入時 `warnings` 加 `punctuation_restored`（partial 與 final）。「！」模型不會產生。
+
+**管線位置。** 在 PUA filter、repetition trim、replacement 之後、stable tracker 之前，partial 與 final 都處理，所以 `transcript.stable` 把標點當成文字一起提交（只增不改），client 不需要回寫已顯示的字。推論在專用單執行緒 executor，不阻塞事件迴圈；失敗只記 `punctuation.failed` 並沿用原文。partial 的最後 `punctuation_tail_margin` 個字不插入標點（右側沒有上下文、也可能被 ASR 改寫），且 `transcript.stable` 只看「去掉尾端同樣字數」的 partial，這樣已提交的文字裡不會再被補進標點；final 不受限制。partial 的事件文字仍是完整文字。
+
+**成本與取捨。** 每次呼叫 p50 約 1–5 ms。10 分鐘串流量測：標點密度達標、stable 提交延遲與 final 延遲沒有退步、layout moves／duplicates 為 0；但 partial 改寫率 +4.5 pp，OBS replay 的 row-limit 縮短與 final 改寫已顯示文字增加（`comma-min 8`）。數字、證據範圍與未驗證項目見 [標點補回評估](benchmarks/punctuation-report.md)。
+
 ## WebSocket：v0.1
 
 一條連線＝一個 session，避免多路 PCM multiplexing。read loop、event writer、scheduler 獨立執行。server 建立 socket 後送 `hello`（協定版本、model_state），client 在5秒內送 `session.start`；server 只有在模型 ready、容量允許時回 `session.started`。未 started 禁止 binary。
@@ -328,7 +340,7 @@ punctuation and spaces between copies do not break the run. The defaults are con
 Units containing decimal digits or CJK numerals are normally protected, but a repeated numeral-bearing unit is shortened to three copies after
 `[service].repetition_numeral_loop_limit` (default 6; `TEA_ASR_REPETITION_NUMERAL_LOOP_LIMIT`). A single decimal digit needs at least ten consecutive copies to qualify. Numeral runs next to another decimal digit or CJK numeral stay intact, preserving values such as `1000000元`, `0999999999`, `一九九九年`, and `零零七`. ASCII-letter units are shortened only when no ASCII letter borders the run. This affects both `transcript.partial.text` and `transcript.final.text`. A final keeps the model result in
 `raw_text` unchanged and adds `repetition_trimmed` to `warnings` when trimming occurred. The other final warning
-tag is `private_use_characters`; the one-shot HTTP empty-speech warning is `no_speech`. These tags can coexist.
+tags are `private_use_characters` and `punctuation_restored` (also set on partials); the one-shot HTTP empty-speech warning is `no_speech`. These tags can coexist.
 
 **Final 左上下文（server opt-in，預設關閉）**：設定 `[service].carry_context_s`（0–5 秒，預設 0；環境變數 `TEA_ASR_CARRY_CONTEXT_S`）後，segment final 可帶入前一個成功 final 結束到目前 segment 起點之間、最多這麼長的 PCM；只在兩者間隔不超過 `[service].carry_context_max_gap_s`（0–30 秒，預設 1.5；環境變數 `TEA_ASR_CARRY_CONTEXT_MAX_GAP_S`）時使用。server 以前一 final 的文字尾端比對新辨識文字開頭，忽略 Unicode 寬度、大小寫、標點與空白，並容許約每 4 字 1 個編輯差異。辨識出明確重疊時只從 `text` 移除；`raw_text` 仍保留模型原文，並加 `carry_overlap_stripped`。沒有明確重疊時會再以 segment 原始音訊辨識一次，使用重跑結果並加 `carry_overlap_uncertain`，以避免把鄰段字詞重複送到 client。這兩個 warning 只加在 final，不新增欄位；`audio_ms`、segment sample 範圍仍只表示原片段。預覽不帶左上下文。
 
@@ -467,7 +479,7 @@ HTTP一次性transcription不提供partial；既有client不選revisable，端�
 - `dictionary.saved`／`dictionary.deleted` INFO log 只記 name、hotwords/replacements counts 與 revision，絕不記字典內容。session start 會載入自己的不可變字典快照；編輯不改動已開始的 session，於下一個 session start 由 loader 的 mtime 檢查載入新版本。範例在 [docs/examples/dictionaries/church.example.toml](examples/dictionaries/church.example.toml)，不會自動安裝。
 - 合併順序是 profile 再 inline：inline `domain` 覆蓋 profile；hotwords 依序 union、去重，合計超過200時截到200並寫 `context.hotwords_truncated` WARNING；inline replacements 依 `from` 覆蓋 profile 規則。
 - model prompt 只使用 domain 與 hotwords；replacement 不進 prompt。每個 segment 開啟時凍結 replacement，且只有 `TEA_ASR_CONTEXT_PROMPT=1` 時才凍結並傳送 prompt。prompt 關閉時，domain/hotwords 仍驗證、仍回報，但不進 model request；request 與無 context 的 request byte-identical。`session.started.context` 回 `prompt_applied`，永遠不含 `prompt_tokens`，因為 prompt 是逐 inference request 組裝；backend 回報的 token 數寫在 `stream.context_prompt_tokens` INFO log。不回傳提示全文。Prompt 合併文字以模型 tokenizer 限在384 tokens。mlx-audio 0.4.5 的 Qwen3-ASR `generate(system_prompt=...)` 會把純文字放進 system turn。
-- 輸出先走 PUA filter 和 repetition trim，再做 replacement，接著進 stable tracker。匹配在原始文字上由左至右、每個位置先選最長且不重疊的 exact substring；不對 replacement 輸出再次掃描。`text` 可改，`raw_text` 保持模型原稿。partial/final 有任何命中時加 `replacements_applied`；`stream.replacements_applied` INFO 只記命中數。
+- 輸出先走 PUA filter 和 repetition trim，再做 replacement，接著（若啟用）補標點，最後進 stable tracker。匹配在原始文字上由左至右、每個位置先選最長且不重疊的 exact substring；不對 replacement 輸出再次掃描。`text` 可改，`raw_text` 保持模型原稿。partial/final 有任何命中時加 `replacements_applied`；`stream.replacements_applied` INFO 只記命中數。
 - Replacement 若和 `transcript.stable` 已提交邊界衝突，stable 不會回刪已送出的字；final stable 保留既有前綴，再依原 tracker 的對齊結果追加尾段。此時 stable 可能短暫呈現舊前綴加修正後文字；`transcript.final` 仍是替換後的完整結果。
 - prompt 明確要求模型只轉錄目前音訊。若 final `raw_text` 含 domain 中至少12個連續原字，final 加 `context_echo`，不會暗中刪除該字串。這是警示 heuristic，可能誤報剛好真的說到該文字，也無法證明音訊沒有說到；評估時要人工檢查。
 - Replacement 和 domain prompt 不特別保護數字或否定詞。四段真實講道音訊的 smoke comparison 中，prompt 約多用150個 prompt tokens，未見改善；一段把正確的「聖經」變成「聖家」，一段失去標點，且「住棚節」的三種常見誤聽未被修正。因此 prompt 維持 experimental 並預設關閉；對已審閱的固定誤聽，建議用 deterministic replacement。CER 評估仍需確認數字、否定詞與錯誤替換風險。
