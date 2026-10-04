@@ -134,3 +134,34 @@ def test_segment_audio_length_always_matches_its_sample_range() -> None:
             )
             assert event.start_sample >= 0
             assert event.end_sample > event.start_sample
+
+
+def test_live_preview_may_include_silence_trimmed_from_the_final_range() -> None:
+    """A live snapshot can reach the endpoint grace; final keeps only its tail."""
+
+    config = SegmenterConfig(end_silence_ms=900)
+    machine = ContinuousSegmenter(EnergyVad(), config)
+    stream = tone(1000) + silence(1400)
+    last_open_preview_end: int | None = None
+    closed: list[SegmentClosed] = []
+
+    for offset in range(0, len(stream), 3200):
+        closed.extend(
+            event
+            for event in machine.push(stream[offset : offset + 3200])
+            if isinstance(event, SegmentClosed)
+        )
+        open_audio = machine.open_segment_audio()
+        if open_audio is not None:
+            start, pcm = open_audio
+            last_open_preview_end = start + len(pcm) // 2
+        if closed:
+            break
+
+    assert len(closed) == 1
+    assert closed[0].boundary == "silence"
+    assert last_open_preview_end is not None
+    preview_only_samples = last_open_preview_end - closed[0].end_sample
+    assert preview_only_samples > 0
+    # The e2e fake emits one extra character per 3,200 preview-only samples.
+    assert preview_only_samples // 3200 >= 3

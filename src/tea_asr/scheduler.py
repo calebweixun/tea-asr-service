@@ -185,6 +185,10 @@ class Scheduler:
         if not work.cancelled():
             # Retrieved here too: a caller that went away never reads it.
             work.exception()
+        # This callback wakes a waiter, but it does not invoke that waiter's
+        # worker inline. The completed call's caller handles its result before
+        # the next Worker.transcribe task starts; stream endpoint handling has
+        # already marked and dropped stale previews before it queues the final.
         self._release()
 
     def _release(self) -> None:
