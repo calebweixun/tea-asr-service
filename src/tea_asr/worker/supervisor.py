@@ -56,38 +56,127 @@ class WorkerSupervisor:
         self.load_ms: int | None = None
         self.generation = 0
         self._lock = asyncio.Lock()
+        self._start_lock = asyncio.Lock()
+        self._stop_lock = asyncio.Lock()
         self._restarts: deque[float] = deque()
         self._recovering: asyncio.Task[None] | None = None
+        self._starting_task: asyncio.Task[None] | None = None
+        self._start_waiters: dict[asyncio.Task[None], int] = {}
+        self._stop_generation = 0
+        self._stopping = False
 
     async def start(self) -> None:
-        if self.process and self.process.returncode is None:
-            return
+        if self._stopping:
+            raise WorkerError("model_unavailable", "Worker is stopping")
+        async with self._start_lock:
+            if self._stopping:
+                raise WorkerError("model_unavailable", "Worker start was superseded by stop")
+            if self.process and self.process.returncode is None:
+                return
+            starting = self._starting_task
+            if starting is None or starting.done():
+                starting = asyncio.create_task(self._run_start(self._stop_generation))
+                self._starting_task = starting
+            self._start_waiters[starting] = self._start_waiters.get(starting, 0) + 1
+
+        caller_cancelled = False
+        try:
+            await asyncio.shield(starting)
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            caller_cancelled = caller is not None and caller.cancelling() > 0
+            if not caller_cancelled:
+                raise WorkerError(
+                    "model_unavailable", "Worker start was superseded by stop"
+                ) from None
+            raise
+        finally:
+            await self._release_start_waiter(starting, cancel_if_unobserved=caller_cancelled)
+
+    async def _run_start(self, generation: int) -> None:
+        current = asyncio.current_task()
+        try:
+            await self._start_locked(generation)
+        finally:
+            if self._starting_task is current:
+                self._starting_task = None
+
+    async def _release_start_waiter(
+        self,
+        starting: asyncio.Task[None],
+        *,
+        cancel_if_unobserved: bool,
+    ) -> None:
+        wait_for_reap = False
+        async with self._start_lock:
+            waiters = self._start_waiters.get(starting, 0)
+            if waiters <= 1:
+                self._start_waiters.pop(starting, None)
+                if cancel_if_unobserved and not starting.done():
+                    if not starting.cancelling():
+                        starting.cancel()
+                    wait_for_reap = True
+            else:
+                self._start_waiters[starting] = waiters - 1
+        if wait_for_reap:
+            # A cancelled caller must not leave an unobserved spawn running.
+            # _start_locked shields spawn setup and reaps its process handle.
+            await asyncio.gather(starting, return_exceptions=True)
+
+    async def _start_locked(self, generation: int) -> None:
         self.state = "loading"
         self.last_error = None
-        self.process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            self.worker_module,
-            "--model-path",
-            str(self.model_path),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        spawn = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                self.worker_module,
+                "--model-path",
+                str(self.model_path),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            )
         )
         try:
-            assert self.process.stdout is not None
-            ready = await asyncio.wait_for(read_response(self.process.stdout), self.load_timeout_s)
+            process = await asyncio.shield(spawn)
+        except asyncio.CancelledError:
+            # Do not cancel subprocess pipe setup. Let it return its handle,
+            # then reap the child before this start task exits.
+            try:
+                process = await asyncio.shield(spawn)
+            except Exception as exc:  # noqa: BLE001 - preserve the cancellation that interrupted start
+                logger.debug("Worker spawn failed during cancelled start: %s", exc)
+            else:
+                self.process = process
+                await self._terminate(kill=True)
+            raise
         except Exception as exc:
-            await self.stop()
+            self.state = "failed"
+            self.last_error = f"Worker could not be started: {exc}"
+            raise WorkerError("model_unavailable", self.last_error) from exc
+
+        self.process = process
+        try:
+            assert process.stdout is not None
+            ready = await asyncio.wait_for(read_response(process.stdout), self.load_timeout_s)
+        except asyncio.CancelledError:
+            await self._terminate(kill=True)
+            raise
+        except Exception as exc:
+            await self._terminate(kill=True)
             self.state = "failed"
             self.last_error = f"Worker did not become ready: {exc}"
             raise WorkerError("model_unavailable", self.last_error) from exc
         if ready.get("status") != "ready":
-            await self.stop()
+            await self._terminate(kill=True)
             self.state = "failed"
             self.last_error = str(ready.get("message", "Model load failed"))
             raise WorkerError(str(ready.get("code", "model_unavailable")), self.last_error)
+        if self._stopping or generation != self._stop_generation:
+            await self._terminate(kill=True)
+            raise WorkerError("model_unavailable", "Worker start was superseded by stop")
         self.load_ms = int(ready.get("load_ms", 0))
         self.generation += 1
         self.state = "ready"
@@ -167,8 +256,8 @@ class WorkerSupervisor:
             response = await asyncio.wait_for(round_trip(), self.task_timeout_s)
         except (TimeoutError, asyncio.IncompleteReadError, ConnectionError) as exc:
             # A hung or dead worker takes the whole process down and comes
-            # back; a stuck Metal kernel cannot be interrupted any other way.
-            await self._terminate()
+            # back; a timed-out Metal kernel cannot be interrupted by waiting.
+            await self._terminate(kill=isinstance(exc, TimeoutError))
             self.state = "recovering"
             self.last_error = (
                 "Inference timed out"
@@ -225,6 +314,8 @@ class WorkerSupervisor:
         return WorkerError("invalid_ipc", self.last_error)
 
     def _schedule_restart(self) -> None:
+        if self._stopping:
+            return
         if self._recovering is not None and not self._recovering.done():
             return
         self._recovering = asyncio.get_running_loop().create_task(self._restart_loop())
@@ -262,10 +353,38 @@ class WorkerSupervisor:
         logger.warning(self.last_error, extra={"fields": {"restarts": len(self._restarts)}})
 
     async def stop(self) -> None:
-        # After the exchange on the pipe, if any: cutting it off would fail
-        # that request for nothing, and its caller may already be gone.
-        async with self._lock:
-            await self._terminate()
+        async with self._stop_lock:
+            self._stopping = True
+            self._stop_generation += 1
+            current = asyncio.current_task()
+            try:
+                restart = self._recovering
+                if restart is not None and restart is not current and not restart.done():
+                    restart.cancel()
+                    await asyncio.gather(restart, return_exceptions=True)
+
+                async with self._start_lock:
+                    starting = self._starting_task
+                    if (
+                        starting is not None
+                        and starting is not current
+                        and not starting.done()
+                        and not starting.cancelling()
+                    ):
+                        starting.cancel()
+                if starting is not None and starting is not current:
+                    await asyncio.gather(starting, return_exceptions=True)
+
+                # After the exchange on the pipe, if any: cutting it off would
+                # fail that request for nothing, and its caller may be gone.
+                async with self._lock:
+                    await self._terminate()
+                if self.state != "failed":
+                    self.state = "unprepared"
+                if self._recovering is restart:
+                    self._recovering = None
+            finally:
+                self._stopping = False
 
     async def _terminate(self, *, kill: bool = False) -> None:
         """Stop the process now; for callers that already hold the lock."""
