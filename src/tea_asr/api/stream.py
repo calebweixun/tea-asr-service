@@ -31,6 +31,7 @@ from tea_asr.context import (
 from tea_asr.diagnostics import TICK_S, AudioCapture, SessionDiagnostics, WarningLimiter
 from tea_asr.errors import ApiError
 from tea_asr.logs import event as log_event
+from tea_asr.punctuation import PunctuationRuntime, hold_back_tail
 from tea_asr.rate_limit import AuthRateLimiter
 from tea_asr.repetition import TrimmedRepetition, trim_repetitions
 from tea_asr.scheduler import StaleTaskDropped
@@ -409,6 +410,7 @@ class StreamSession:
         capture_root: Path | None = None,
         dictionaries: ContextDictionaryStore | None = None,
         singing: SingingRuntime | None = None,
+        punctuation: PunctuationRuntime | None = None,
         model: str = "fake-backend",
         model_revision: str = "test-only",
         model_variant: str = "fake",
@@ -429,6 +431,7 @@ class StreamSession:
         self._continuous_admission = continuous_admission
         self._continuous_reserved = False
         self._state = SessionState()
+        self._punctuation = punctuation
         self._singing_counts = {"speech": 0, "singing": 0}
         #: Segments whose singing label is still undecided or unrevised.
         self._labeling: list[Segment] = []
@@ -880,6 +883,32 @@ class StreamSession:
             )
         return filtered
 
+    async def _restore_punctuation(self, text: str, *, final: bool) -> tuple[str, bool]:
+        """Insert missing marks off the event loop; any failure keeps the text.
+
+        Runs after the PUA filter, repetition trim and replacements, and before
+        stable tracking, so `transcript.stable` commits punctuation as text and
+        a client never has to rewrite what it already showed. Insert-only: the
+        result differs from ``text`` only by added marks.
+        """
+
+        if self._punctuation is None:
+            return text, False
+        try:
+            result = await self._punctuation.restore(text, final=final)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - restoration is cosmetic, never fatal
+            log_event(
+                logger,
+                "punctuation.failed",
+                level="warning",
+                session_id=self._state.session_id,
+                reason=type(exc).__name__,
+            )
+            return text, False
+        return result.text, result.changed
+
     @staticmethod
     def _apply_context_replacements(text: str, segment: Segment) -> tuple[str, int]:
         replaced, matches = apply_replacements(text, segment.replacements)
@@ -1058,6 +1087,11 @@ class StreamSession:
             warnings.append("replacements_applied")
         if contains_context_echo(raw_text, segment.context_domain):
             warnings.append("context_echo")
+        text, punctuation_restored = await self._restore_punctuation(text, final=True)
+        if state.cancelled:
+            return
+        if punctuation_restored:
+            warnings.append("punctuation_restored")
         await self._finish_audio_class(segment)
         if state.cancelled:
             return
@@ -1327,11 +1361,25 @@ class StreamSession:
             )
             self._preview_last_decode_s = max(0.0, loop.time() - started - queue_ms / 1000)
             decode_ms = round(self._preview_last_decode_s * 1000)
-            if (
-                segment.terminal
-                or self._state.cancelled
-                or end_sample - segment.start_sample <= segment.published_preview_end
-            ):
+
+            def stale() -> bool:
+                return (
+                    segment.terminal
+                    or self._state.cancelled
+                    or end_sample - segment.start_sample <= segment.published_preview_end
+                )
+
+            text = ""
+            replacement_count = 0
+            punctuation_restored = False
+            if not stale():
+                text = self._apply_pua_filter(
+                    str(response["text"]), segment=segment, kind="partial"
+                )
+                text, replacement_count = self._apply_context_replacements(text, segment)
+                # The await lets the segment close meanwhile; re-checked below.
+                text, punctuation_restored = await self._restore_punctuation(text, final=False)
+            if stale():
                 self._diag.preview_done(
                     outcome="stale",
                     segment_index=segment.index,
@@ -1350,10 +1398,6 @@ class StreamSession:
             self._log_context_prompt_tokens(response, segment, "partial")
             segment.revision += 1
             segment.published_preview_end = end_sample - segment.start_sample
-            text = self._apply_pua_filter(
-                str(response["text"]), segment=segment, kind="partial"
-            )
-            text, replacement_count = self._apply_context_replacements(text, segment)
             self._writer.emit(
                 TranscriptPartial(
                     session_id=self._state.session_id,
@@ -1365,12 +1409,17 @@ class StreamSession:
                     end_sample=end_sample,
                     text=text,
                     warnings=(
-                        ["replacements_applied"] if replacement_count else []
+                        (["replacements_applied"] if replacement_count else [])
+                        + (["punctuation_restored"] if punctuation_restored else [])
                     ),
                 )
             )
             if segment.stable is not None:
-                update = segment.stable.observe(text)
+                update = segment.stable.observe(
+                    hold_back_tail(text, self._punctuation.tail_margin)
+                    if self._punctuation is not None
+                    else text
+                )
                 if update is not None:
                     self._emit_stable(
                         segment, update, source_revision=segment.revision, end_sample=end_sample
@@ -1983,6 +2032,7 @@ async def run_stream(
     capture_root: Path | None = None,
     dictionaries: ContextDictionaryStore | None = None,
     singing: SingingRuntime | None = None,
+    punctuation: PunctuationRuntime | None = None,
     model: str = "fake-backend",
     model_revision: str = "test-only",
     model_variant: str = "fake",
@@ -2074,6 +2124,7 @@ async def run_stream(
         capture_root=capture_root,
         dictionaries=dictionaries,
         singing=singing,
+        punctuation=punctuation,
         model=model,
         model_revision=model_revision,
         model_variant=model_variant,

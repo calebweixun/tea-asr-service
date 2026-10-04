@@ -198,6 +198,15 @@ class ServiceConfig:
     #: `tea-asr model-prepare`); without it the capability is simply not
     #: advertised. Transcription is never changed, only labelled.
     singing_detection_enabled: bool = True
+    #: Insert missing `，。？、` into recognized text with the pinned CT-Transformer
+    #: punctuation model (src/tea_asr/punctuation.py, docs/04). Insert-only;
+    #: needs the optional asset from `tea-asr model-prepare`, and the
+    #: capability is only advertised once it has loaded. Default decided by
+    #: docs/benchmarks/punctuation-report.md.
+    punctuation_restore_enabled: bool = False
+    #: Partials get no inserted mark within this many characters of their end
+    #: (finals are always fully punctuated).
+    punctuation_tail_margin: int = 2
     #: Strip Unicode Private Use Area characters (BMP U+E000-U+F8FF and
     #: supplementary U+F0000-U+FFFFD/U+100000-U+10FFFD) from recognized text
     #: before it reaches the client. This is a stopgap for a
@@ -336,6 +345,8 @@ class ServiceConfig:
             self.repetition_numeral_loop_limit,
         ) < 1:
             raise ValueError("repetition limits must be at least 1")
+        if not 0 <= self.punctuation_tail_margin <= 20:
+            raise ValueError("punctuation_tail_margin must be between 0 and 20")
 
     @classmethod
     def load(
@@ -389,6 +400,11 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
         config = replace(
             config,
             singing_detection_enabled=singing_detection not in {"0", "false", "no", ""},
+        )
+    punctuation = get("TEA_ASR_PUNCTUATION")
+    if punctuation is not None:
+        config = replace(
+            config, punctuation_restore_enabled=punctuation not in {"0", "false", "no", ""}
         )
     if get("TEA_ASR_KEEP_WARM") == "1":
         config = replace(config, keep_warm=True)
