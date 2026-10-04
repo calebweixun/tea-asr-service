@@ -18,6 +18,12 @@ from .config import AppPaths, ServiceConfig, revoke_token, rotate_token, validat
 from .logs import event, setup_logging
 from .model_manager import ModelUnavailableError, locate_prepared_model, prepare_model
 from .model_spec import asr_model_spec
+from .punctuation import (
+    PUNCTUATION_MODEL_SHA256,
+    prepare_punctuation,
+    punctuation_model_path,
+    verify_asset,
+)
 from .service import (
     ServiceAlreadyRunningError,
     SingletonLock,
@@ -190,6 +196,9 @@ def _doctor(url: str) -> int:
         # Optional: without it the service runs but offers no singing labels.
         "yamnet_revision": YAMNET_REVISION,
         "yamnet_prepared": yamnet_ok,
+        # Optional: punctuation restoration is off without this asset.
+        "punctuation_sha256": PUNCTUATION_MODEL_SHA256,
+        "punctuation_prepared": verify_asset(punctuation_model_path()),
         "service": _probe_service(url),
     }
     print(json.dumps(checks, ensure_ascii=False, indent=2))
@@ -389,6 +398,12 @@ def main() -> int:
             print("YAMNet 資產 hash 不符 models.lock，singing 標籤不會啟用。", file=sys.stderr)
             return 2
         print(model_path)
+        try:
+            punctuation_path = prepare_punctuation()
+        except Exception as exc:  # noqa: BLE001 - optional asset, never blocks ASR setup
+            print(f"標點模型下載失敗（選用，標點補回不會啟用）：{exc}", file=sys.stderr)
+            return 0
+        print(punctuation_path)
         return 0
     return 2
 

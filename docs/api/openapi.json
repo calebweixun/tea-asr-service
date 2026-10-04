@@ -119,6 +119,17 @@
             "title": "Partial Transcripts",
             "type": "boolean"
           },
+          "punctuation_restore": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Punctuation Restore"
+          },
           "segmentation_control": {
             "anyOf": [
               {

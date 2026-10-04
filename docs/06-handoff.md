@@ -11,6 +11,8 @@
 
 離線人工訂正 SRT 評估中，8-bit + carry 3 s 相對 4-bit + carry 3 s 的 CER 差為 **−0.27 pp [−0.44, −0.10]**，95% CI 不含 0；模型檔大小增加 **92%**。這是三場同一教會服務的離線結果，不代表即時串流成本或其他場地的品質。真實 server 10 分鐘對照尚待 coordinator 執行 [`/Users/c2leb/Codes/tea-asr-service/.soak/run-8bit-check.sh`](/Users/c2leb/Codes/tea-asr-service/.soak/run-8bit-check.sh)：載入時間、worker RSS、preview decode p50/p95、worker busy、final latency p95 與首 6 分鐘 CER **待填**；完成前不得宣稱這些即時指標已驗收。
 
+**2026-10-05｜標點補回（server）：** 新增 `punctuation.py`：FunASR CT-Transformer（sherpa-onnx int8 ONNX、Apache-2.0、壓縮檔與模型 sha256 釘在 `models.lock.json`，`model-prepare` 選用下載），onnxruntime CPU 1 thread、專用 executor，只插入 `，。？、`、不改其他字元，partial 與 final 在 stable 之前處理（partial 尾端 2 字不插、stable 同樣保留尾端 2 字），`raw_text` 不變、`warnings` 加 `punctuation_restored`；`features.punctuation_restore` 只在資產載入且 hash 相符時宣告（約束 6）。設定 `punctuation_restore_enabled`／`TEA_ASR_PUNCTUATION=1`，**預設關閉**。8-bit 10 分鐘串流：每 52 字一個標點 → 12 字（人工答案 12.5）、無標點段 69%→8%、最長無標點連續字 34→15（中位）、stable 提交與 final 延遲持平、layout moves／duplicates 0；代價是 partial 改寫率 +4.5 pp、OBS replay 的 row-limit 縮短 7→43（`comma-min 8`）與 final 改寫已顯示文字 24→34。離線 39 句召回 0.20→0.69、F1 0.33→0.62，CER 不變。見 [評估報告](benchmarks/punctuation-report.md)。**OBS 實際畫面、其他講者與場地、4-bit 串流未驗收；使用者看過 OBS 前不改預設。**
+
 ## 開發方式
 
 採單一repo、Python package、逐階段垂直切片。每個階段都交付可重現結果，前一個關卡沒通過就不要把後續功能當成完成。使用專案的codebase-memory-mcp做程式探索；尚無程式時不需要硬建空索引，有程式後建立／更新索引。

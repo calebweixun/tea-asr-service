@@ -261,6 +261,9 @@ class CapabilityFeatures(ServerModel):
     #: when the pinned model really loaded (docs/06 constraint 6); `None` is
     #: left out of the response, so a server without it shows nothing.
     singing_detection: bool | None = None
+    #: Server inserts missing `，。？、` into `text` (docs/04 「標點補回」).
+    #: Advertised only when the pinned punctuation model really loaded.
+    punctuation_restore: bool | None = None
     #: Opt-in append-only `transcript.stable` (docs/07「只增不改的穩定前綴」).
     #: Derived from revisable partials, so it is only offered with them. `None`
     #: is left out of the response (exclude_none), so a server without
