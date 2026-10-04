@@ -179,6 +179,41 @@ final class AppController: NSObject, NSApplicationDelegate {
                 requiredPermissionsGranted: permissions.state.requiredPermissionsGranted
             )
         )
+        #if DEBUG
+        // Debug builds only: `-TEADebugSection dictionaries` opens a page at
+        // launch, so a GUI check can screenshot it without clicking.
+        if let raw = UserDefaults.standard.string(forKey: "TEADebugSection"),
+           let section = MainWindowController.Section.allCases.first(where: { "\($0)" == raw }) {
+            window.show(section: section)
+        }
+        // `-TEADebugDictionaryPaste` / `-TEADebugDictionaryTest` replay a
+        // paste and a test sentence once the dictionary has loaded, so the
+        // screenshot shows the validation and preview states.
+        let debugPaste = UserDefaults.standard.string(forKey: "TEADebugDictionaryPaste")
+        let debugTest = UserDefaults.standard.string(forKey: "TEADebugDictionaryTest")
+        if debugPaste != nil || debugTest != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak window] in
+                guard let page = window?.debugDictionaryPage else { return }
+                if let debugPaste {
+                    page.readPasteboard = { debugPaste.replacingOccurrences(of: "\\n", with: "\n") }
+                    page.pasteRules(nil)
+                }
+                if let debugTest {
+                    page.debugRunPreview(debugTest)
+                }
+                if UserDefaults.standard.bool(forKey: "TEADebugScrollToBottom") {
+                    window?.debugScrollDetailToBottom()
+                }
+            }
+        }
+        #endif
+    }
+
+    /// Unsaved dictionary edits are the only user work this app can lose on
+    /// quit, so quitting asks first (see `DictionaryPage.confirmQuit`).
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let window = mainWindow, window.hasUnsavedDictionaryChanges else { return .terminateNow }
+        return window.confirmQuitWithUnsavedDictionaryChanges() ? .terminateNow : .terminateCancel
     }
 
     /// Finder/open sends a reopen request to an already-running accessory app.

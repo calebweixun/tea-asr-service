@@ -113,6 +113,8 @@ final 與 final-only 模式完全一致、混合負載下 23/23 HTTP 辨識成�
 
 **2026-10-04｜Dictionary editing API：**新增 authenticated list/detail、PUT create/update、soft-delete 與 saved/draft preview。寫入套用 loader 同一組欄位長度／數量限制與重複來源檢查，使用 base revision 衝突保護、canonical TOML、原子替換與每名字典最近 30 份 `.history`；非 loopback 編輯需另外設定 `dictionary_remote_edit=true`，預設關閉。session start 凍結字典快照，編輯只影響下一個 session。API schema 與具體驗收結果記錄於 [04 API 契約](04-api.md) 及 [10 session handoff](10-session-handoff.md)。
 
+**2026-10-05｜Mac app 字典頁：**側欄新增「字典」頁（AppKit，build-once + update）：清單（數量、更新時間、格式錯誤標記）、新增／複製／重新命名（先 PUT 新名再 DELETE 舊名）／刪除（可從 `.history` 救回）、對照表（排序、搜尋、行內驗證、server 422 標到對應列、多行貼上、TOML 匯入／匯出）、用未儲存草稿的測試區，以及帶 `base_revision` 的儲存（409 可覆寫／重新載入；新增用 `base_revision: null`，不會覆蓋同名）。已用真實 server（FakeSupervisor、隔離 HOME、port 8452）跑完 create→edit→preview→save→reload→409→422→rename→delete 並核對 canonical TOML 與 `.history`；`swift test` 全綠。**實機點擊操作（儲存格編輯、⌘V/⌘S、各對話框）與 OBS 端生效時機未經使用者驗收。**
+
 **完成條件：** 能呈現「先出字→後文修正→定稿」；partial不重複append、不改已final內容；重跑總RTF與品質、延遲符合07或有明確未達標報告；preview超載不阻塞收音與正式排程。測試同音詞、數字、否定詞、中英混用與cancel/final競態。
 
 **v0.1.1可發行條件：** P2a驗收通過才宣告partial_transcripts=true。未達標可交付研究與改善方案，但不能把需求標成完成或靜默移除。保留final-only模式；P4再驗證durable_revisable。
