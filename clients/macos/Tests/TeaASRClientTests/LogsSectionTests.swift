@@ -196,8 +196,8 @@ final class LogsSectionTests: XCTestCase {
     }
 
     @MainActor
-    func testSidebarStillHasFiveDestinationsWithLogsLast() {
-        XCTAssertEqual(MainWindowController.Section.allCases.count, 5)
+    func testSidebarHasSixDestinationsWithLogsLast() {
+        XCTAssertEqual(MainWindowController.Section.allCases.count, 6)
         XCTAssertEqual(MainWindowController.Section.allCases.last, .logs)
         XCTAssertEqual(MainWindowController.Section.logs.title, "日誌")
     }

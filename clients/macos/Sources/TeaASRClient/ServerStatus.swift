@@ -83,6 +83,10 @@ struct CapabilityFeatures: Decodable, Equatable {
     let durableSessions: Bool
     let durableRevisable: Bool
     let batchJobs: Bool
+    /// The server's dictionary input limits; present only when
+    /// `context_biasing` is on. Optional with a default so older servers
+    /// (and the memberwise initialiser) keep working unchanged.
+    var contextLimits: DictionaryLimits? = nil
 
     enum CodingKeys: String, CodingKey {
         case nativeAudioStreaming = "native_audio_streaming"
@@ -95,6 +99,7 @@ struct CapabilityFeatures: Decodable, Equatable {
         case durableSessions = "durable_sessions"
         case durableRevisable = "durable_revisable"
         case batchJobs = "batch_jobs"
+        case contextLimits = "context_limits"
     }
 }
 

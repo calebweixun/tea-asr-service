@@ -48,8 +48,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// The one spacing/sizing scale for the detail pane. Everything here is a
     /// multiple of 4 so neighbouring groups, rows and controls share a visible
     /// rhythm instead of each picking its own number (the layout used to mix
-    /// 5/7/10/12/13/14/16/18/22).
-    private enum Metrics {
+    /// 5/7/10/12/13/14/16/18/22). Internal (not private) so pages built in
+    /// their own files, like `DictionaryPage`, share the same scale.
+    enum Metrics {
         /// Margin between the detail pane's edge and its content.
         static let edge: CGFloat = 20
         /// Between two top-level groups in a section.
@@ -93,6 +94,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     enum Section: Int, CaseIterable {
         case overview
         case operations
+        case dictionaries
         case settings
         case diagnostics
         case logs
@@ -101,6 +103,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             switch self {
             case .overview: return "總覽"
             case .operations: return "操作"
+            case .dictionaries: return "字典"
             case .settings: return "設定"
             case .diagnostics: return "診斷與權限"
             case .logs: return "日誌"
@@ -111,6 +114,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             switch self {
             case .overview: return "rectangle.3.group"
             case .operations: return "mic"
+            case .dictionaries: return "character.book.closed"
             case .settings: return "gearshape"
             case .diagnostics: return "stethoscope"
             case .logs: return "doc.plaintext"
@@ -122,6 +126,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let appState: AppState
     private let permissions: PermissionCoordinator
     private let logsClient: LogsFetching
+    private let dictionaryClient: DictionaryServing
+    /// Built together with the 字典 section (see `buildDictionariesSection`).
+    private var dictionaryPage: DictionaryPage?
 
     private let splitViewController = FixedSidebarSplitViewController()
     private let sidebarController = NSViewController()
@@ -241,12 +248,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         settings: Settings,
         appState: AppState,
         permissions: PermissionCoordinator,
-        logsClient: LogsFetching = LogsClient()
+        logsClient: LogsFetching = LogsClient(),
+        dictionaryClient: DictionaryServing = DictionaryClient()
     ) {
         self.settings = settings
         self.appState = appState
         self.permissions = permissions
         self.logsClient = logsClient
+        self.dictionaryClient = dictionaryClient
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 980, height: 650),
@@ -486,6 +495,28 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         updateSection(selectedSection)
     }
 
+    /// Unsaved dictionary edits are the one thing in this window that closing
+    /// it can lose, so closing asks first (save / discard / cancel), exactly
+    /// like a document window.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard let dictionaryPage else { return true }
+        return dictionaryPage.confirmLeavingIfNeeded { [weak sender] in
+            sender?.close()
+        }
+    }
+
+    /// Whether the 字典 page holds edits that have not been saved, for the
+    /// app's quit path.
+    var hasUnsavedDictionaryChanges: Bool {
+        dictionaryPage?.store.isDirty ?? false
+    }
+
+    /// Asked by `AppController` before quitting with unsaved dictionary edits.
+    /// Returns `true` to quit (the edits are discarded).
+    func confirmQuitWithUnsavedDictionaryChanges() -> Bool {
+        dictionaryPage?.confirmQuit() ?? true
+    }
+
     func windowWillClose(_ notification: Notification) {
         isWindowOpen = false
         stopAudioLevelMonitor()
@@ -616,6 +647,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if section == .logs {
             fetchLogs()
         }
+        // Same pull-on-demand contract for the dictionary list.
+        if section == .dictionaries {
+            dictionaryPage?.pageDidAppear()
+        }
     }
 
     /// The permission rows live in Diagnostics now, so a TCC change refreshes
@@ -661,6 +696,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         switch section {
         case .overview: runtime = buildOverviewSection()
         case .operations: runtime = buildOperationsSection()
+        case .dictionaries: runtime = buildDictionariesSection()
         case .settings: runtime = buildSettingsSection()
         case .diagnostics: runtime = buildDiagnosticsSection()
         case .logs: runtime = buildLogsSection()
@@ -1630,6 +1666,27 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    /// The 字典 page lives in its own file (`DictionaryPage`); it is built
+    /// once like every other section, and its `update()` only touches
+    /// labels and visibility — never the tables or a field being edited.
+    private func buildDictionariesSection() -> SectionRuntime {
+        let settings = self.settings
+        let appState = self.appState
+        let page = DictionaryPage(
+            host: self,
+            client: dictionaryClient,
+            endpoint: { DictionaryEndpoint(host: settings.host, port: settings.port, token: try? settings.token()) },
+            service: {
+                DictionaryPage.ServiceState(
+                    reachable: appState.serviceReachable,
+                    features: appState.serviceSnapshot?.capabilities.features
+                )
+            }
+        )
+        dictionaryPage = page
+        return SectionRuntime(view: page.view, update: page.update)
+    }
+
     private func buildDiagnosticsSection() -> SectionRuntime {
         // Permissions go first: they are the only thing on this page the user
         // can act on, and the read-only rows below are usually consulted to
@@ -2230,7 +2287,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// sidebar already says which page the user is on, and no Apple app
     /// (System Settings, Mail, Shortcuts) repeats that as a 26pt landing-page
     /// headline inside the content pane.
-    private func sectionStack(views: [NSView]) -> NSView {
+    func sectionStack(views: [NSView]) -> NSView {
         let stack = NSStackView(views: views)
         stack.orientation = .vertical
         stack.alignment = .width
@@ -2252,7 +2309,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// rounded, tinted, bordered "card" (and its decorative per-card icon),
     /// neither of which appears in Apple's own apps. A lone control is not
     /// wrapped in a group at all — it is simply placed in the section.
-    private func group(title: String? = nil, views: [NSView]) -> NSView {
+    func group(title: String? = nil, views: [NSView]) -> NSView {
         let content = NSStackView(views: views)
         content.orientation = .vertical
         content.alignment = .width
@@ -2279,7 +2336,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     /// A horizontal run of buttons that stays at its natural size and hugs the
     /// leading edge, so buttons in different groups start on the same line.
-    private func buttonRow(_ buttons: [NSView]) -> NSStackView {
+    func buttonRow(_ buttons: [NSView]) -> NSStackView {
         let row = NSStackView(views: buttons)
         row.orientation = .horizontal
         row.alignment = .firstBaseline
@@ -2307,7 +2364,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// both edges ourselves at `.required` priority removes the tie, so
     /// this — not `.alignment = .width` — is what actually stretches an
     /// arranged subview to the stack's width.
-    private func stretchArrangedSubviewsToFullWidth(_ stack: NSStackView) {
+    func stretchArrangedSubviewsToFullWidth(_ stack: NSStackView) {
         for view in stack.arrangedSubviews {
             view.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
             // A view that explicitly opted out of growing horizontally (e.g.
@@ -2448,7 +2505,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// card occasionally growing. Everything else keeps the fixed-height
     /// path, since those fields update far more often (every status tick)
     /// and are the ones the earlier jitter bug was actually about.
-    private func stableLabel(font: NSFont, maxLines: Int?, color: NSColor? = nil) -> NSTextField {
+    func stableLabel(font: NSFont, maxLines: Int?, color: NSColor? = nil) -> NSTextField {
         let label = NSTextField(wrappingLabelWithString: "")
         label.font = font
         if let color {
@@ -2675,7 +2732,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    private func presentAlert(_ title: String, _ message: String) {
+    func presentAlert(_ title: String, _ message: String) {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
@@ -2771,5 +2828,14 @@ extension MainWindowController {
     /// The launch-time auto-start diagnostic text, for asserting on it
     /// directly instead of scraping it back out of `debugLabelTexts()`.
     var debugLaunchAutoStartDiagnostic: String? { launchAutoStartDiagnostic }
+
+    /// The 字典 page, once its section has been built, so tests can drive
+    /// its store and replace its modal dialogs with canned answers.
+    var debugDictionaryPage: DictionaryPage? { dictionaryPage }
+
+    /// For GUI checks of long pages: scrolls the detail pane to its end.
+    func debugScrollDetailToBottom() {
+        detailView.scroll(NSPoint(x: 0, y: max(0, detailView.bounds.height - (detailView.enclosingScrollView?.contentView.bounds.height ?? 0))))
+    }
 }
 #endif
