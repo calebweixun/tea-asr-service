@@ -392,3 +392,46 @@ Review 會列出 contexts、precision proxy、harm、style convention 次數、n
 可用 `--hotwords-file` 放寬網域詞的 count/support 門檻，或用
 `--stoplist-file` 擴充常見詞排除表。輸出含逐字稿片段，請留在 git-excluded 的
 `.soak/`；加入字典前先人工檢查。
+
+## 同音候選 + 模型重評分（離線實驗，2026-10）
+
+想法：像輸入法選字。對可疑片段用拼音找出聽起來像字典詞（`to` 值、hotwords、帶稱謂的名字）的候選，
+再讓 ASR 模型自己對**同一段音訊**做 teacher-forced 對數似然來挑。純離線 benchmark
+（`benchmarks/phonetic_rescore.py`），live server 不 import 它。結果見
+[報告](benchmarks/phonetic-rescore-2026-10.md)。需要 `pypinyin==0.55.0`（只裝在 venv，**不在** pyproject／uv.lock；
+測試用 `pytest.importorskip`，CI 沒裝時會跳過）。私有資料與快取都在 git-excluded 的 `.soak/`。
+路徑沿用上一節的 `S`、`W`、`PY`；`LIVE=~/Library/Application\ Support/TEA\ ASR/dictionaries/church.toml`（唯讀）。
+
+```bash
+export PYTHONPATH=$PWD/src:$PWD HF_HUB_OFFLINE=1
+M8=$S/models/mlx-8bit-selfconv; mkdir -p $W/rescore
+# 1. 候選 + 模型打分（每場一次；交叉驗證用「另兩場挖出來的」fold 字典與名字，避免洩漏）
+for d in 20260704 20260822 20260912; do
+  others=$(for o in 20260704 20260822 20260912; do [ $o != $d ] && echo $W/answers/$o-pad25.json; done)
+  $PY benchmarks/phonetic_rescore.py score --answers $W/answers/$d-pad25.json --wav $W/$d.wav \
+    --hypotheses $W/eval/m8-c3/$d.json --dictionary $W/dict-cv/$d/fold-safe.toml \
+    --hotwords-from "$LIVE" --name-references $others --model-path $M8 --out $W/rescore/$d.jsonl
+done
+#    手動訂正集（用 live 字典）
+$PY benchmarks/phonetic_rescore.py score --answers $S/.soak/gold/answers/speakers-answers.json \
+  --wav $S/.soak/audio/church-30m-59m.wav --hypotheses $S/.soak/gold/eval/03-8bit-segment.json \
+  --dictionary "$LIVE" --name-references $W/answers/2026*-pad25.json --model-path $M8 --out $W/rescore/gold.jsonl
+# 2. 交叉驗證調參（兩場調、第三場測）＋ norm／margin／oracle 表
+$PY benchmarks/phonetic_rescore.py tune --work $W --gold-answers $S/.soak/gold/answers/speakers-answers.json \
+  --results $W/rescore/results.json
+# 3. 端到端重跑（每個 fold 用自己的參數）並量每個 final 的額外時間
+for d in 20260704 20260822 20260912; do
+  $PY benchmarks/phonetic_rescore.py time --answers $W/answers/$d-pad25.json --wav $W/$d.wav \
+    --cache $W/rescore/$d.jsonl --tuned $W/rescore/results.json --fold $d --model-path $M8 --out $W/rescore/$d.e2e.jsonl
+done
+$PY benchmarks/phonetic_rescore.py time --answers $S/.soak/gold/answers/speakers-answers.json \
+  --wav $S/.soak/audio/church-30m-59m.wav --cache $W/rescore/gold.jsonl --tuned $W/rescore/results.json \
+  --model-path $M8 --out $W/rescore/gold.e2e.jsonl
+# 4. 彙整（只有數字）
+$PY benchmarks/phonetic_rescore.py report --work $W --gold-answers $S/.soak/gold/answers/speakers-answers.json \
+  --results $W/rescore/results.json --markdown docs/benchmarks/phonetic-rescore-2026-10.md
+$PY -m pytest tests/unit/test_phonetic_rescore.py -q   # 沒有 pypinyin 時只跑決策規則／指標測試
+```
+
+限制：teacher-forced 打分只做在 item 音訊（不含 carry 的 3 s）；模型原始輸出含私用區字元（PUA），
+過濾後的文字對模型來說略偏離分佈，但原稿與候選同樣被過濾，所以比較仍然公平。
