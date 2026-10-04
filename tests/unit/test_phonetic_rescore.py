@@ -24,11 +24,11 @@ def test_find_candidates_recovers_homophone_names() -> None:
     pytest.importorskip("pypinyin")
     from benchmarks.phonetic_rescore import find_candidates
 
-    terms = make_terms([("蒙恩哥", "dict"), ("住棚節", "dict")])
+    terms = make_terms([("孟恩哥", "dict"), ("住棚節", "dict")])
     found = {c.text: c for c in find_candidates("今天毛文哥說祝鵬節到了", terms)}
-    assert "今天蒙恩哥說祝鵬節到了" in found
+    assert "今天孟恩哥說祝鵬節到了" in found
     assert "今天毛文哥說住棚節到了" in found
-    assert found["今天蒙恩哥說祝鵬節到了"].cost < 0.3
+    assert found["今天孟恩哥說祝鵬節到了"].cost < 0.3
     assert found["今天毛文哥說住棚節到了"].cost == pytest.approx(0.0)
     assert found["今天毛文哥說住棚節到了"].cost_toneless == pytest.approx(0.0)
 
@@ -37,8 +37,8 @@ def test_find_candidates_skips_exact_terms_and_unrelated_text() -> None:
     pytest.importorskip("pypinyin")
     from benchmarks.phonetic_rescore import find_candidates
 
-    terms = make_terms([("蒙恩哥", "dict")])
-    assert find_candidates("蒙恩哥來了", terms) == []
+    terms = make_terms([("孟恩哥", "dict")])
+    assert find_candidates("孟恩哥來了", terms) == []
     assert find_candidates("我們一起唱歌", terms) == []
 
 
@@ -46,7 +46,7 @@ def test_find_candidates_never_spans_punctuation_and_caps_results() -> None:
     pytest.importorskip("pypinyin")
     from benchmarks.phonetic_rescore import find_candidates
 
-    terms = make_terms([("蒙恩哥", "dict")])
+    terms = make_terms([("孟恩哥", "dict")])
     assert find_candidates("毛文，哥來了", terms) == []
     many = "".join("毛文哥，" for _ in range(20))
     assert len(find_candidates(many, terms, cap=8)) == 8
@@ -54,8 +54,8 @@ def test_find_candidates_never_spans_punctuation_and_caps_results() -> None:
 
 def test_make_terms_filters_short_and_non_han() -> None:
     pytest.importorskip("pypinyin")
-    terms = make_terms([("蒙恩哥", "dict"), ("神", "dict"), ("AMEN", "dict"), ("蒙恩哥", "hot")])
-    assert [t.text for t in terms] == ["蒙恩哥"]
+    terms = make_terms([("孟恩哥", "dict"), ("神", "dict"), ("AMEN", "dict"), ("孟恩哥", "hot")])
+    assert [t.text for t in terms] == ["孟恩哥"]
     assert terms[0].source == "dict"
 
 
@@ -108,46 +108,46 @@ def test_decision_rule_normalisation_changes_the_verdict() -> None:
 
 
 def test_classify_change_false_good_worse() -> None:
-    reference = "今天蒙恩哥來分享"
-    wrong_on_correct = _candidate(2, 5, "蒙恩姐", "今天蒙恩姐來分享")
-    assert classify_change(reference, "今天蒙恩哥來分享", wrong_on_correct) == "false"
-    fix = _candidate(2, 5, "蒙恩哥", "今天蒙恩哥來分享")
+    reference = "今天孟恩哥來分享"
+    wrong_on_correct = _candidate(2, 5, "孟恩姐", "今天孟恩姐來分享")
+    assert classify_change(reference, "今天孟恩哥來分享", wrong_on_correct) == "false"
+    fix = _candidate(2, 5, "孟恩哥", "今天孟恩哥來分享")
     assert classify_change(reference, "今天毛文哥來分享", fix) == "good"
     worse = _candidate(3, 5, "想姐", "今天蒙想姐來分享")
-    assert classify_change(reference, "今天蒙恩姐來分享", worse) == "worse"
-    same = _candidate(3, 5, "恩姐", "今天蒙恩姐來分享")
-    assert classify_change(reference, "今天蒙恩姐來分享", same) == "neutral"
+    assert classify_change(reference, "今天孟恩姐來分享", worse) == "worse"
+    same = _candidate(3, 5, "恩姐", "今天孟恩姐來分享")
+    assert classify_change(reference, "今天孟恩姐來分享", same) == "neutral"
 
 
 def test_term_recall_counts_occurrences() -> None:
-    correct, total = term_recall(["蒙恩哥說蒙恩哥", "沒有"], ["蒙恩哥說毛文哥", "沒有"], ["蒙恩哥"])
+    correct, total = term_recall(["孟恩哥說孟恩哥", "沒有"], ["孟恩哥說毛文哥", "沒有"], ["孟恩哥"])
     assert (correct, total) == (1, 2)
 
 
 def test_mine_names_uses_titles_and_frequency() -> None:
-    refs = ["蒙恩哥來了"] * 3 + ["蓓禎姐在這"] * 2 + ["我哥說"]
-    assert mine_names(refs, min_count=3) == ["蒙恩哥"]
-    assert "蓓禎姐" in mine_names(refs, min_count=2)
+    refs = ["孟恩哥來了"] * 3 + ["貝甄姐在這"] * 2 + ["我哥說"]
+    assert mine_names(refs, min_count=3) == ["孟恩哥"]
+    assert "貝甄姐" in mine_names(refs, min_count=2)
 
 
 def test_grid_is_conservative_first_and_tune_prefers_fewer_false_changes() -> None:
     grid = parameter_grid()
     assert grid[0].margin == max(m for m in (p.margin for p in grid if p.norm == "sum"))
-    reference = "蒙恩哥來了"
+    reference = "孟恩哥來了"
     run = Run(
         name="syn",
         items=[{"id": "x", "reference": reference, "start_s": 0.0, "end_s": 3.0, "service": "syn"}],
         rows=[{
             "id": "x", "A": "毛文哥來了", "B": "毛文哥來了",
-            "cands": {"A": [_candidate(0, 3, "蒙恩哥", "蒙恩哥來了")], "B": [_candidate(0, 3, "蒙恩哥", "蒙恩哥來了")]},
-            "scores": {"毛文哥來了": [-20.0, 5], "蒙恩哥來了": [-5.0, 5]},
+            "cands": {"A": [_candidate(0, 3, "孟恩哥", "孟恩哥來了")], "B": [_candidate(0, 3, "孟恩哥", "孟恩哥來了")]},
+            "scores": {"毛文哥來了": [-20.0, 5], "孟恩哥來了": [-5.0, 5]},
         }],
-        terms=["蒙恩哥"],
+        terms=["孟恩哥"],
         hours=3.0 / 3600,
     )
     evaluator = Evaluator([run])
     params, info = evaluator.tune([run], "C")
     assert info["delta_errors"] == -2 and info["false"] == 0
     outputs, changes = evaluator.texts(run, "C", params)
-    assert outputs == ["蒙恩哥來了"] and changes[0][2] == "good"
+    assert outputs == ["孟恩哥來了"] and changes[0][2] == "good"
     assert evaluator.texts(run, "B", None)[0] == ["毛文哥來了"]
