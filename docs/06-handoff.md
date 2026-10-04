@@ -5,6 +5,8 @@
 
 **2026-10-03 singing detection 狀態：** 改用 YAMNet（ONNX、Apache-2.0，釘版於 `models.lock.json`，`tea-asr model-prepare` 下載）；`singing.py`（特徵、logistic、session 遲滯、片段決策）與 `singing_session.py`（背景 executor，不阻塞收音）取代先前失敗的 DSP heuristic。`segment.audio_class` 與 `transcript.final.audio_class` 預設開啟，但只有 YAMNet 資產載入且 hash 符合時才送事件與宣告 `features.singing_detection`（約束 6）。Held-out 留一檔：speech 視窗誤判 0.0%（兩組 speech）、歌唱片段首判 83.1%／最終 94.9%、29 分鐘講道 0 誤判、首判 1.5 秒，達成目標；證據只有 3 首同一樂團的歌、1 段背景音樂下講話與 1 場講道，**真實 OBS 與其他敬拜團／場地未驗證**，詳見 [評估報告](benchmarks/singing-eval-report.md)。實作完成與實機驗收分開記錄：後者尚待使用者在真實 OBS 上確認。
 
+**2026-10-04 整場主日 SRT 評估（church-eval）：** 用使用者人工訂正的三場主日（各約 2 小時）量離線 CER、串流字幕與歌唱偵測，工具見 [docs/09](09-testing-guide.md)，數字與決策見 [報告](benchmarks/church-eval-2026-10.md)。結論：replacement 顯著有益（-0.10 pp）、prompt 在 4-bit 無效、carry 3 s 離線不顯著／串流略好、870 ms 句尾靜音優於 600 ms；**歌唱偵測的誤藏率約每個有字幕小時 3.1 次（目標近 0，未達成，門檻與遲滯無法在不損失偵測的情況下消除）**。串流延遲是兩個併發 session 下的上限（單 session 重跑 p95 0.7–1.8 秒）；真實 OBS 畫面未驗收。
+
 ## 開發方式
 
 採單一repo、Python package、逐階段垂直切片。每個階段都交付可重現結果，前一個關卡沒通過就不要把後續功能當成完成。使用專案的codebase-memory-mcp做程式探索；尚無程式時不需要硬建空索引，有程式後建立／更新索引。

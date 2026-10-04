@@ -326,6 +326,61 @@ def replay_metrics(trace: Path) -> dict[str, Any]:
     return metrics["overall"]
 
 
+def aggregate(runs: dict[str, dict[str, Any]], end_silence: int) -> dict[str, Any]:
+    """Pool the windows of one end_silence value: CER from summed edits, counts summed,
+    latencies as the median of window medians and the worst window p95."""
+    rows = [r for key, r in runs.items() if key.endswith(f"/es{end_silence}")]
+    if not rows:
+        return {}
+
+    def total(key: str) -> int | float:
+        return sum(r[key] for r in rows)
+
+    def replay(key: str) -> int:
+        return sum(r.get("replay", {}).get(key, 0) for r in rows)
+
+    def median_of(field: str) -> float | None:
+        values = sorted(r[field]["median"] for r in rows if r[field]["median"] is not None)
+        return values[len(values) // 2] if values else None
+
+    def worst(field: str) -> float | None:
+        values = [r[field]["p95"] for r in rows if r[field]["p95"] is not None]
+        return max(values) if values else None
+
+    chars = total("reference_chars")
+    hours = total("captioned_seconds") / 3600
+    out: dict[str, Any] = {
+        "windows": len(rows),
+        "reference_chars": chars,
+        "cer_asr": round(total("errors_asr") / chars, 4),
+        "cer_displayed": round(total("errors_displayed") / chars, 4),
+        "speech_segments": total("speech_segments"),
+        "false_hide_final": total("false_hide_final"),
+        "false_hide_ever": total("false_hide_ever"),
+        "false_hides_per_captioned_hour": round(total("false_hide_ever") / hours, 2) if hours else None,
+        "uncaptioned_segments": total("uncaptioned_segments"),
+        "uncaptioned_hidden_segments": total("uncaptioned_hidden_segments"),
+        "missed_singing_segments": total("missed_singing_segments"),
+        "missed_singing_seconds": round(total("missed_singing_seconds"), 1),
+        "carry_stripped": sum(r["carry"]["stripped"] for r in rows),
+        "carry_uncertain": sum(r["carry"]["uncertain"] for r in rows),
+    }
+    for field in (
+        "first_text_after_segment_start_ms", "stable_commit_latency_ms",
+        "final_after_close_ms", "final_after_segment_end_ms",
+    ):
+        out[field] = {"median_of_window_medians": median_of(field), "worst_window_p95": worst(field)}
+    for key in (
+        "mid_speech_fade_outs", "row_limit_losses", "tail_retractions", "tail_rewrites",
+        "layout_moves", "duplication_lines", "duplication_total_lines",
+    ):
+        out[f"replay_{key}"] = replay(key)
+    out["replay_largest_burst_max"] = max(
+        (r.get("replay", {}).get("largest_burst", 0) for r in rows), default=0
+    )
+    return out
+
+
 def score_all(args: argparse.Namespace) -> int:
     report: dict[str, Any] = {"windows": {k: v[:2] for k, v in WINDOWS.items()}, "runs": {}}
     for service in SERVICES:
@@ -335,18 +390,74 @@ def score_all(args: argparse.Namespace) -> int:
         for name, (start_s, end_s, _) in WINDOWS.items():
             for end_silence in args.end_silence:
                 path = trace_path(service, name, end_silence, args.tag)
-                if not path.exists():
-                    continue
+                if not path.exists() or not path.with_suffix(".meta.json").exists():
+                    continue  # missing or still being captured
                 meta = json.loads(path.with_suffix(".meta.json").read_text("utf-8"))
                 result = score_trace(read_trace(path), meta, cues, unc, (start_s, end_s))
                 if not args.no_replay:
                     result["replay"] = replay_metrics(path)
                 report["runs"][f"{service}/{name}/es{end_silence}"] = result
                 print(f"scored {path.name}", file=sys.stderr, flush=True)
+    report["aggregate"] = {
+        str(es): aggregate(report["runs"], es) for es in args.end_silence
+    }
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(report, indent=2))
+    print(json.dumps(report["aggregate"], indent=2))
+    return 0
+
+
+REPLAY_BASE = {
+    "--fade-delay-ms": "1500", "--fade-ms": "200", "--max-rows": "2", "--max-lines": "3",
+    "--width": "1800", "--punct": "comma", "--comma-min": "8",
+}
+REPLAY_VARIANTS: dict[str, dict[str, str]] = {
+    "user settings": {},
+    "rows 3": {"--max-rows": "3"},
+    "rows 1": {"--max-rows": "1"},
+    "sentences 2": {"--max-lines": "2"},
+    "sentences 4": {"--max-lines": "4"},
+    "punct off": {"--punct": "off"},
+    "punct sentence": {"--punct": "sentence"},
+    "comma min 12": {"--comma-min": "12"},
+    "tail off": {"--tail": "off"},
+    "fade-out 1000 ms": {"--fade-delay-ms": "1000"},
+    "fade-out 2500 ms": {"--fade-delay-ms": "2500"},
+    "singing show": {"--singing": "show"},
+}
+
+
+def replay_sweep(args: argparse.Namespace) -> int:
+    from soak_metrics import parse_replay_output
+
+    binary = WORK / "build" / "caption-replay"
+    result: dict[str, Any] = {}
+    for label, change in REPLAY_VARIANTS.items():
+        flags = {**REPLAY_BASE, **change}
+        total: dict[str, int] = {}
+        for service in SERVICES:
+            for name in WINDOWS:
+                path = trace_path(service, name, args.end_silence, args.tag)
+                if not path.exists():
+                    continue
+                command = [str(binary), str(path), "--quiet"]
+                for key, value in flags.items():
+                    command += [key, value]
+                out = subprocess.run(command, check=True, capture_output=True, text=True, errors="replace").stdout
+                metrics, _ = parse_replay_output(out, [])  # origin classification is slow and not needed here
+                for key, value in metrics.items():
+                    total[key] = max(total.get(key, 0), value) if key == "largest_burst" else total.get(key, 0) + value
+                hidden = [line for line in out.splitlines() if line.startswith("# singing")]
+                if hidden:
+                    import re
+
+                    match = re.search(r"lines hidden while on screen[^0-9]*(\d+)", hidden[0])
+                    total["singing_lines_hidden"] = total.get("singing_lines_hidden", 0) + (int(match.group(1)) if match else 0)
+        result[label] = total
+        print(label, total, file=sys.stderr)
+    if args.out:
+        args.out.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     return 0
 
 
@@ -370,6 +481,11 @@ def main(argv: list[str] | None = None) -> int:
     score.add_argument("--no-replay", action="store_true")
     score.add_argument("--out", type=Path)
     score.set_defaults(handler=score_all)
+    sweep = commands.add_parser("replay-sweep", help="OBS display settings over the saved traces")
+    sweep.add_argument("--end-silence", type=int, default=870)
+    sweep.add_argument("--tag", default="stream")
+    sweep.add_argument("--out", type=Path)
+    sweep.set_defaults(handler=replay_sweep)
     args = parser.parse_args(argv)
     return args.handler(args)
 
