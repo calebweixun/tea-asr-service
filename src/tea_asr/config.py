@@ -244,6 +244,9 @@ class ServiceConfig:
     #: stray `--host` flag can never silently open the service to the
     #: network. Default False keeps the historic loopback-only behaviour.
     allow_lan: bool = False
+    #: Allow authenticated dictionary edits from non-loopback clients.
+    #: Disabled by default even when LAN serving is enabled.
+    dictionary_remote_edit: bool = False
     #: Extra Host/Origin values to accept once `allow_lan` is on, beyond the
     #: private/Tailscale IP ranges `wire.is_trusted_lan_address` recognizes —
     #: e.g. a Tailscale MagicDNS name, which is a hostname rather than an IP
@@ -404,6 +407,12 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
     allow_lan = get("TEA_ASR_ALLOW_LAN")
     if allow_lan is not None:
         config = replace(config, allow_lan=allow_lan not in {"0", "false", "no", ""})
+    dictionary_remote_edit = get("TEA_ASR_DICTIONARY_REMOTE_EDIT")
+    if dictionary_remote_edit is not None:
+        config = replace(
+            config,
+            dictionary_remote_edit=dictionary_remote_edit not in {"0", "false", "no", ""},
+        )
     extra_hosts = get("TEA_ASR_EXTRA_ALLOWED_HOSTS")
     if extra_hosts is not None:
         config = replace(

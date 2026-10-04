@@ -224,47 +224,193 @@
         "title": "ContextLimits",
         "type": "object"
       },
-      "DictionarySummary": {
+      "ContextReplacement": {
+        "additionalProperties": false,
+        "description": "A deterministic exact substring replacement (`from` is a JSON key).",
+        "properties": {
+          "from": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "From",
+            "type": "string"
+          },
+          "to": {
+            "maxLength": 32,
+            "title": "To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "title": "ContextReplacement",
+        "type": "object"
+      },
+      "DictionaryDetail": {
         "additionalProperties": false,
         "properties": {
           "domain": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Domain"
+            "title": "Domain",
+            "type": "string"
           },
-          "error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error"
-          },
-          "hotwords_count": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Hotwords Count"
+          "hotwords": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Hotwords",
+            "type": "array"
           },
           "name": {
             "title": "Name",
             "type": "string"
           },
-          "replacements_count": {
+          "replacements": {
+            "items": {
+              "$ref": "#/components/schemas/ContextReplacement"
+            },
+            "title": "Replacements",
+            "type": "array"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "domain",
+          "hotwords",
+          "replacements",
+          "revision",
+          "updated_at"
+        ],
+        "title": "DictionaryDetail",
+        "type": "object"
+      },
+      "DictionaryDraft": {
+        "additionalProperties": false,
+        "description": "Dictionary rules accepted by the server editing endpoints.",
+        "properties": {
+          "domain": {
+            "default": "",
+            "maxLength": 300,
+            "title": "Domain",
+            "type": "string"
+          },
+          "hotwords": {
+            "items": {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 200,
+            "title": "Hotwords",
+            "type": "array"
+          },
+          "replacements": {
+            "items": {
+              "$ref": "#/components/schemas/ContextReplacement"
+            },
+            "maxItems": 500,
+            "title": "Replacements",
+            "type": "array"
+          }
+        },
+        "required": [
+          "hotwords",
+          "replacements"
+        ],
+        "title": "DictionaryDraft",
+        "type": "object"
+      },
+      "DictionaryPreviewApplied": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "from": {
+            "title": "From",
+            "type": "string"
+          },
+          "to": {
+            "title": "To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "count"
+        ],
+        "title": "DictionaryPreviewApplied",
+        "type": "object"
+      },
+      "DictionaryPreviewRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "dictionary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DictionaryDraft"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text": {
+            "maxLength": 2000,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "DictionaryPreviewRequest",
+        "type": "object"
+      },
+      "DictionaryPreviewResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "items": {
+              "$ref": "#/components/schemas/DictionaryPreviewApplied"
+            },
+            "title": "Applied",
+            "type": "array"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "applied"
+        ],
+        "title": "DictionaryPreviewResponse",
+        "type": "object"
+      },
+      "DictionarySummary": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "DictionaryValidationIssue": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "index": {
             "anyOf": [
               {
                 "type": "integer"
@@ -273,13 +419,64 @@
                 "type": "null"
               }
             ],
-            "title": "Replacements Count"
+            "title": "Index"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
           }
         },
         "required": [
-          "name"
+          "field",
+          "message"
         ],
-        "title": "DictionarySummary",
+        "title": "DictionaryValidationIssue",
+        "type": "object"
+      },
+      "DictionaryWriteRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "base_revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Revision"
+          },
+          "domain": {
+            "default": "",
+            "maxLength": 300,
+            "title": "Domain",
+            "type": "string"
+          },
+          "hotwords": {
+            "items": {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 200,
+            "title": "Hotwords",
+            "type": "array"
+          },
+          "replacements": {
+            "items": {
+              "$ref": "#/components/schemas/ContextReplacement"
+            },
+            "maxItems": 500,
+            "title": "Replacements",
+            "type": "array"
+          }
+        },
+        "required": [
+          "hotwords",
+          "replacements"
+        ],
+        "title": "DictionaryWriteRequest",
         "type": "object"
       },
       "EndSilenceRange": {
@@ -317,6 +514,31 @@
           "code": {
             "title": "Code",
             "type": "string"
+          },
+          "current_revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Revision"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/DictionaryValidationIssue"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
           },
           "message": {
             "title": "Message",
@@ -870,6 +1092,235 @@
           }
         },
         "summary": "Dictionaries List"
+      }
+    },
+    "/v1/dictionaries/{name}": {
+      "delete": {
+        "operationId": "dictionary_delete_v1_dictionaries__name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Dictionary Delete"
+      },
+      "get": {
+        "operationId": "dictionary_get_v1_dictionaries__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DictionaryDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Dictionary Get"
+      },
+      "put": {
+        "operationId": "dictionary_put_v1_dictionaries__name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DictionaryWriteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DictionaryDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Dictionary Put"
+      }
+    },
+    "/v1/dictionaries/{name}/preview": {
+      "post": {
+        "operationId": "dictionary_preview_v1_dictionaries__name__preview_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DictionaryPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DictionaryPreviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Default Response"
+          }
+        },
+        "summary": "Dictionary Preview"
       }
     },
     "/v1/logs": {

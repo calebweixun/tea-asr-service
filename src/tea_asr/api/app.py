@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import secrets
 import time
@@ -12,7 +13,7 @@ from typing import Any, Literal, Protocol
 
 from fastapi import Depends, FastAPI, Header, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -33,7 +34,16 @@ from tea_asr.config import (
     validate_preview_cadence_or_raise,
     validate_translation_or_raise,
 )
-from tea_asr.context import ContextDictionaryStore, InvalidDictionary
+from tea_asr.context import (
+    ContextDictionaryStore,
+    DictionaryRevisionConflict,
+    DictionarySnapshot,
+    InvalidDictionary,
+    ReplacementRule,
+    UnknownDictionaryProfile,
+    apply_replacements,
+    is_valid_dictionary_name,
+)
 from tea_asr.errors import ApiError
 from tea_asr.logs import MAX_LOG_EVENTS, event, read_recent_events, split_log_payload
 from tea_asr.model_spec import ModelSpec, asr_model_spec
@@ -51,8 +61,14 @@ from tea_asr.wire import (
     Capabilities,
     CapabilityFeatures,
     CapabilityLimits,
+    ContextDictionaryFile,
     ContextLimits,
+    DictionaryDetail,
+    DictionaryDraft,
+    DictionaryPreviewRequest,
+    DictionaryPreviewResponse,
     DictionarySummary,
+    DictionaryWriteRequest,
     EndSilenceRange,
     ErrorEnvelope,
     LogEntry,
@@ -192,6 +208,51 @@ def _load_vad() -> SileroVad | None:
 
 
 logger = logging.getLogger("tea_asr.api")
+
+
+def _dictionary_validation_details(
+    errors: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    for error in errors:
+        location = list(error.get("loc", ()))
+        if location and location[0] in {"body", "path"}:
+            location.pop(0)
+        index = next((part for part in location if isinstance(part, int)), None)
+        fields = [str(part) for part in location if not isinstance(part, int)]
+        details.append(
+            {
+                "field": ".".join(fields) or "request",
+                "index": index,
+                "message": str(error.get("msg", "invalid value")),
+            }
+        )
+    return details
+
+
+def _dictionary_document(draft: DictionaryDraft) -> ContextDictionaryFile:
+    document = ContextDictionaryFile.model_validate(
+        draft.model_dump(mode="python", by_alias=True, exclude={"base_revision"})
+    )
+    first_occurrence: dict[str, int] = {}
+    duplicates: list[dict[str, Any]] = []
+    for index, replacement in enumerate(document.replacements):
+        first_index = first_occurrence.get(replacement.from_)
+        if first_index is None:
+            first_occurrence[replacement.from_] = index
+            continue
+        duplicates.append(
+            {
+                "field": "replacements.from",
+                "index": index,
+                "message": f"duplicate source; first used at index {first_index}",
+            }
+        )
+    if duplicates:
+        raise ApiError(
+            "invalid", "Dictionary rules contain duplicate replacement sources.", details=duplicates
+        )
+    return document
 
 
 def _load_singing(settings: ServiceConfig) -> SingingRuntime | None:
@@ -488,6 +549,52 @@ def create_app(
             raise ApiError("unauthenticated", "缺少或不正確的 bearer token。")
         limiter.record_success(key)
 
+    def require_loopback_dictionary_write(request: Request) -> None:
+        if settings.dictionary_remote_edit:
+            return
+        host = request.client.host if request.client is not None else ""
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        mapped = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) else None
+        if not (address and address.is_loopback) and not (mapped and mapped.is_loopback):
+            raise ApiError(
+                "forbidden",
+                "Dictionary writes are allowed only from loopback clients.",
+            )
+
+    async def authorize_dictionary_write(request: Request) -> None:
+        require_loopback_dictionary_write(request)
+
+    def require_valid_dictionary_name(name: str) -> None:
+        if not is_valid_dictionary_name(name):
+            raise ApiError(
+                "invalid",
+                "Dictionary name must match ^[A-Za-z0-9_-]{1,32}$.",
+                details=[
+                    {
+                        "field": "name",
+                        "index": None,
+                        "message": "must match ^[A-Za-z0-9_-]{1,32}$",
+                    }
+                ],
+            )
+
+    def snapshot_response(snapshot: DictionarySnapshot) -> DictionaryDetail:
+        dictionary = snapshot.dictionary
+        return DictionaryDetail(
+            name=dictionary.name,
+            domain=dictionary.domain,
+            hotwords=list(dictionary.hotwords),
+            replacements=[
+                {"from": rule.source, "to": rule.target}
+                for rule in dictionary.replacements
+            ],
+            revision=snapshot.revision,
+            updated_at=snapshot.updated_at,
+        )
+
     @app.exception_handler(ApiError)
     async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
         return _envelope(exc, request.headers.get("x-request-id"))
@@ -496,6 +603,15 @@ def create_app(
     async def validation_error_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        if request.url.path.startswith("/v1/dictionaries"):
+            return _envelope(
+                ApiError(
+                    "invalid",
+                    "Dictionary request is invalid.",
+                    details=_dictionary_validation_details(exc.errors()),
+                ),
+                request.headers.get("x-request-id"),
+            )
         first = exc.errors()[0]
         location = ".".join(str(part) for part in first["loc"][1:]) or "request"
         return _envelope(
@@ -570,11 +686,144 @@ def create_app(
         response_model=list[DictionarySummary],
         response_model_exclude_none=True,
     )
-    async def dictionaries_list() -> list[DictionarySummary]:
+    def dictionaries_list() -> list[DictionarySummary]:
         try:
-            return [DictionarySummary(**item) for item in dictionaries.summaries()]
+            items = dictionaries.summaries()
+            summaries: list[DictionarySummary] = []
+            for item in items:
+                if not is_valid_dictionary_name(str(item["name"])):
+                    item = {
+                        key: value
+                        for key, value in item.items()
+                        if key not in {"domain", "hotwords_count", "replacements_count"}
+                    }
+                    item["error"] = "dictionary name must match ^[A-Za-z0-9_-]{1,32}$"
+                summaries.append(DictionarySummary(**item))
+            return summaries
         except InvalidDictionary as exc:
             raise ApiError("internal_error", "A server dictionary is invalid.") from exc
+
+    @app.get(
+        "/v1/dictionaries/{name:path}",
+        dependencies=[Depends(authorize)],
+        response_model=DictionaryDetail,
+    )
+    def dictionary_get(name: str) -> DictionaryDetail:
+        require_valid_dictionary_name(name)
+        try:
+            return snapshot_response(dictionaries.snapshot(name))
+        except UnknownDictionaryProfile as exc:
+            raise ApiError("not_found", "Dictionary not found.") from exc
+        except InvalidDictionary as exc:
+            raise ApiError(
+                "invalid",
+                "Dictionary file is invalid.",
+                details=[{"field": "file", "index": None, "message": exc.reason}],
+            ) from exc
+
+    @app.put(
+        "/v1/dictionaries/{name:path}",
+        dependencies=[Depends(authorize), Depends(authorize_dictionary_write)],
+        response_model=DictionaryDetail,
+    )
+    def dictionary_put(name: str, payload: DictionaryWriteRequest) -> DictionaryDetail:
+        require_valid_dictionary_name(name)
+        document = _dictionary_document(payload)
+        try:
+            snapshot = dictionaries.write(
+                name,
+                document,
+                base_revision=payload.base_revision,
+                check_base_revision="base_revision" in payload.model_fields_set,
+            )
+        except DictionaryRevisionConflict as exc:
+            raise ApiError(
+                "conflict",
+                "Dictionary changed since it was read.",
+                current_revision=exc.current_revision,
+            ) from exc
+        except InvalidDictionary as exc:
+            raise ApiError(
+                "invalid",
+                "Dictionary file cannot be edited.",
+                details=[{"field": "file", "index": None, "message": exc.reason}],
+            ) from exc
+        event(
+            logger,
+            "dictionary.saved",
+            name=name,
+            hotwords_count=len(snapshot.dictionary.hotwords),
+            replacements_count=len(snapshot.dictionary.replacements),
+            revision=snapshot.revision,
+        )
+        return snapshot_response(snapshot)
+
+    @app.delete(
+        "/v1/dictionaries/{name:path}",
+        dependencies=[Depends(authorize), Depends(authorize_dictionary_write)],
+        status_code=204,
+        response_class=Response,
+    )
+    def dictionary_delete(name: str) -> Response:
+        require_valid_dictionary_name(name)
+        try:
+            deleted = dictionaries.delete(name)
+        except UnknownDictionaryProfile as exc:
+            raise ApiError("not_found", "Dictionary not found.") from exc
+        except InvalidDictionary as exc:
+            raise ApiError(
+                "invalid",
+                "Dictionary file cannot be deleted.",
+                details=[{"field": "file", "index": None, "message": exc.reason}],
+            ) from exc
+        event(
+            logger,
+            "dictionary.deleted",
+            name=name,
+            hotwords_count=deleted.hotwords_count,
+            replacements_count=deleted.replacements_count,
+            revision=deleted.revision,
+        )
+        return Response(status_code=204)
+
+    @app.post(
+        "/v1/dictionaries/{name:path}/preview",
+        dependencies=[Depends(authorize)],
+        response_model=DictionaryPreviewResponse,
+    )
+    def dictionary_preview(
+        name: str, payload: DictionaryPreviewRequest
+    ) -> DictionaryPreviewResponse:
+        require_valid_dictionary_name(name)
+        if payload.dictionary is None:
+            try:
+                dictionary = dictionaries.snapshot(name).dictionary
+            except UnknownDictionaryProfile as exc:
+                raise ApiError("not_found", "Dictionary not found.") from exc
+            except InvalidDictionary as exc:
+                raise ApiError(
+                    "invalid",
+                    "Dictionary file is invalid.",
+                    details=[{"field": "file", "index": None, "message": exc.reason}],
+                ) from exc
+            rules = dictionary.replacements
+        else:
+            document = _dictionary_document(payload.dictionary)
+            rules = tuple(
+                ReplacementRule(rule.from_, rule.to) for rule in document.replacements
+            )
+        counts: dict[tuple[str, str], int] = {}
+        replaced, _ = apply_replacements(payload.text, rules, counts=counts)
+        applied = [
+            {
+                "from": rule.source,
+                "to": rule.target,
+                "count": counts.get((rule.source, rule.target), 0),
+            }
+            for rule in rules
+            if counts.get((rule.source, rule.target), 0) > 0
+        ]
+        return DictionaryPreviewResponse(text=replaced, applied=applied)
 
     @app.get("/v1/status", dependencies=[Depends(authorize)])
     async def service_status() -> StatusResponse:

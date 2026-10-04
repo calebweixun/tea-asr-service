@@ -29,10 +29,18 @@ def test_openapi_documents_the_error_envelope() -> None:
         "/readyz",
         "/v1/capabilities",
         "/v1/dictionaries",
+        "/v1/dictionaries/{name}",
+        "/v1/dictionaries/{name}/preview",
         "/v1/status",
         "/v1/logs",
         "/v1/transcriptions",
     }
+    assert set(document["paths"]["/v1/dictionaries/{name}"]) == {
+        "get",
+        "put",
+        "delete",
+    }
+    assert set(document["paths"]["/v1/dictionaries/{name}/preview"]) == {"post"}
 
 
 @pytest.mark.parametrize(

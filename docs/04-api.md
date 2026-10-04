@@ -50,7 +50,7 @@
   `transcript.partial` 與 `transcript.final` 套用同一份過濾，不會不一致。若整段辨識結果
   過濾後變成空字串，final 一律以 `segment.skipped`（`reason=empty`）取代，不送出空的
   `transcript.final`，跟「完全沒聽到聲音」的 `reason=no_speech` 區分開來。
-- 所有 error 有 `code`、可讀 `message`、`retryable`、`request_id`（若可取得）；內部 traceback 不回 client。
+- 所有 error 有 `code`、可讀 `message`、`retryable`、`request_id`（若可取得）；字典編輯的 `invalid` error 可附 `details`，revision conflict 可附 `current_revision`。內部 traceback 不回 client。
 
 ```json
 {"error":{"code":"queue_full","message":"辨識佇列已滿，請稍後重試。","retryable":true,"request_id":"req-1"}}
@@ -458,7 +458,13 @@ HTTP一次性transcription不提供partial；既有client不選revisable，端�
 
 - `profile` 是 server 字典名稱，不含 `.toml`。未知或格式無效的字典在 `session.start` 回 `unsupported_option`；context 功能關閉時任何 `context`（包含空物件）也回 `unsupported_option`。錯誤依既有慣例以 close 1008 結束；context 內未知 key 回 `protocol_error`。
 - `domain` 最多300 code points；`hotwords` 最多200項，每項1–32 code points；`replacements` 最多500項，`from` 為1–32、`to` 為0–32 code points。空 `to` 可刪除完整命中詞。
-- `GET /v1/dictionaries` 使用與其他 HTTP routes 相同的 bearer auth，valid file 回 `[{"name":"church.example","domain":"...","hotwords_count":34,"replacements_count":4}]`。格式錯誤、無法讀取、超過 1 MiB，或為 symlink 的檔案仍各自列出為 `{"name":"<name>","error":"<short reason>"}`，不帶 domain/counts，不會讓其他字典消失；每個錯誤檔案會寫一筆 `context.dictionary_invalid` WARNING，只含 name 與簡短 reason，不記檔案內容。字典放在 `<support>/dictionaries/<name>.toml`，格式為 `domain = "..."`、`hotwords = [...]` 和可選 `[[replacements]]` 表。每次 session 開始依 mtime 檢查並重新讀取已變動的檔案；更改會套用到下一個 session。範例在 [docs/examples/dictionaries/church.example.toml](examples/dictionaries/church.example.toml)，不會自動安裝。
+- 所有 dictionary HTTP routes 都要求現有 bearer token。`GET /v1/dictionaries` 保留原本欄位，並對每個項目增加 `revision`（檔案 bytes 的 SHA-256）與 `updated_at`（UTC ISO mtime）。格式錯誤、無法讀取、超過 1 MiB 或為 symlink 的檔案仍逐檔列出 `error`，不會讓其他字典消失；revision 無法安全取得時為 `null`。每個錯誤檔案會寫一筆 `context.dictionary_invalid` WARNING，只含 name 與簡短 reason，不記檔案內容。
+- `GET /v1/dictionaries/{name}` 回 `{name, domain, hotwords, replacements, revision, updated_at}`；檔案不存在回 `404 not_found`，格式錯誤回 `422 invalid`，`error.details` 含檔案 parse error。編輯 API 的名稱限 `^[A-Za-z0-9_-]{1,32}$`；舊的 profile loader 仍可讀既有字典名，但不符合此格式的項目會在清單顯示錯誤，不能透過編輯 API 開啟。
+- `PUT /v1/dictionaries/{name}` 接受 `{domain?, hotwords, replacements, base_revision?}`，回傳與 GET detail 相同的 shape。它建立不存在的檔案（只在省略 `base_revision` 時），也可覆寫既有檔案；若提供 `base_revision`，必須等於目前 revision，否則回 `409 conflict` 並在 `error.current_revision` 回報目前值（檔案不存在時為 `null`），不會寫入。驗證沿用 loader 限制：domain 最多 300 code points；hotwords 最多 200 項、每項 1–32；replacements 最多 500 項，`from` 1–32、`to` 0–32；重複 `from` 也拒絕。驗證錯誤回 `422 invalid`，`error.details` 是 `{field, index, message}` 清單。
+- `PUT`／`DELETE` 僅允許 loopback 來源。若明確在 `[service]` 設定 `dictionary_remote_edit = true`（環境變數 `TEA_ASR_DICTIONARY_REMOTE_EDIT=1`），才允許非 loopback 編輯；這個開關預設 false，且獨立於 `allow_lan`，所有請求仍需 bearer token。`POST /v1/dictionaries/{name}/preview` 是唯讀路由，可使用 loopback 或遠端連線。
+- 寫入採 canonical TOML：header comment、`domain`、`hotwords`、接著是 `[[replacements]]` blocks；手動編輯的註解不保留。先將舊檔複製到 `<support>/dictionaries/.history/<name>-<UTC timestamp>.toml`，每個 name 保留最近 30 份，再以同目錄 temp file、fsync、rename 原子取代。`DELETE /v1/dictionaries/{name}` 將檔案移入同一 history 目錄並回 `204`，不直接丟棄內容。
+- `POST /v1/dictionaries/{name}/preview` 接受 `{text}`，最多 2000 code points；也可附 `{dictionary: {domain?, hotwords, replacements}}` 預覽未儲存草稿。未附草稿時讀取目前檔案。回 `{text, applied:[{from,to,count}]}`；輸出與命中計數共用 `apply_replacements` 的最長優先、原文一次掃描規則。
+- `dictionary.saved`／`dictionary.deleted` INFO log 只記 name、hotwords/replacements counts 與 revision，絕不記字典內容。session start 會載入自己的不可變字典快照；編輯不改動已開始的 session，於下一個 session start 由 loader 的 mtime 檢查載入新版本。範例在 [docs/examples/dictionaries/church.example.toml](examples/dictionaries/church.example.toml)，不會自動安裝。
 - 合併順序是 profile 再 inline：inline `domain` 覆蓋 profile；hotwords 依序 union、去重，合計超過200時截到200並寫 `context.hotwords_truncated` WARNING；inline replacements 依 `from` 覆蓋 profile 規則。
 - model prompt 只使用 domain 與 hotwords；replacement 不進 prompt。每個 segment 開啟時凍結 replacement，且只有 `TEA_ASR_CONTEXT_PROMPT=1` 時才凍結並傳送 prompt。prompt 關閉時，domain/hotwords 仍驗證、仍回報，但不進 model request；request 與無 context 的 request byte-identical。`session.started.context` 回 `prompt_applied`，永遠不含 `prompt_tokens`，因為 prompt 是逐 inference request 組裝；backend 回報的 token 數寫在 `stream.context_prompt_tokens` INFO log。不回傳提示全文。Prompt 合併文字以模型 tokenizer 限在384 tokens。mlx-audio 0.4.5 的 Qwen3-ASR `generate(system_prompt=...)` 會把純文字放進 system turn。
 - 輸出先走 PUA filter 和 repetition trim，再做 replacement，接著進 stable tracker。匹配在原始文字上由左至右、每個位置先選最長且不重疊的 exact substring；不對 replacement 輸出再次掃描。`text` 可改，`raw_text` 保持模型原稿。partial/final 有任何命中時加 `replacements_applied`；`stream.replacements_applied` INFO 只記命中數。

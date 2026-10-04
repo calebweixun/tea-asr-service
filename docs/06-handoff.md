@@ -111,6 +111,8 @@ final 與 final-only 模式完全一致、混合負載下 23/23 HTTP 辨識成�
 
 **2026-10-04｜數字迴圈 guard：**含數字或 CJK 數字的 1–6 字元單位，連續超過 `[service].repetition_numeral_loop_limit`（預設 6）後會保留三份；環境變數為 `TEA_ASR_REPETITION_NUMERAL_LOOP_LIMIT`。單一十進位數字需至少連續 10 次才修剪，且單位緊鄰其他十進位／CJK 數字時保留，以免切斷長數字。數字候選規則移至 dict miner review 的 `Number formatting (style)` 區，不會寫進安全 TOML；一般單詞中偶然含一個中文數字字元的候選仍可保留。2026-10-04 離線掃描 OBS trace 與 traces 目錄的 13 份 JSONL、共 19,944 個文字欄位，沒有新增數字迴圈修剪；共重現 42 個一般重複修剪事件、移除 6,670 字元。這是舊輸出的離線分析，不代表新版 server 的真實模型品質已驗收。
 
+**2026-10-04｜Dictionary editing API：**新增 authenticated list/detail、PUT create/update、soft-delete 與 saved/draft preview。寫入套用 loader 同一組欄位長度／數量限制與重複來源檢查，使用 base revision 衝突保護、canonical TOML、原子替換與每名字典最近 30 份 `.history`；非 loopback 編輯需另外設定 `dictionary_remote_edit=true`，預設關閉。session start 凍結字典快照，編輯只影響下一個 session。API schema 與具體驗收結果記錄於 [04 API 契約](04-api.md) 及 [10 session handoff](10-session-handoff.md)。
+
 **完成條件：** 能呈現「先出字→後文修正→定稿」；partial不重複append、不改已final內容；重跑總RTF與品質、延遲符合07或有明確未達標報告；preview超載不阻塞收音與正式排程。測試同音詞、數字、否定詞、中英混用與cancel/final競態。
 
 **v0.1.1可發行條件：** P2a驗收通過才宣告partial_transcripts=true。未達標可交付研究與改善方案，但不能把需求標成完成或靜默移除。保留final-only模式；P4再驗證durable_revisable。
@@ -165,7 +167,7 @@ server repo只放reference clients与protocol測試；正式Swift app／OBS plug
 | 功能 | 開始之前要有的證據 |
 |---|---|
 | 跨句全文校訂／可選LLM潤飾 | P2a同片段修訂完成，另定document revision與原稿保存；不可回改ASR final |
-| Recognition hints（domain、hotwords、replacement） | **機制已實作，預設關閉**；審閱後的 deterministic replacements 是建議工具。Model prompt 由 `TEA_ASR_CONTEXT_PROMPT=1` 分開啟用且需 hints 已開、預設關閉並 experimental；目標語料 CER、數字、否定詞、prompt echo 與 replacement 誤傷仍待評估 |
+| Recognition hints（domain、hotwords、replacement） | **機制已實作，預設關閉**；含 authenticated 字典讀寫與預覽 API，寫入預設限 loopback，遠端編輯需 `dictionary_remote_edit=true`。審閱後的 deterministic replacements 是建議工具。Model prompt 由 `TEA_ASR_CONTEXT_PROMPT=1` 分開啟用且需 hints 已開、預設關閉並 experimental；目標語料 CER、數字、否定詞、prompt echo 與 replacement 誤傷仍待評估 |
 | 翻譯 | 來源／目標語言、使用者是否接受雲端、獨立provider／保留原稿。**2026-09-24 已接入（opt-in，預設關閉）**：`netease-youdao/Confucius4-T3PO` 4-bit，獨立 worker 子程序，**只提供 zh→en**（en→zh 回譯 20 句有 18 句含簡體字，不宣告）。只翻 `transcript.final`，譯文走新事件（`translation.started`／`.segment`／`.error`），既有事件與原稿不動。開啟時 ASR final 延遲 p95 約多 0.2–0.3 s（GPU 爭用）。翻譯品質尚無量化分數（缺平行語料），見 `docs/benchmarks/t3po-eval-report.md` |
 | Forced alignment | 後端相容性、額外模型memory與對齊品質 |
 | Diarization | 多人會議需求、額外模型與重疊發話處理，不以來源軌代替 |

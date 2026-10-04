@@ -6,7 +6,10 @@ from typing import Any
 #: for HTTP status and WebSocket close code, so no call site invents a mapping.
 ERROR_HTTP_STATUS: dict[str, int] = {
     "unauthenticated": 401,
+    "forbidden": 403,
     "forbidden_origin": 403,
+    "not_found": 404,
+    "invalid": 422,
     "invalid_audio": 422,
     "unsupported_option": 422,
     "payload_too_large": 413,
@@ -98,6 +101,8 @@ RETRYABLE_CODES = frozenset(
     }
 )
 
+_UNSET = object()
+
 
 class ApiError(Exception):
     """A failure that maps onto a wire error code.
@@ -113,12 +118,16 @@ class ApiError(Exception):
         *,
         retryable: bool | None = None,
         request_id: str | None = None,
+        details: list[dict[str, Any]] | None = None,
+        current_revision: str | None | object = _UNSET,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = code in RETRYABLE_CODES if retryable is None else retryable
         self.request_id = request_id
+        self.details = details
+        self.current_revision = current_revision
 
     @property
     def http_status(self) -> int:
@@ -129,11 +138,14 @@ class ApiError(Exception):
         return ERROR_WS_CLOSE.get(self.code)
 
     def envelope(self, request_id: str | None = None) -> dict[str, Any]:
-        return {
-            "error": {
-                "code": self.code,
-                "message": self.message,
-                "retryable": self.retryable,
-                "request_id": self.request_id or request_id,
-            }
+        error: dict[str, Any] = {
+            "code": self.code,
+            "message": self.message,
+            "retryable": self.retryable,
+            "request_id": self.request_id or request_id,
         }
+        if self.details is not None:
+            error["details"] = self.details
+        if self.current_revision is not _UNSET:
+            error["current_revision"] = self.current_revision
+        return {"error": error}
