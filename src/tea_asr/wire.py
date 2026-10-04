@@ -175,6 +175,12 @@ class AudioFormat(ClientModel):
     format: Literal["pcm_s16le"]
 
 
+class DictionaryValidationIssue(ServerModel):
+    field: str
+    index: int | None = None
+    message: str
+
+
 # --- HTTP -------------------------------------------------------------------
 
 
@@ -183,6 +189,8 @@ class ErrorBody(ServerModel):
     message: str
     retryable: bool
     request_id: str | None = None
+    details: list[DictionaryValidationIssue] | None = None
+    current_revision: str | None = None
 
 
 class ErrorEnvelope(ServerModel):
@@ -409,6 +417,43 @@ class ContextDictionaryFile(BaseModel):
     replacements: list[ContextReplacement] = Field(default_factory=list, max_length=500)
 
 
+class DictionaryDraft(ClientModel):
+    """Dictionary rules accepted by the server editing endpoints."""
+
+    domain: str = Field(default="", max_length=300)
+    hotwords: list[ContextHotword] = Field(max_length=200)
+    replacements: list[ContextReplacement] = Field(max_length=500)
+
+
+class DictionaryWriteRequest(DictionaryDraft):
+    base_revision: str | None = None
+
+
+class DictionaryPreviewRequest(ClientModel):
+    text: str = Field(max_length=2000)
+    dictionary: DictionaryDraft | None = None
+
+
+class DictionaryDetail(ServerModel):
+    name: str
+    domain: str
+    hotwords: list[str]
+    replacements: list[ContextReplacement]
+    revision: str
+    updated_at: str
+
+
+class DictionaryPreviewApplied(ServerModel):
+    from_: str = Field(alias="from")
+    to: str
+    count: int
+
+
+class DictionaryPreviewResponse(ServerModel):
+    text: str
+    applied: list[DictionaryPreviewApplied]
+
+
 class ContextEcho(ServerModel):
     profile: str | None = None
     domain_chars: int
@@ -428,6 +473,15 @@ class DictionarySummary(ServerModel):
     hotwords_count: int | None = None
     replacements_count: int | None = None
     error: str | None = None
+    revision: str | None = None
+    updated_at: str | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_file_metadata(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        data["revision"] = self.revision
+        data["updated_at"] = self.updated_at
+        return data
 
 
 class SessionStart(ClientModel):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -192,16 +193,23 @@ def test_dictionary_summaries_report_invalid_files_without_hiding_valid_ones(
 
     assert response.status_code == 200
     summaries = {item["name"]: item for item in response.json()}
-    assert summaries["valid"] == {
+    assert {
+        key: summaries["valid"][key]
+        for key in ("name", "domain", "hotwords_count", "replacements_count")
+    } == {
         "name": "valid",
         "domain": "valid domain",
         "hotwords_count": 1,
         "replacements_count": 0,
     }
+    assert len(summaries["valid"]["revision"]) == 64
+    assert summaries["valid"]["updated_at"].endswith("Z")
     assert set(summaries) == {"escaping", "invalid", "oversized", "valid"}
-    assert set(summaries["invalid"]) == {"name", "error"}
-    assert set(summaries["oversized"]) == {"name", "error"}
-    assert set(summaries["escaping"]) == {"name", "error"}
+    assert set(summaries["invalid"]) == {"name", "error", "revision", "updated_at"}
+    assert set(summaries["oversized"]) == {"name", "error", "revision", "updated_at"}
+    assert set(summaries["escaping"]) == {"name", "error", "revision", "updated_at"}
+    assert len(summaries["invalid"]["revision"]) == 64
+    assert summaries["escaping"]["revision"] is None
     assert "invalid TOML" in summaries["invalid"]["error"]
     assert "1 MiB" in summaries["oversized"]["error"]
     assert "escapes dictionaries directory" in summaries["escaping"]["error"]
@@ -232,18 +240,20 @@ def test_dictionary_summaries_reflect_file_mutations(tmp_path: Path) -> None:
     path = store.directory / "changing.toml"
     path.write_text(_dictionary_text("before mutation", ["word"]))
 
-    assert store.summaries() == [
-        {
-            "name": "changing",
-            "domain": "before mutation",
-            "hotwords_count": 1,
-            "replacements_count": 0,
-        }
-    ]
+    before = store.summaries()[0]
+    assert before["name"] == "changing"
+    assert before["domain"] == "before mutation"
+    assert before["hotwords_count"] == 1
+    assert before["replacements_count"] == 0
+    assert before["revision"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert str(before["updated_at"]).endswith("Z")
 
     path.write_text("secret-after-mutation = [\n")
     invalid = store.summaries()
-    assert invalid == [{"name": "changing", "error": "invalid TOML or dictionary fields"}]
+    assert invalid[0]["name"] == "changing"
+    assert invalid[0]["error"] == "invalid TOML or dictionary fields"
+    assert invalid[0]["revision"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert str(invalid[0]["updated_at"]).endswith("Z")
 
 
 def test_invalid_profile_is_rejected_at_session_start(tmp_path: Path) -> None:
@@ -335,7 +345,7 @@ def test_enabled_context_echo_and_dictionary_endpoint_auth(tmp_path: Path) -> No
     paths = _paths(tmp_path)
     directory = paths.dictionaries_dir
     directory.mkdir(parents=True)
-    (directory / "church.example.toml").write_text(
+    (directory / "church_example.toml").write_text(
         _dictionary_text("profile domain", ["聖經", "禱告"], [("盛家", "聖經")])
     )
     with build_client(
@@ -345,19 +355,18 @@ def test_enabled_context_echo_and_dictionary_endpoint_auth(tmp_path: Path) -> No
         assert unauthenticated.status_code == 401
         response = client.get("/v1/dictionaries", headers=AUTH)
         assert response.status_code == 200
-        assert response.json() == [
-            {
-                "name": "church.example",
-                "domain": "profile domain",
-                "hotwords_count": 2,
-                "replacements_count": 1,
-            }
-        ]
+        summary = response.json()[0]
+        assert summary["name"] == "church_example"
+        assert summary["domain"] == "profile domain"
+        assert summary["hotwords_count"] == 2
+        assert summary["replacements_count"] == 1
+        assert len(summary["revision"]) == 64
+        assert summary["updated_at"].endswith("Z")
         messages, close_code = _websocket_start(
             client,
             _session_start(
                 {
-                    "profile": "church.example",
+                    "profile": "church_example",
                     "domain": "inline domain",
                     "hotwords": ["福音"],
                 }
@@ -367,7 +376,7 @@ def test_enabled_context_echo_and_dictionary_endpoint_auth(tmp_path: Path) -> No
     assert close_code == 1000
     started = next(message for message in messages if message.get("type") == "session.started")
     assert started["context"] == {
-        "profile": "church.example",
+        "profile": "church_example",
         "domain_chars": len("inline domain"),
         "hotwords_count": 3,
         "replacements_count": 1,
