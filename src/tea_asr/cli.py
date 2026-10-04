@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import platform
 import sys
 import time
@@ -14,9 +15,9 @@ from pathlib import Path
 from huggingface_hub.errors import LocalEntryNotFoundError
 
 from .config import AppPaths, ServiceConfig, revoke_token, rotate_token, validate_bind_or_raise
-from .logs import setup_logging
-from .model_manager import locate_prepared_model, prepare_model
-from .model_spec import TEA_ASR_1_1_MLX_4BIT
+from .logs import event, setup_logging
+from .model_manager import ModelUnavailableError, locate_prepared_model, prepare_model
+from .model_spec import asr_model_spec
 from .service import (
     ServiceAlreadyRunningError,
     SingletonLock,
@@ -30,6 +31,7 @@ from .wire import MAX_UTTERANCE_PCM_BYTES, SAMPLE_RATE, ws_event_schema
 from .yamnet import YAMNET_REVISION, locate_yamnet, prepare_yamnet, verify_assets
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8327"
+logger = logging.getLogger("tea_asr.cli")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -37,7 +39,13 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     doctor = commands.add_parser("doctor", help="檢查本機環境與執行中的服務")
     doctor.add_argument("--url", default=DEFAULT_BASE_URL)
-    commands.add_parser("model-prepare", help="下載並固定模型 snapshot")
+    model_prepare = commands.add_parser("model-prepare", help="準備或驗證指定的 ASR 模型")
+    model_prepare.add_argument(
+        "--variant",
+        choices=("4bit", "8bit"),
+        default=None,
+        help="覆寫設定中的 ASR model variant；8bit 只驗證本機檔案，不會下載模型",
+    )
 
     serve = commands.add_parser("serve", help="啟動本機服務")
     serve.add_argument("--host", default=None)
@@ -148,10 +156,14 @@ def _probe_service(url: str) -> dict:
 
 
 def _doctor(url: str) -> int:
+    settings = ServiceConfig.load()
+    model_spec = asr_model_spec(settings.asr_model)
+    model_error: str | None = None
     try:
-        model_path: str | None = str(locate_prepared_model(TEA_ASR_1_1_MLX_4BIT))
-    except (LocalEntryNotFoundError, OSError):
+        model_path: str | None = str(locate_prepared_model(model_spec))
+    except (LocalEntryNotFoundError, ModelUnavailableError, OSError) as exc:
         model_path = None
+        model_error = f"model_unavailable: {exc}"
     try:
         vad_path = locate_vad()
         vad_ok = sha256(vad_path) == VAD_SHA256
@@ -167,9 +179,12 @@ def _doctor(url: str) -> int:
         "python": platform.python_version(),
         "python_ok": (3, 12) <= sys.version_info[:2] < (3, 13),
         "apple_silicon": platform.machine() == "arm64",
-        "model_revision": TEA_ASR_1_1_MLX_4BIT.revision,
+        "model_variant": model_spec.variant,
+        "model": model_spec.repo_id,
+        "model_revision": model_spec.revision,
         "model_prepared": model_path is not None,
         "model_path": model_path,
+        "model_error": model_error,
         "vad_revision": VAD_REVISION,
         "vad_prepared": vad_ok,
         # Optional: without it the service runs but offers no singing labels.
@@ -178,7 +193,12 @@ def _doctor(url: str) -> int:
         "service": _probe_service(url),
     }
     print(json.dumps(checks, ensure_ascii=False, indent=2))
-    healthy = checks["python_ok"] and checks["apple_silicon"] and model_path is not None and vad_ok
+    healthy = (
+        checks["python_ok"]
+        and checks["apple_silicon"]
+        and model_path is not None
+        and vad_ok
+    )
     return 0 if healthy else 1
 
 
@@ -275,6 +295,7 @@ def main() -> int:
 
         paths = AppPaths.macos_default()
         settings = ServiceConfig.load(paths)
+        model_spec = asr_model_spec(settings.asr_model)
         host = args.host or settings.host
         port = args.port or settings.port
         if args.allow_lan:
@@ -284,10 +305,22 @@ def main() -> int:
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             return 2
+        log_file = setup_logging(paths, config=settings)
         try:
-            model_path = locate_prepared_model(TEA_ASR_1_1_MLX_4BIT)
-        except (LocalEntryNotFoundError, OSError) as exc:
-            print(f"模型尚未準備：{exc}\n請先執行：tea-asr model-prepare", file=sys.stderr)
+            model_path = locate_prepared_model(model_spec)
+        except (LocalEntryNotFoundError, ModelUnavailableError, OSError) as exc:
+            event(
+                logger,
+                "model.unavailable",
+                level="error",
+                error_code="model_unavailable",
+                model_variant=model_spec.variant,
+                reason=str(exc),
+            )
+            print(
+                f"model_unavailable: {exc}\n請先執行：tea-asr model-prepare",
+                file=sys.stderr,
+            )
             return 2
 
         lock = SingletonLock(paths.lock_file)
@@ -303,7 +336,6 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 3
-        log_file = setup_logging(paths, config=settings)
         print(f"log：{log_file}")
         if settings.allow_lan:
             # docs/06-handoff.md's LAN row: opting in is the user's explicit
@@ -317,7 +349,7 @@ def main() -> int:
             )
         try:
             uvicorn.run(
-                create_app(model_path, config=settings),
+                create_app(model_path, config=settings, model_spec=model_spec),
                 host=host,
                 port=port,
                 workers=1,
@@ -331,7 +363,17 @@ def main() -> int:
             lock.release()
         return 0
     if args.command == "model-prepare":
-        print(prepare_model(TEA_ASR_1_1_MLX_4BIT))
+        settings = ServiceConfig.load()
+        variant = settings.asr_model
+        if args.variant is not None:
+            variant = f"tea-1.1-mlx-{args.variant}"
+        model_spec = asr_model_spec(variant)
+        try:
+            model_path = prepare_model(model_spec)
+        except (LocalEntryNotFoundError, ModelUnavailableError, OSError) as exc:
+            print(f"model_unavailable: {exc}", file=sys.stderr)
+            return 2
+        print(model_path)
         vad_path = prepare_vad()
         digest = sha256(vad_path)
         if digest != VAD_SHA256:

@@ -7,6 +7,10 @@
 
 **2026-10-04 整場主日 SRT 評估（church-eval）：** 用使用者人工訂正的三場主日（各約 2 小時）量離線 CER、串流字幕與歌唱偵測，工具見 [docs/09](09-testing-guide.md)，數字與決策見 [報告](benchmarks/church-eval-2026-10.md)。結論：replacement 顯著有益（-0.10 pp）、prompt 在 4-bit 無效、carry 3 s 離線不顯著／串流略好、870 ms 句尾靜音優於 600 ms；**歌唱偵測的誤藏率約每個有字幕小時 3.1 次（目標近 0，未達成，門檻與遲滯無法在不損失偵測的情況下消除）**。串流延遲是兩個併發 session 下的上限（單 session 重跑 p95 0.7–1.8 秒）；真實 OBS 畫面未驗收。
 
+**2026-10-04｜ASR 模型變體（server）：** 預設仍是釘版 `tea-1.1-mlx-4bit`；只有使用者在 `[service].asr_model` 或 `TEA_ASR_MODEL` 明確選 `tea-1.1-mlx-8bit` 才使用 8-bit。8-bit 是 `JacobLinCool/TEA-ASR-1.1` revision `bda08df76d4fd6b487b4a1dd7f0bddf8541696f8` 的本機 MLX 衍生檔，11 個檔案以 SHA-256 固定於 `models.lock.json`；`model-prepare --variant 8bit` 只驗證本機副本。缺檔或 hash 不符時回報 `model_unavailable`、記錄錯誤並在 doctor 顯示，不會載入 4-bit。授權鏈為 TEA-ASR-1.1 MIT 衍生檔，並保留 Qwen3-ASR-1.7B Apache-2.0 通知，細節見 `NOTICE`。
+
+離線人工訂正 SRT 評估中，8-bit + carry 3 s 相對 4-bit + carry 3 s 的 CER 差為 **−0.27 pp [−0.44, −0.10]**，95% CI 不含 0；模型檔大小增加 **92%**。這是三場同一教會服務的離線結果，不代表即時串流成本或其他場地的品質。真實 server 10 分鐘對照尚待 coordinator 執行 [`/Users/c2leb/Codes/tea-asr-service/.soak/run-8bit-check.sh`](/Users/c2leb/Codes/tea-asr-service/.soak/run-8bit-check.sh)：載入時間、worker RSS、preview decode p50/p95、worker busy、final latency p95 與首 6 分鐘 CER **待填**；完成前不得宣稱這些即時指標已驗收。
+
 ## 開發方式
 
 採單一repo、Python package、逐階段垂直切片。每個階段都交付可重現結果，前一個關卡沒通過就不要把後續功能當成完成。使用專案的codebase-memory-mcp做程式探索；尚無程式時不需要硬建空索引，有程式後建立／更新索引。
@@ -171,7 +175,7 @@ server repo只放reference clients与protocol測試；正式Swift app／OBS plug
 
 ## 開發中不可破壞的約束
 
-1. Production載入失敗不能改用FakeBackend；測試fake必須明確開啟並在status標示。（已實作：worker 死亡後依 1/2/4 秒退避重啟，60 秒內最多 3 次，超過即 failed；`model_incompatible` 屬不可重試，不進重啟迴圈。）
+1. Production載入失敗不能改用FakeBackend或另一個ASR變體；測試fake必須明確開啟並在status標示。被明確選取的模型缺失或pin不符時回報 `model_unavailable`、寫入錯誤日誌並由doctor顯示。（worker 死亡後依 1/2/4 秒退避重啟，60 秒內最多 3 次，超過即 failed；`model_incompatible` 屬不可重試，不進重啟迴圈。）
 2. 每機一個服務instance、一個MLX worker、一份**ASR**模型；不能開多Uvicorn workers。（2026-09-24 修訂：使用者明確同意在 ASR 模型之外，允許**一個**獨立的翻譯 provider 同時常駐，用於同步口譯管線。ASR 仍只能有一份，翻譯 provider 也只能有一份，兩者不得共用或互相替代；翻譯 provider 的記憶體、佇列與逾時同樣受第 4 條約束。）
 3. 不在async route、WS receive loop或OBS audio callback阻塞推論。
 4. 每層buffer、queue、spool、timeout有上限與可見失敗。
@@ -189,14 +193,15 @@ server repo只放reference clients与protocol測試；正式Swift app／OBS plug
 先閱讀README.md、docs/02-research.md、docs/03-architecture.md、
 docs/05-validation.md、docs/06-handoff.md與docs/07-contextual-streaming.md；
 API實作時以docs/04-api.md為準。
-目前P0–P3與P2a已完成並實測；server與效能驗證結果以本repo的實作、README及`docs/benchmarks/`報告為準。P4尚未開始，P5a Mac client 的驗收項目已實作並通過單元測試但尚未實機驗收，P5b尚未實作。
+目前P0–P3與P2a已完成並實測；server與效能驗證結果以本repo的實作、README及`docs/benchmarks/`報告為準。ASR預設仍為釘版4-bit，也可明確選用本機釘版8-bit；8-bit的即時server成本仍待10分鐘真模型對照。P4尚未開始，P5a Mac client 的驗收項目已實作並通過單元測試但尚未實機驗收，P5b尚未實作。
 
-使用Apple Silicon原生Python 3.12、uv與MLX；優先模型為
-Alkd/TEA-ASR-1.1-MLX-4bit，固定文件中revision。
+使用Apple Silicon原生Python 3.12、uv與MLX；預設ASR模型為
+Alkd/TEA-ASR-1.1-MLX-4bit，固定文件中revision；只有使用者明確設定
+`tea-1.1-mlx-8bit` 才載入本機8-bit衍生檔。
 如需修改後端，先閱讀既有P0／P2／P2a報告與測試，僅針對當前工作重跑必要驗證；不要重新建立已完成的P0 spike。
 新的工作優先完成P4長檔案／保存／恢復，或依明確任務完成P5a Mac client驗收；按本文件各節的完成條件與未驗證限制逐步交付。
 P2a是正式的邊說邊修訂需求，使用partial完整替換與不可變final，
-先保留單一ASR模型，不預設增加常駐LLM。Mac client分浮動預覽P5a與IME組字P5b。
+每個服務只載入一份ASR模型；選定模型缺失或pin不符就停止，絕不靜默替換。Mac client分浮動預覽P5a與IME組字P5b。
 
 保留單模型、bounded queue、worker隔離、typed errors、來源sample clock。
 不得靜默替換模型、fallback mock、宣稱未測的串流／翻譯／時間戳能力。

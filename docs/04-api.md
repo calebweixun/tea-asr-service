@@ -2,10 +2,11 @@
 
 > 基線wire 1.0，P2a增加opt-in wire 1.1擴充；路徑仍使用 `/v1`。v0.1／v0.1.1／v0.2是產品里程碑，不是wire版本。
 >
-> **實作狀態（2026-10-03）：** v0.1的HTTP端點與WS utterance session已實作，機器可讀契約在 [docs/api/](api/)。
+> **實作狀態（2026-10-04）：** v0.1的HTTP端點與WS utterance session已實作，機器可讀契約在 [docs/api/](api/)。
 > continuous profile與Silero VAD已實作，`speech.started` 與 `boundary=silence/max_duration` 會實際送出。
 > 尚未實作：durable session、`/v1/jobs`、resume；這些選項一律回 `unsupported_option` 或404，不會靜默降級。
 > P2a的1.1擴充已通過驗收並預設開啟（`TEA_ASR_REVISABLE_PREVIEW=0` 可關閉），量測見 [P2a報告](benchmarks/p2a-preview-report.md)。
+> ASR 模型預設為釘版 4-bit；操作者可明確選用本機釘版 8-bit（設定與驗證方式見下方「ASR 模型變體」）。選定模型缺少或 hash 不符時服務以 `model_unavailable` 停止，不會改載另一個變體。
 
 ## 目前真實契約（W1 凍結，2026-09-20）
 
@@ -62,13 +63,23 @@
 | `GET /healthz` | 主程序存活 | 200 `{"status":"ok"}`；不代表模型 ready |
 | `GET /readyz` | 可接受辨識 | 200 ready，否則503；只回 state |
 | `GET /v1/capabilities` | 協定／能力／容量 | 實際配置與已驗證能力 |
-| `GET /v1/status` | 經授權診斷 | model state、queue、worker generation、版本；無音訊原文 |
+| `GET /v1/status` | 經授權診斷 | model state、實際設定的 model／revision／variant、queue、worker generation；無音訊原文 |
 | `GET /v1/logs` | 經授權讀取近期結構化事件 | 見下方「W10｜日誌讀取」 |
 | `POST /v1/transcriptions` | 短 PCM 辨識 | 200結果、202不使用；同步最多30秒音訊 |
 
 `/readyz` 在模型 ready 且未 shutdown 時為200；queue 滿則 request 本身429，不把 queue 狀態誤報模型故障。`idle_unloaded` 回503，第一個辨識請求觸發 load 並回 `model_loading`。
 
 `POST /v1/transcriptions` 使用 `Content-Type: application/octet-stream`，query 必填 `sample_rate=16000&channels=1&format=pcm_s16le`；`X-Request-ID` 建議提供。格式值不符422。streaming body 接收上限960,000 bytes，不能只信 Content-Length；空 body、奇數長度回422；超過回413。收到完整 body 前不排推論。v0.1 不接受 WAV、路徑、URL、base64 或 translation 參數。CLI 負責把 WAV 轉 raw PCM。
+
+### ASR 模型變體
+
+一台服務只載入一份 ASR 模型。預設 `tea-1.1-mlx-4bit` 維持不變；操作者可在 `<support>/config.toml` 的 `[service]` 設定 `asr_model = "tea-1.1-mlx-8bit"`，或用 `TEA_ASR_MODEL=tea-1.1-mlx-8bit` 覆蓋。合法值只有 `tea-1.1-mlx-4bit` 與 `tea-1.1-mlx-8bit`；設定錯誤會拒絕啟動。
+
+8-bit 是由 `JacobLinCool/TEA-ASR-1.1` 固定 revision 本機轉換的衍生檔，檔案位於 `TEA_ASR_MODELS_DIR/mlx-8bit-selfconv`，每個檔案都有 SHA-256 pin。`tea-asr model-prepare --variant 8bit` 驗證本機檔案；它不會從 Hugging Face 下載 8-bit 模型。缺檔或 pin 不符時命令與 `tea-asr serve` 明確回報 `model_unavailable`、記錄錯誤並印出 `benchmarks/convert_quant.py --bits 8 --out models/mlx-8bit-selfconv` 重製命令；`tea-asr doctor` 會列出選取變體及失敗原因。不得改載 4-bit。
+
+`/v1/status` 和每個 `session.started` 都回報 `model`、`model_revision`、`model_variant`。`/v1/capabilities` 沒有模型 ID 欄位；它仍只宣告實際驗證過的功能，不以模型選擇推導新能力。
+
+**品質與成本證據：** 三場人工訂正 SRT 的離線比較中，8-bit + carry 3 s 對 4-bit + carry 3 s 的 CER 差為 −0.27 pp（95% CI −0.44 至 −0.10）；8-bit 模型檔大 92%。即時 server load time、worker RSS、preview decode p50/p95、worker busy、final latency p95 與首 6 分鐘 CER：**待真模型對照，尚未驗證**。方法與來源見 [church evaluation](benchmarks/church-eval-2026-10.md)。
 
 HTTP 無 idempotency 保證；斷線後可能已完成運算，client 重試會重算。server 偵測取消後移除尚未開始工作，已開始則丟棄結果。結果僅在回應內，不自動持久化。
 
@@ -242,7 +253,7 @@ server 為每個語音片段標記 `speech` 或 `singing`，讓 client（OBS 外
 ```
 
 ```json
-{"type":"session.started","session_id":"session-uuid","profile":"continuous","next_seq":0,"next_sample":0,"send_until_sample":80000}
+{"type":"session.started","session_id":"session-uuid","model":"local/tea-asr-1.1-mlx-8bit","model_revision":"sha256:6ba852674f27082159edabaad8c6d933906e31389661ef2392ae9ba84f9bdf87","model_variant":"tea-1.1-mlx-8bit","profile":"continuous","next_seq":0,"next_sample":0,"send_until_sample":80000}
 ```
 
 `send_until_sample` 是流控窗口上界；初始5秒。任何 frame 的 end_sample 不得超過此值。server 釋放緩衝後以 `flow.control` 提高窗口，永不回退。每次 grant 先保留 session/global buffer capacity，避免多連線同時超配。server 只在視窗實際變動時（收到的音訊逼近視窗下緣）送出 `flow.control`，不是固定週期輪詢；未取得新窗口時 client 必須暫存或停止送出。client 即時收音本身不能停頓來偽造連續錄音。
@@ -469,7 +480,7 @@ session.start 加可選 `stable`，必須同時 `transcript_mode="revisable"`，
 ```
 
 `agreement` 只接受 2（預設）或 3，其他值回 `unsupported_option`；server 照要求的值執行，不另送確認事件。
-省略 `stable` 時**完全不送** `transcript.stable`，其他事件逐欄不變；`session.started` 也沒有新增欄位。
+省略 `stable` 時**完全不送** `transcript.stable`，其他事件逐欄不變。`session.started` 一律包含模型 identity 欄位（`model`、`model_revision`、`model_variant`）；stable 選項不會改變這些欄位。
 舊 server 不認得 `stable` 欄位會回 `protocol_error`（client 欄位 extra=forbid），client 可據此降級成只用 partial／final。
 
 | type | 欄位 | 語意 |

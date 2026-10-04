@@ -36,7 +36,7 @@ from tea_asr.config import (
 from tea_asr.context import ContextDictionaryStore, InvalidDictionary
 from tea_asr.errors import ApiError
 from tea_asr.logs import MAX_LOG_EVENTS, event, read_recent_events, split_log_payload
-from tea_asr.model_spec import TEA_ASR_1_1_MLX_4BIT
+from tea_asr.model_spec import ModelSpec, asr_model_spec
 from tea_asr.rate_limit import AuthRateLimiter
 from tea_asr.scheduler import Scheduler
 from tea_asr.segmenter import SegmenterConfig
@@ -85,10 +85,11 @@ from tea_asr.yamnet import (
 #: docs/06-handoff.md 約束1：「測試fake必須明確開啟並在status標示」。一個 fake supervisor 只會透過
 #: `create_app(supervisor=...)` 明確注入（`tests/conftest.py::FakeSupervisor`；正式的 `serve` 路徑
 #: 一律用 `WorkerSupervisor`，見 create_app 下方），所以 `isinstance(worker, WorkerSupervisor)` 就是
-#: 「這是不是真的在跑真模型」的判準，不需要另外加一個旗標。`/v1/status` 用這兩個常數取代真實
-#: `TEA_ASR_1_1_MLX_4BIT` 的 repo_id／revision，避免看到 fake backend 卻誤以為真模型已載入。
+#: 「這是不是真的在跑真模型」的判準，不需要另外加一個旗標。`/v1/status` 用 fake 常數
+#: 取代所選 ModelSpec，避免看到 fake backend 卻誤以為真模型已載入。
 FAKE_BACKEND_MODEL = "fake-backend"
 FAKE_BACKEND_MODEL_REVISION = "test-only"
+FAKE_BACKEND_MODEL_VARIANT = "fake"
 
 INSECURE_LAN_WARNING = (
     "TEA ASR 目前以 LAN 模式監聽：連線未加密，token 以明文傳輸；"
@@ -277,6 +278,7 @@ def create_app(
     token: str | None = None,
     supervisor: InferenceSupervisor | None = None,
     config: ServiceConfig | None = None,
+    model_spec: ModelSpec | None = None,
     vad_model: Any = _AUTO_VAD,
     token_authenticator: TokenAuthenticator | None = None,
     rate_limiter: AuthRateLimiter | None = None,
@@ -308,6 +310,15 @@ def create_app(
         allow_lan=settings.allow_lan, extra_hosts=frozenset(settings.extra_allowed_hosts)
     )
     worker = supervisor or WorkerSupervisor(model_path)
+    selected_model = model_spec or asr_model_spec(settings.asr_model)
+    real_backend = isinstance(worker, WorkerSupervisor)
+    reported_model = selected_model.repo_id if real_backend else FAKE_BACKEND_MODEL
+    reported_model_revision = (
+        selected_model.revision if real_backend else FAKE_BACKEND_MODEL_REVISION
+    )
+    reported_model_variant = (
+        (selected_model.variant or "unknown") if real_backend else FAKE_BACKEND_MODEL_VARIANT
+    )
     #: Opt-in, separate translation provider (docs/06 #2). `None` when off,
     #: which leaves every ASR code path exactly as it was.
     validate_translation_or_raise(settings)
@@ -567,13 +578,11 @@ def create_app(
 
     @app.get("/v1/status", dependencies=[Depends(authorize)])
     async def service_status() -> StatusResponse:
-        real_backend = isinstance(worker, WorkerSupervisor)
         return StatusResponse(
             model_state=worker.state,
-            model=TEA_ASR_1_1_MLX_4BIT.repo_id if real_backend else FAKE_BACKEND_MODEL,
-            model_revision=(
-                TEA_ASR_1_1_MLX_4BIT.revision if real_backend else FAKE_BACKEND_MODEL_REVISION
-            ),
+            model=reported_model,
+            model_revision=reported_model_revision,
+            model_variant=reported_model_variant,
             worker_generation=worker.generation,
             worker_load_ms=worker.load_ms,
             last_error=worker.last_error,
@@ -659,6 +668,9 @@ def create_app(
                 capture_root=capture_root,
                 dictionaries=dictionaries,
                 singing=singing,
+                model=reported_model,
+                model_revision=reported_model_revision,
+                model_variant=reported_model_variant,
             )
         finally:
             activity.sessions -= 1
@@ -724,7 +736,7 @@ def create_app(
                 event(logger, "pua_filtered", request_id=request_id, removed_chars=removed)
         return TranscriptionResponse(
             request_id=request_id,
-            model_revision=TEA_ASR_1_1_MLX_4BIT.revision,
+            model_revision=reported_model_revision,
             text=text,
             raw_text=raw_text,
             language="Chinese",

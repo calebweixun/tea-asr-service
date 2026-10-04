@@ -311,6 +311,7 @@ class StatusResponse(ServerModel):
     model_state: str
     model: str
     model_revision: str
+    model_variant: str
     worker_generation: int
     worker_load_ms: int | None
     last_error: str | None
@@ -505,6 +506,9 @@ class SessionEvent(ServerModel):
 class SessionStarted(SessionEvent):
     type: Literal["session.started"] = "session.started"
     request_id: str
+    model: str
+    model_revision: str
+    model_variant: str
     profile: str
     transcript_mode: str
     next_seq: int

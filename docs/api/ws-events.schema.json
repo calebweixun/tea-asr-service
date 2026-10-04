@@ -1005,6 +1005,18 @@
             "title": "Event Id",
             "type": "integer"
           },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "model_revision": {
+            "title": "Model Revision",
+            "type": "string"
+          },
+          "model_variant": {
+            "title": "Model Variant",
+            "type": "string"
+          },
           "next_sample": {
             "title": "Next Sample",
             "type": "integer"
@@ -1055,6 +1067,9 @@
           "session_id",
           "event_id",
           "request_id",
+          "model",
+          "model_revision",
+          "model_variant",
           "profile",
           "transcript_mode",
           "next_seq",
