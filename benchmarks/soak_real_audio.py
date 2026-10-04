@@ -20,9 +20,8 @@ ROOT = HERE.parent
 # TEA_SOAK_ROOT lets another checkout (a worktree) keep its derived files in the shared,
 # git-excluded soak directory instead of an empty one of its own.
 SOAK_ROOT = Path(os.environ.get("TEA_SOAK_ROOT", ROOT / ".soak"))
-DEFAULT_AUDIO = Path(
-    "/Users/c2leb/Downloads/【天使即將出道】FIGHT.K Cloud Church _ 20260926_128k.m4a"
-)
+# The source recording is private: pass --input, or set TEA_SOAK_AUDIO.
+DEFAULT_AUDIO = Path(os.environ.get("TEA_SOAK_AUDIO", ROOT / ".soak" / "source.m4a"))
 DEFAULT_PLUGIN = Path("/Users/c2leb/Codes/obs-plugins/tea-live-subtitle")
 FFMPEG = Path("/opt/homebrew/bin/ffmpeg")
 REPLAY_FLAGS = (
