@@ -31,6 +31,7 @@ def test_defaults_match_what_has_been_accepted() -> None:
     assert config.filter_pua is True
     assert config.repetition_single_char_limit == 3
     assert config.repetition_multi_char_limit == 3
+    assert config.repetition_numeral_loop_limit == 6
     # docs/benchmarks/concurrency-report.md: measured safe up to 4 concurrent
     # continuous sessions; ships at 2 for latency-budget reasons on a
     # single-user desktop service, not because more was found unsafe.
@@ -87,11 +88,28 @@ def test_repetition_limits_are_configurable_with_environment_variables() -> None
         env={
             "TEA_ASR_REPETITION_SINGLE_CHAR_LIMIT": "2",
             "TEA_ASR_REPETITION_MULTI_CHAR_LIMIT": "4",
+            "TEA_ASR_REPETITION_NUMERAL_LOOP_LIMIT": "8",
         }
     )
 
     assert config.repetition_single_char_limit == 2
     assert config.repetition_multi_char_limit == 4
+    assert config.repetition_numeral_loop_limit == 8
+
+
+def test_numeral_loop_limit_is_configurable_in_config_file(tmp_path: Path) -> None:
+    paths = app_paths(tmp_path)
+    paths.support.mkdir(parents=True)
+    paths.config_file.write_text("[service]\nrepetition_numeral_loop_limit = 9\n")
+
+    config = ServiceConfig.load(paths, env={})
+
+    assert config.repetition_numeral_loop_limit == 9
+
+
+def test_numeral_loop_limit_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="at least 1"):
+        ServiceConfig(repetition_numeral_loop_limit=0)
 
 
 def test_carry_context_is_configurable_from_environment_and_file(tmp_path: Path) -> None:

@@ -314,7 +314,8 @@ commit/stop 的 `through_seq` 必須等於最後已收 seq；WS 有序保證此 
 punctuation and spaces between copies do not break the run. The defaults are configurable with
 `[service].repetition_single_char_limit` / `[service].repetition_multi_char_limit` or the matching
 `TEA_ASR_REPETITION_SINGLE_CHAR_LIMIT` / `TEA_ASR_REPETITION_MULTI_CHAR_LIMIT` environment variables.
-Units containing decimal digits, runs adjacent to decimal digits, and units containing CJK numerals are preserved. ASCII-letter units are shortened only when no ASCII letter borders the run. This affects both `transcript.partial.text` and `transcript.final.text`. A final keeps the model result in
+Units containing decimal digits or CJK numerals are normally protected, but a repeated numeral-bearing unit is shortened to three copies after
+`[service].repetition_numeral_loop_limit` (default 6; `TEA_ASR_REPETITION_NUMERAL_LOOP_LIMIT`). A single decimal digit needs at least ten consecutive copies to qualify. Numeral runs next to another decimal digit or CJK numeral stay intact, preserving values such as `1000000元`, `0999999999`, `一九九九年`, and `零零七`. ASCII-letter units are shortened only when no ASCII letter borders the run. This affects both `transcript.partial.text` and `transcript.final.text`. A final keeps the model result in
 `raw_text` unchanged and adds `repetition_trimmed` to `warnings` when trimming occurred. The other final warning
 tag is `private_use_characters`; the one-shot HTTP empty-speech warning is `no_speech`. These tags can coexist.
 

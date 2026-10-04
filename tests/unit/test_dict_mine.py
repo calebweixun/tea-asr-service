@@ -227,6 +227,113 @@ def test_style_conventions_are_reported_separately_and_never_mined_as_rules():
     assert all("阿門" not in item.from_ and "阿們" not in item.from_ for item in mined)
 
 
+def test_number_style_rule_definition_and_safe_word_boundaries():
+    assert dict_mine.is_number_rule("一百萬", "00萬")
+    assert dict_mine.is_number_rule("五七", "57")
+    assert dict_mine.is_number_rule("anything", "２０２６")
+    assert dict_mine.is_number_rule("千國", "天一")
+    assert not dict_mine.is_number_rule("千國", "天國")
+    assert not dict_mine.is_number_rule("五道招", "五大呼召")
+    assert dict_mine._is_number_formatting_style("一百", "營業額")
+    # A source-side Arabic digit is blocked by the broader policy even though
+    # the precise paired-ratio definition does not classify it as a number rule.
+    assert dict_mine._is_number_formatting_style("12abc", "twelve")
+
+
+def test_number_formatting_candidates_only_appear_in_the_style_review():
+    number_candidates = [
+        candidate(from_="一百萬", to="00萬"),
+        candidate(from_="四十", to="40"),
+        candidate(from_="五七", to="57"),
+        candidate(from_="到八", to="5-8"),
+        candidate(from_="分之九", to="9/10"),
+    ]
+    legitimate_candidates = [
+        candidate(from_="五道招", to="五大呼召"),
+        candidate(from_="千國", to="天國"),
+    ]
+    all_candidates = number_candidates + legitimate_candidates
+
+    safe, review = dict_mine.filter_candidates(all_candidates)
+    style_only = [
+        item
+        for item in all_candidates
+        if dict_mine._is_number_formatting_style(item.from_, item.to)
+    ]
+    markdown = dict_mine.render_review_markdown(
+        safe,
+        review,
+        {},
+        answer_paths=[],
+        hypothesis_paths=[],
+        number_formatting=style_only,
+    )
+    toml = dict_mine.render_candidates_toml(safe)
+
+    assert safe == legitimate_candidates
+    assert review == []
+    assert style_only == number_candidates
+    assert "## Number formatting (style)" in markdown
+    style_section = markdown.split("## Number formatting (style)", 1)[1].split(
+        "## Safe to auto-suggest", 1
+    )[0]
+    for item in number_candidates:
+        assert f"| {item.from_} | {item.to} |" in style_section
+    assert "00萬" not in toml
+    assert "40" not in toml
+    assert "57" not in toml
+    assert "五道招" in toml
+    assert "千國" in toml
+
+
+def test_miner_routes_numeric_alignment_candidates_to_style_review(tmp_path: Path):
+    answers_path = tmp_path / "answers.json"
+    hypothesis_path = tmp_path / "hypothesis.json"
+    candidates_path = tmp_path / "candidates.toml"
+    review_path = tmp_path / "review.md"
+    answers_path.write_text(
+        json.dumps(
+            {
+                "set": "test",
+                "items": [
+                    {
+                        "id": item_id,
+                        "start_s": 0,
+                        "end_s": 1,
+                        "reference": "營業額一百萬",
+                    }
+                    for item_id in ("one", "two")
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    hypothesis_path.write_text(
+        json.dumps({"one": "營業額00萬", "two": "營業額00萬"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    assert dict_mine.main(
+        [
+            "--answers",
+            str(answers_path),
+            "--hypothesis",
+            str(hypothesis_path),
+            "--candidates-toml",
+            str(candidates_path),
+            "--review-md",
+            str(review_path),
+        ]
+    ) == 0
+    markdown = review_path.read_text(encoding="utf-8")
+    toml = candidates_path.read_text(encoding="utf-8")
+
+    assert "## Number formatting (style)" in markdown
+    assert "| 00 | 一百 |" in markdown
+    assert "00" not in toml
+
+
 def test_candidates_toml_loads_through_the_server_dictionary_loader(tmp_path: Path):
     from tea_asr.context import ContextDictionaryStore
 

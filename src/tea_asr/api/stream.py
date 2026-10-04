@@ -857,6 +857,7 @@ class StreamSession:
             filtered,
             single_char_limit=self._config.repetition_single_char_limit,
             multi_char_limit=self._config.repetition_multi_char_limit,
+            numeral_loop_limit=self._config.repetition_numeral_loop_limit,
         )
         if repetition_trims is not None:
             repetition_trims.extend(trims)
@@ -953,6 +954,7 @@ class StreamSession:
                 candidate_text,
                 single_char_limit=self._config.repetition_single_char_limit,
                 multi_char_limit=self._config.repetition_multi_char_limit,
+                numeral_loop_limit=self._config.repetition_numeral_loop_limit,
             )
             overlap = strip_carried_overlap(previous_final[1], candidate_text)
             if overlap is not None and overlap[0].strip():

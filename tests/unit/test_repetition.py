@@ -64,10 +64,50 @@ def test_trims_ascii_letter_runs_delimited_by_non_letters() -> None:
 
 
 def test_preserves_repeated_cjk_numerals() -> None:
-    for numeral in "〇零一二三四五六七八九十百千萬億":
+    for numeral in "〇零一二三四五六七八九十百千萬億兩":
         sample = numeral * 6
         assert trim_repetitions(sample) == (sample, ())
     assert trim_repetitions("一九" * 6) == ("一九" * 6, ())
+
+
+@pytest.mark.parametrize(
+    ("unit", "copies"),
+    [("兩百", 20), ("二十萬", 10)],
+)
+def test_trims_degenerate_cjk_numeral_units(unit: str, copies: int) -> None:
+    text, trims = trim_repetitions(unit * copies)
+
+    assert text == unit * 3
+    assert len(trims) == 1
+    assert trims[0].unit == unit
+    assert trims[0].removed_chars == len(unit) * (copies - 3)
+
+
+def test_trims_long_single_digit_loop_but_keeps_short_number_runs() -> None:
+    assert trim_repetitions("0" * 9) == ("0" * 9, ())
+    ten_zeros, ten_zero_trims = trim_repetitions("0" * 10)
+    assert ten_zeros == "000"
+    assert len(ten_zero_trims) == 1
+    assert ten_zero_trims[0].removed_chars == 7
+    text, trims = trim_repetitions("0" * 200)
+
+    assert text == "000"
+    assert len(trims) == 1
+    assert trims[0].unit == "0"
+    assert trims[0].removed_chars == 197
+
+
+def test_preserves_repeated_digits_inside_a_long_number() -> None:
+    sample = "0" + "9" * 200 + "元"
+
+    assert trim_repetitions(sample) == (sample, ())
+
+
+def test_numeral_loop_limit_is_configurable_and_keeps_three_copies() -> None:
+    assert trim_repetitions("兩百" * 6) == ("兩百" * 6, ())
+    text, trims = trim_repetitions("兩百" * 6, numeral_loop_limit=5)
+    assert text == "兩百" * 3
+    assert trims[0].removed_chars == 6
 
 
 def test_still_trims_real_character_and_two_character_loops() -> None:
@@ -106,6 +146,8 @@ def test_limits_are_applied_to_the_matching_unit_type() -> None:
 def test_limits_must_be_positive() -> None:
     with pytest.raises(ValueError, match="at least 1"):
         trim_repetitions("abc", multi_char_limit=0)
+    with pytest.raises(ValueError, match="at least 1"):
+        trim_repetitions("abc", numeral_loop_limit=0)
 
 
 def test_stable_prefix_does_not_shrink_when_a_later_trimmed_partial_is_shorter() -> None:
@@ -202,6 +244,47 @@ def test_final_text_is_trimmed_but_raw_text_is_unchanged(
             },
         )
     ]
+
+
+def test_final_numeric_loop_uses_configured_limit_and_preserves_raw_text() -> None:
+    text = "兩百" * 10
+    session = StreamSession(
+        RecordingSocket(),  # type: ignore[arg-type]
+        ScriptedScheduler([text]),
+        config=ServiceConfig(repetition_numeral_loop_limit=6),
+        model_state="ready",
+    )
+    segment = session._open_segment(0)
+    pcm = b"\0\0" * 8000
+    events = _run(
+        session,
+        lambda: session._transcribe_segment(ClosedSegment(segment, pcm, 8000, "stop")),
+    )
+    final = next(event for event in events if event["type"] == "transcript.final")
+
+    assert final["text"] == "兩百" * 3
+    assert final["raw_text"] == text
+    assert final["warnings"] == ["repetition_trimmed"]
+
+
+def test_partial_numeric_loop_is_trimmed_before_it_is_published() -> None:
+    text = "二十萬" * 10
+    socket = RecordingSocket()
+    session = StreamSession(
+        socket,  # type: ignore[arg-type]
+        ScriptedScheduler([text]),
+        config=ServiceConfig(repetition_numeral_loop_limit=6),
+        model_state="ready",
+    )
+    segment = session._open_segment(0)
+    pcm = b"\0\0" * 8000
+    events = _run(
+        session,
+        lambda: session._run_preview(pcm, 12800, segment),
+    )
+    partial = next(event for event in events if event["type"] == "transcript.partial")
+
+    assert partial["text"] == "二十萬" * 3
 
 
 def test_stream_stable_events_remain_append_only_across_trimmed_partials() -> None:
