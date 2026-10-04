@@ -274,6 +274,62 @@ PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
   /Users/c2leb/Codes/tea-asr-service/.soak/gold/eval/span.json --fold-pronouns
 ```
 
+## 整場主日 SRT 評估（church-eval，2026-10）
+
+用使用者人工訂正過的整場 SRT 當答案，量三場主日（各約 2 小時）的離線 CER、串流字幕行為與歌唱偵測。
+結果與決策見 [church-eval 報告](benchmarks/church-eval-2026-10.md)。音訊、SRT、逐字稿、trace 全部留在
+git-excluded 的 `.soak/church-eval/`（衍生檔在 `work/`），報告只含數字。下面的路徑以
+`S=/Users/c2leb/Codes/tea-asr-service`、`W=$S/.soak/church-eval/work`、`PY=$S/.venv/bin/python` 表示，
+指令都在 worktree 根目錄用 `export PYTHONPATH=$PWD/src:$PWD HF_HUB_OFFLINE=1` 執行。
+
+```bash
+# 1. SRT → 答案 kit（合併相鄰 cue、上限約 15 s、間隔 ≥0.6 s 就切；≥20 s 無字幕的間隔寫進
+#    uncaptioned sidecar，不當作語音答案），並轉成 16 kHz mono WAV
+for d in 20260704 20260822 20260912; do
+  $PY benchmarks/srt_gold.py --srt $S/.soak/church-eval/$d.srt --set-name $d \
+    --audio $S/.soak/church-eval/$d.m4a --wav-out $W/$d.wav \
+    --answers-out $W/answers/$d-raw.json --uncaptioned-out $W/answers/$d-uncaptioned.json
+  $PY benchmarks/srt_gold.py --srt $S/.soak/church-eval/$d.srt --set-name $d \
+    --audio $S/.soak/church-eval/$d.m4a --pad-s 0.25 \
+    --answers-out $W/answers/$d-pad25.json --uncaptioned-out /dev/null
+done
+# 對齊檢查：把每個 item 的區間平移 δ 再解碼，CER 最低的 δ 就是 SRT 的固定偏移
+$PY benchmarks/church_eval_align.py --answers $W/answers/20260704-raw.json --wav $W/20260704.wav \
+  --model-path <4bit snapshot> --output $W/align/20260704.json --count 30 --deltas -1 -0.5 -0.25 0 0.25 0.5 1
+
+# 2. 離線矩陣：標籤 m{4|8}-{base|c<L>[g<G>]}[-repl][-prompt]，可續跑
+cp ~/Library/Application\ Support/TEA\ ASR/dictionaries/church.toml $W/church.toml   # 只讀複本
+$PY benchmarks/church_eval_matrix.py m4-base m4-c2 m4-c3 m4-c4 m8-base m8-c3 m4-c3-repl \
+  m4-c3-repl-prompt m8-c3-repl m8-c3-repl-prompt --dictionary $W/church.toml
+$PY benchmarks/church_eval_report.py m4-base m4-c2 m4-c3 m4-c4 m8-base m8-c3 m4-c3-repl \
+  m4-c3-repl-prompt m8-c3-repl m8-c3-repl-prompt --dictionary $W/church.toml --repl-base m4-base \
+  --out $W/report-main.json            # 每場與合併 CER、cluster bootstrap 95% CI、paired delta
+
+# 3. 字典：用未替換的假設稿挖候選，交叉驗證（兩場挖、第三場測，輪流）與最終合併
+$PY benchmarks/church_eval_dict.py cv --base-label m4-c3 --current $W/church.toml
+$PY benchmarks/church_eval_dict.py final --base-label m4-c3 --current $W/church.toml --out-dir $S/.soak/church-eval/recommended
+
+# 4. 串流：切 20 分鐘視窗，對 8431 埠的隔離 server 以 1x 串流，再用 SRT 與 OBS replay 評分
+$PY benchmarks/church_eval_stream.py windows
+#    server：HOME=$W/server-home（含 config.toml 與 dictionaries/church.toml）、
+#    TEA_ASR_MODELS_DIR=$S/models、HF_HUB_OFFLINE=1，serve --port 8431；不要碰 8327
+$PY benchmarks/church_eval_stream.py capture --token-file <token> --server-log <service.log> \
+  --end-silence 600 870 --context-profile church
+$PY benchmarks/church_eval_stream.py score --end-silence 600 870 --out $W/stream-metrics.json
+
+# 5. 歌唱偵測：整場 YAMNet + Silero VAD，以字幕當語音真值；--judge-model-path 把每個誤判片段
+#    解碼回來，量「被藏掉的是真字幕還是幻聽」；--sweep 掃遲滯／門檻
+TEA_ASR_MODELS_DIR=$S/models $PY benchmarks/church_eval_singing.py --end-silence-ms 600 870 \
+  --judge-model-path <4bit snapshot> --srt-root $S/.soak/church-eval --out $W/singing/metrics.json
+TEA_ASR_MODELS_DIR=$S/models $PY benchmarks/church_eval_singing.py --end-silence-ms 870 --sweep --out $W/singing/sweep.json
+```
+
+`soak_real_audio.py` 預設把衍生檔限制在 `<checkout>/.soak/`；worktree 用 `TEA_SOAK_ROOT=$W`
+改指向共用的 git-excluded 目錄（`church_eval_stream.py` 已自動設定）。`capture_event_trace.py` 與
+`soak_real_audio.py capture` 的 `--context-profile` 等同 OBS 外掛的 `hints_profile`（要 server 開
+`context_hints_enabled`，否則 replacement 不會生效）。串流 benchmark 的 server 要設 `keep_warm = true`，
+否則視窗之間模型被卸載，下一個 session 會收到 `model_loading`。
+
 ## 七、會遇到的已知狀況
 
 - **辨識結果原本會夾帶看不見的私用區字元，現在預設過濾掉。** 根因是
