@@ -203,11 +203,15 @@ class ServiceConfig:
     filter_pua: bool = True
     #: Maximum consecutive copies kept by the streaming repetition guard.
     #: One-character runs preserve conversational emphasis (default 3); units
-    #: of 2–6 characters use the same default. Environment overrides are
+    #: of 2–6 characters use the same default. Environment overrides:
     #: TEA_ASR_REPETITION_SINGLE_CHAR_LIMIT and
     #: TEA_ASR_REPETITION_MULTI_CHAR_LIMIT.
     repetition_single_char_limit: int = 3
     repetition_multi_char_limit: int = 3
+    #: Numeral-bearing loops are trimmed to three copies after this threshold.
+    #: A run of one decimal digit needs at least ten copies for number safety.
+    #: Environment override: TEA_ASR_REPETITION_NUMERAL_LOOP_LIMIT.
+    repetition_numeral_loop_limit: int = 6
     max_total_connections: int = 4
     #: Concurrent `continuous` profile sessions the single MLX worker admits
     #: before `/v1/stream` rejects an additional session.start with
@@ -315,7 +319,11 @@ class ServiceConfig:
         return _apply_env(config, source)
 
     def __post_init__(self) -> None:
-        if self.repetition_single_char_limit < 1 or self.repetition_multi_char_limit < 1:
+        if min(
+            self.repetition_single_char_limit,
+            self.repetition_multi_char_limit,
+            self.repetition_numeral_loop_limit,
+        ) < 1:
             raise ValueError("repetition limits must be at least 1")
 
     @classmethod
@@ -379,6 +387,9 @@ def _apply_env(config: ServiceConfig, source: object) -> ServiceConfig:
     repetition_multi_char_limit = get("TEA_ASR_REPETITION_MULTI_CHAR_LIMIT")
     if repetition_multi_char_limit is not None:
         config = replace(config, repetition_multi_char_limit=int(repetition_multi_char_limit))
+    repetition_numeral_loop_limit = get("TEA_ASR_REPETITION_NUMERAL_LOOP_LIMIT")
+    if repetition_numeral_loop_limit is not None:
+        config = replace(config, repetition_numeral_loop_limit=int(repetition_numeral_loop_limit))
     allow_lan = get("TEA_ASR_ALLOW_LAN")
     if allow_lan is not None:
         config = replace(config, allow_lan=allow_lan not in {"0", "false", "no", ""})

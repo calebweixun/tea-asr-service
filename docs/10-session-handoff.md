@@ -96,7 +96,9 @@ U+F0000–FFFFD、Plane 16 U+100000–10FFFD；`ServiceConfig.filter_pua`，
 `TEA_ASR_FILTER_PUA=0` 可關）。`text` 是過濾後結果，`raw_text` 保留原始辨識供除錯。整段被過濾成空字串時
 送 `segment.skipped` + `reason="empty"`，不送假的空 final。
 
-**2026-09-28｜重複輸出 guard：**partial/final 的 `text` 預設最多保留三個連續重複單位；單字元及 2–6 字元單位分別由 `repetition_single_char_limit`／`repetition_multi_char_limit` 設定，環境變數為 `TEA_ASR_REPETITION_SINGLE_CHAR_LIMIT`／`TEA_ASR_REPETITION_MULTI_CHAR_LIMIT`。標點與空白會在重複判定時略過；含十進位數字、緊鄰十進位數字或含 CJK 數字字元的重複單位會保留。ASCII 字母單位只在兩側都沒有 ASCII 字母時修剪。`raw_text` 不變，final 以 `repetition_trimmed` 標記；stable tracker 仍保證提交前綴只增不改。單元測試通過；真實模型品質尚未用新版 server 驗收。
+**2026-09-28｜重複輸出 guard：**partial/final 的 `text` 預設最多保留三個連續重複單位；單字元及 2–6 字元單位分別由 `repetition_single_char_limit`／`repetition_multi_char_limit` 設定，環境變數為 `TEA_ASR_REPETITION_SINGLE_CHAR_LIMIT`／`TEA_ASR_REPETITION_MULTI_CHAR_LIMIT`。當時含十進位數字或 CJK 數字字元的重複單位會整段保留。ASCII 字母單位只在兩側都沒有 ASCII 字母時修剪。`raw_text` 不變，final 以 `repetition_trimmed` 標記；stable tracker 仍保證提交前綴只增不改。
+
+**2026-10-04｜數字迴圈 guard：**含數字或 CJK 數字的 1–6 字元單位，連續超過 `[service].repetition_numeral_loop_limit`（預設 6）後會保留三份；環境變數為 `TEA_ASR_REPETITION_NUMERAL_LOOP_LIMIT`。單一十進位數字需至少連續 10 次才修剪，且單位緊鄰其他十進位／CJK 數字時保留。dict miner 把數字候選列在獨立的 `Number formatting (style)` review 區，不寫進安全 TOML。2026-10-04 離線掃描 OBS trace 與 traces 目錄的 13 份 JSONL、共 19,944 個文字欄位，沒有新增數字迴圈修剪；共重現 42 個一般重複修剪事件、移除 6,670 字元。這是舊輸出的離線分析，不代表新版 server 的真實模型品質已驗收。
 
 **這是權宜之計**。`filter_private_use_characters()` 的 docstring 寫了移除條件：
 上游提供不會漏 PUA 的量化 checkpoint 時就拿掉。細節見

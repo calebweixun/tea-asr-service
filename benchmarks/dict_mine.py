@@ -22,6 +22,7 @@ MIN_COUNT = 2
 MIN_SUPPORT = 2
 MIN_PRECISION = 0.9
 CONTEXT_CHARS = 10
+_CJK_NUMERALS = frozenset("〇零一二三四五六七八九十百千萬億兩")
 
 BUILTIN_STOPLIST = frozenset(
     normalize(word)
@@ -604,6 +605,45 @@ def source_length_is_allowed(source: str) -> bool:
     )
 
 
+def _is_decimal_digit(char: str) -> bool:
+    return unicodedata.category(char) == "Nd"
+
+
+def _numeric_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    numeric_chars = sum(
+        _is_decimal_digit(char) or char in _CJK_NUMERALS for char in text
+    )
+    return numeric_chars / len(text)
+
+
+def is_number_rule(source: str, target: str) -> bool:
+    """Identify number formatting by target digits or paired numeric spans.
+
+    A digit in the target is always a style-only signal. Otherwise both sides
+    must contain numerals/digits in at least half of their characters.
+    """
+
+    return any(_is_decimal_digit(char) for char in target) or (
+        _numeric_ratio(source) >= 0.5 and _numeric_ratio(target) >= 0.5
+    )
+
+
+def _is_number_formatting_style(source: str, target: str) -> bool:
+    """Keep formatting choices and number-shaped source runs out of replacements."""
+
+    has_source_digit = any(_is_decimal_digit(char) for char in source)
+    mostly_cjk_source = sum(char in _CJK_NUMERALS for char in source) * 2 > len(source)
+    mostly_cjk_target = sum(char in _CJK_NUMERALS for char in target) * 2 > len(target)
+    return (
+        has_source_digit
+        or is_number_rule(source, target)
+        or mostly_cjk_source
+        or mostly_cjk_target
+    )
+
+
 def filter_candidates(
     candidates: list[Candidate],
     *,
@@ -613,6 +653,8 @@ def filter_candidates(
     safe: list[Candidate] = []
     review: list[Candidate] = []
     for candidate in candidates:
+        if _is_number_formatting_style(candidate.from_, candidate.to):
+            continue
         normalized_source = normalize(candidate.from_)
         if not source_length_is_allowed(candidate.from_):
             continue
@@ -782,6 +824,7 @@ def render_review_markdown(
     *,
     answer_paths: list[Path],
     hypothesis_paths: list[Path],
+    number_formatting: list[Candidate] | None = None,
     present: list[Candidate] | None = None,
     conflicts: list[tuple[Candidate, str]] | None = None,
 ) -> str:
@@ -803,6 +846,16 @@ def render_review_markdown(
         if kind == "God pronoun":
             label += " (context-dependent God-pronoun convention)"
         lines.append(f"| {label} | {style_counts.get(f'{source}→{target}', 0)} |")
+    lines.extend(
+        [
+            "",
+            "## Number formatting (style)",
+            "",
+            "These pairs may differ only in how a number is written; they are never replacement suggestions.",
+            "",
+        ]
+    )
+    lines.extend(_render_candidate_table(number_formatting or []))
     lines.extend(["", "## Safe to auto-suggest by the configured filters", ""])
     lines.extend(_render_candidate_table(safe))
     lines.extend(
@@ -871,6 +924,11 @@ def main(argv: list[str] | None = None) -> int:
     hotwords = load_wordlist(args.hotwords_file, keys=("hotwords", "words"))
     stoplist = load_wordlist(args.stoplist_file, keys=("stoplist", "words"))
     mined, style_counts = mine_candidates(observations, hotwords=hotwords)
+    number_formatting = [
+        candidate
+        for candidate in mined
+        if _is_number_formatting_style(candidate.from_, candidate.to)
+    ]
     safe, review = filter_candidates(mined, stoplist=stoplist)
     present, conflicts = inspect_merge(safe + review, args.merge_with)
 
@@ -884,6 +942,7 @@ def main(argv: list[str] | None = None) -> int:
             style_counts,
             answer_paths=args.answers,
             hypothesis_paths=args.hypothesis,
+            number_formatting=number_formatting,
             present=present if args.merge_with else None,
             conflicts=conflicts if args.merge_with else None,
         ),

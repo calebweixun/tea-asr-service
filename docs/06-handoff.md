@@ -96,12 +96,15 @@ tea-asr-service/
 final 與 final-only 模式完全一致、混合負載下 23/23 HTTP 辨識成功且 10 段 final 全數產生。
 `TEA_ASR_REVISABLE_PREVIEW=0` 或 config.toml 可關閉，關閉時 revisable 請求回 `unsupported_option` 而非靜默降級。
 未涵蓋：單一語者與單一機器、預覽降級路徑未在真實過載下觸發。
-**2026-09-28｜重複輸出 guard：**partial/final 的 `text` 預設最多保留三個連續重複單位；單字元與 2–6 字元單位可分別用 `repetition_single_char_limit`／`repetition_multi_char_limit` 及對應的 `TEA_ASR_REPETITION_*_LIMIT` 環境變數調整。標點與空白不會中斷判定；含十進位數字、緊鄰十進位數字或含 CJK 數字字元的重複單位會保留。ASCII 字母單位只在兩側都沒有 ASCII 字母時修剪。final 的 `raw_text` 保持原樣並以 `repetition_trimmed` 警告標記；INFO log 只記 segment index、類型、單位長度與移除字元數。trim 後 partial 若短於已提交 stable 前綴，tracker 會保留原前綴、不發縮短的 stable 更新。單元測試已涵蓋，真實模型品質尚未用新版 server 驗收。
+**2026-09-28｜重複輸出 guard：**partial/final 的 `text` 預設最多保留三個連續重複單位；單字元與 2–6 字元單位可分別用 `repetition_single_char_limit`／`repetition_multi_char_limit` 及對應的 `TEA_ASR_REPETITION_*_LIMIT` 環境變數調整。當時含十進位數字或 CJK 數字字元的重複單位會整段保留。ASCII 字母單位只在兩側都沒有 ASCII 字母時修剪。final 的 `raw_text` 保持原樣並以 `repetition_trimmed` 警告標記；INFO log 只記 segment index、類型、單位長度與移除字元數。trim 後 partial 若短於已提交 stable 前綴，tracker 會保留原前綴、不發縮短的 stable 更新。
+
 **2026-09-27：** 預覽節奏改為 server 設定 `preview_min_audio_ms`／`preview_min_interval_ms`（預設 300／300，原固定 800／800）加負載保護 `preview_load_factor`（預設 2，間隔至少 2×上次解碼時間）；封口時排隊中的預覽直接從 scheduler 移除，不再排在 final 後面跑。`preview_policy` 回報實際值，wire 欄位不變。實測（[預覽節奏報告](benchmarks/preview-cadence-report.md)）stable 提交延遲中位數 0.87→0.10 秒、兩 session 合計 worker 忙碌 0.49、final 延遲不變；partial 改寫率 20–23%→26–27%。語料是拼接的朗讀句，自然快語速與真實 OBS 畫面未驗證。
 
 **2026-09-28｜Recognition hints：** server dictionaries、profiles 與 deterministic replacements 由預設關閉的 `TEA_ASR_CONTEXT_HINTS=1` 啟用；replacement 保留 `raw_text`，stable 遇到已提交邊界時保持 append-only。`GET /v1/dictionaries` 會逐檔回報錯誤字典，不影響有效項目，並以 `context.dictionary_invalid` WARNING 記錄 name/reason；`session.start` 仍拒絕無效 profile。Domain/hotwords prompt 分離為 `TEA_ASR_CONTEXT_PROMPT=1`，且需 hints 已啟用；prompt 預設關閉且維持 experimental。`session.started.context` 不含 prompt token count；backend 每次 request 回報的數量只寫 server log。4段真實講道音訊 smoke 未見 prompt 改善（約多150 tokens；一處聖經→聖家、一處失去標點，住棚節變體未修正），已審閱的 deterministic replacement 是建議工具。完整 CER、數字／否定詞與錯誤替換風險仍未評估。`use_previous_finals` 延後。
 
 **2026-10-03｜Final 左上下文 carry：** 已實作 server 端 final-only PCM 前綴與共用 overlap stripper；無可信重疊時保守重跑 segment-only，`raw_text` 保留實際採用那次解碼的原文，warning 為 `carry_overlap_stripped`／`carry_overlap_uncertain`。preview 不帶前文，避免多次推論都增加 L 秒，stable 仍逐段 append-only。答案集轉段間隔在 1.5 秒內：speakers 35/39、music-8900 15/20。離線 MLX 評估尚未執行；`carry_context_s` 預設 **0（關閉）**，不得在未驗收 speakers 的 paired bootstrap CI、music CER 與 duplication count 前打開。Coordinator 執行 `/Users/c2leb/Codes/tea-asr-service/.soak/gold/run-carry-eval.sh`；方法見 [07](07-contextual-streaming.md)。
+
+**2026-10-04｜數字迴圈 guard：**含數字或 CJK 數字的 1–6 字元單位，連續超過 `[service].repetition_numeral_loop_limit`（預設 6）後會保留三份；環境變數為 `TEA_ASR_REPETITION_NUMERAL_LOOP_LIMIT`。單一十進位數字需至少連續 10 次才修剪，且單位緊鄰其他十進位／CJK 數字時保留，以免切斷長數字。數字候選規則移至 dict miner review 的 `Number formatting (style)` 區，不會寫進安全 TOML；一般單詞中偶然含一個中文數字字元的候選仍可保留。2026-10-04 離線掃描 OBS trace 與 traces 目錄的 13 份 JSONL、共 19,944 個文字欄位，沒有新增數字迴圈修剪；共重現 42 個一般重複修剪事件、移除 6,670 字元。這是舊輸出的離線分析，不代表新版 server 的真實模型品質已驗收。
 
 **完成條件：** 能呈現「先出字→後文修正→定稿」；partial不重複append、不改已final內容；重跑總RTF與品質、延遲符合07或有明確未達標報告；preview超載不阻塞收音與正式排程。測試同音詞、數字、否定詞、中英混用與cancel/final競態。
 

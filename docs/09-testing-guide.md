@@ -388,7 +388,7 @@ uv run python benchmarks/dict_mine.py \
   --merge-with docs/examples/dictionaries/church.example.toml
 ```
 
-Review 會列出 contexts、precision proxy、harm、style convention 次數，以及和既有字典的重複或衝突。
+Review 會列出 contexts、precision proxy、harm、style convention 次數、number formatting (style) pairs，以及和既有字典的重複或衝突。數字格式候選只供人工參考，不會進入候選 TOML。
 可用 `--hotwords-file` 放寬網域詞的 count/support 門檻，或用
 `--stoplist-file` 擴充常見詞排除表。輸出含逐字稿片段，請留在 git-excluded 的
 `.soak/`；加入字典前先人工檢查。
