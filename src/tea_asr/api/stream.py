@@ -106,6 +106,9 @@ RECOVERABLE_CODES = frozenset({"conflict", "queue_full", "session_limit"})
 #: through a long sentence while the speaker was still talking. Measured RTF is
 #: ~0.03, so 15 s of preview costs well under half a second.
 PREVIEW_MAX_AUDIO_SAMPLES = 240_000
+# A single slow preview must not arm a long retry timer for the next segment.
+# The configured minimum interval remains authoritative when it is higher.
+PREVIEW_MAX_LOAD_GAP_S = 1.5
 
 #: docs/07: a revisable continuous session waits longer before closing a
 #: segment, so a late correction still lands before the final.
@@ -1278,14 +1281,17 @@ class StreamSession:
     def _preview_gap_s(self) -> float:
         """Shortest allowed time between two preview starts in this session.
 
-        `k × last decode` keeps one session's previews at most 1/k of the
-        worker's time however long the segment grows; the fixed floor covers
-        the cheap early previews.
+        The load term uses preview worker-busy time only and is capped so one
+        outlier cannot hold later segments behind a long timer. The configured
+        minimum interval remains in force if it is higher than the cap.
         """
 
         return max(
             self._preview_min_interval_s,
-            self._preview_load_factor * self._preview_last_decode_s,
+            min(
+                PREVIEW_MAX_LOAD_GAP_S,
+                self._preview_load_factor * self._preview_last_decode_s,
+            ),
         )
 
     def _preview_retry_at(self, delay_s: float) -> None:

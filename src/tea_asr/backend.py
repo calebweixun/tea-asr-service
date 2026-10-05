@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from tea_asr.worker.token_budget import MAX_GENERATION_TOKENS, max_tokens_for_samples
+
 MAX_CONTEXT_PROMPT_TOKENS = 384
 
 
@@ -73,6 +75,7 @@ class TeaMlxBackend:
         *,
         language: str = "Chinese",
         system_prompt: str | None = None,
+        max_tokens: int | None = None,
     ) -> Transcription:
         if self._model is None:
             raise RuntimeError("Model has not been loaded")
@@ -82,11 +85,17 @@ class TeaMlxBackend:
         if not np.isfinite(samples).all():
             raise ValueError("Audio contains NaN or infinity")
 
+        generation_limit = (
+            max_tokens_for_samples(int(samples.size)) if max_tokens is None else max_tokens
+        )
+        if not 1 <= generation_limit <= MAX_GENERATION_TOKENS:
+            raise ValueError(f"max_tokens must be between 1 and {MAX_GENERATION_TOKENS}")
+
         options: dict[str, Any] = {
             "language": language,
             "temperature": 0.0,
             "batch_size": 1,
-            "max_tokens": 512,
+            "max_tokens": generation_limit,
             "min_chunk_duration": 1.0,
             "verbose": False,
         }

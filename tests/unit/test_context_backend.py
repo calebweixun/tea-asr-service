@@ -10,6 +10,7 @@ import pytest
 
 from tea_asr.backend import MAX_CONTEXT_PROMPT_TOKENS, TeaMlxBackend
 from tea_asr.context import build_system_prompt
+from tea_asr.worker.token_budget import max_tokens_for_samples
 
 
 class CharacterTokenizer:
@@ -57,11 +58,34 @@ def test_no_context_keeps_the_existing_generate_arguments_unchanged() -> None:
             "language": "Chinese",
             "temperature": 0.0,
             "batch_size": 1,
-            "max_tokens": 512,
+            "max_tokens": max_tokens_for_samples(4),
             "min_chunk_duration": 1.0,
             "verbose": False,
         }
     ]
+
+
+def test_audio_duration_sets_backend_budget_without_truncating_normal_text() -> None:
+    model = RecordingModel()
+    backend = _backend_with(model)
+
+    for duration_s, expected_cap in ((15, 173), (30, 338), (60, 512)):
+        result = backend.transcribe(np.ones(16_000 * duration_s, dtype=np.float32))
+        assert model.calls[-1]["max_tokens"] == expected_cap
+        assert result.text == "辨識文字"
+
+
+def test_worker_supplied_budget_is_forwarded_to_model_generation() -> None:
+    model = RecordingModel()
+    backend = _backend_with(model)
+
+    result = backend.transcribe(
+        np.ones(16_000 * 15, dtype=np.float32),
+        max_tokens=79,
+    )
+
+    assert model.calls[0]["max_tokens"] == 79
+    assert result.text == "辨識文字"
 
 
 def test_close_clears_model_and_mlx_cache(monkeypatch: pytest.MonkeyPatch) -> None:

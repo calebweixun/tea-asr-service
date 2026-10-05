@@ -95,7 +95,7 @@ final-only維持03既有端點設定。啟用revisable時採以下獨立設定�
 
 preview在所有等待中的final之後執行、batch之前；不改既有final公平性規則。final已等待時不啟動新preview。執行中的preview不能安全搶占，其耗時也計入final等待上限。
 
-- 動態間隔 `max(preview_min_interval_ms, 最近preview推論耗時×preview_load_factor)`，從上一次preview**開始**起算（factor=k時單一session的預覽最多占worker 1/k）；原提案為 `max(800ms, 耗時×3)` 且從完成時間起算，實作與量測見「預覽節奏調整」。沒有新增音訊就不排preview。
+- 動態間隔 `max(preview_min_interval_ms, min(1500ms, 最近preview worker忙碌時間×preview_load_factor))`，從上一次preview**開始**起算；worker時間扣除queue wait。設定的最小間隔若高於1500ms仍生效。因而正常負載時保留比例節流，單次慢解碼不會把下一段的計時器推到數秒之後。原提案為 `max(800ms, 耗時×3)` 且從完成時間起算，實作與量測見「預覽節奏調整」。沒有新增音訊就不排preview。
 - 另設全機preview GPU佔用目標：最近10秒最多3秒推論耗時。根據近期耗時預估先做admission；超支後停preview，不能把這個soft budget說成可中止kernel的硬限制。
 - active buffer與快照副本都計入03記憶體上限；open段最多8秒可preview，不對整場會議越累積越長地重跑。
 - worker壓力、final排隊、預覽過慢時降低頻率或暫停，發 `preview.status`。音訊仍持續接收，已accept的正式工作不能因preview被丟棄。
@@ -172,11 +172,14 @@ OBS 字幕在快語速下出字晚、一次跳 4–5 個字；原因是預覽固
 | `preview_min_interval_ms`／`TEA_ASR_PREVIEW_MIN_INTERVAL_MS` | 300 | 100–5000 |
 | `preview_load_factor`／`TEA_ASR_PREVIEW_LOAD_FACTOR` | 2 | 0–10（0＝關閉保護） |
 
-- 下一次預覽要有 `preview_min_audio_ms` 新音訊，且距上一次預覽開始至少 `max(min_interval, k × 上次解碼時間)`；
+- 下一次預覽要有 `preview_min_audio_ms` 新音訊，且距上一次預覽開始至少 `max(min_interval, min(1500 ms, k × 上次解碼時間))`；
   解碼時間是 worker 呼叫的 wall time、不含排隊。間隔未到時以 timer 在門檻打開時重排，不依賴 client 的 frame 大小。
+- 負載項上限為 1500 ms：因子 2、300 ms 最小間隔下，200 ms 持續解碼仍會把預覽間隔拉到 400 ms；單次 5 秒 outlier 則不會留下 10 秒 timer。timer 以最後一次預覽開始時間為基準，所以 outlier 本身執行期間已消耗這段間隔。
 - 每個 session 仍最多一個執行中預覽、一個待跑重排；`max_preview_audio_ms` 不變。節奏是 server 端設定，client 不能要求更快。
 - 端點封口時，還在排隊的預覽直接從 scheduler 移除（上面流程第 6 步的「移除待跑preview」），不再排在 final 後面白跑一次；
   已在 worker 上的那一次無法搶占，最多讓 final 多等一次預覽解碼。
+- 2026-10-05 的真實 OBS log 記錄到 stale preview worker time 6413 ms、final queue wait 4515 ms。segment 18 有 carry overlap 成功事件，沒有 second decode retry；queue metric 也不含後續 punctuation／singing 工作。單次 preview DEBUG 記錄未保留，故它是造成 worker 等待的最佳解釋，但無法指認到該 preview request。負載間隔上限修正下一段的預覽排程；它無法搶占已在 MLX worker 執行的呼叫，因此 in-flight preview 仍可能讓 final 等一次解碼。
+- 同日加入 ASR 輸出預算：每個 preview／final worker request 按實際 PCM（carry 也計入）套用 `min(512, ceil(audio_s × 11) + 8)`。budget hit 記 `asr.max_tokens_hit`，帶 `audio_ms`、`kind` 與 `max_tokens`；生成文字仍交給既有 repetition trim。15 秒 preview 上限對應 173 tokens；6.413 秒異常 request 對應 79 tokens，約 0.99 秒的生成上限（以 80 tokens／秒估算）。這限制了輸出長度，不會搶占已開始的 MLX 呼叫。
 - 結果（單 session）：stable 提交延遲中位數 0.87 → 0.10 秒、每次 stable 增字 p95 7 → 4、首字延遲中位數約 180 → 80 ms；
   worker 忙碌 0.16 → 0.27，兩個 session 合計 0.49；final 延遲不變。代價是 partial 改寫已提交文字的比例 20–23% → 26–27%、
   diverged 段 6–8 → 9／25。句首兩字的正確出現時間沒有變快，那是模型收斂速度。

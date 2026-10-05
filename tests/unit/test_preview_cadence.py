@@ -32,11 +32,13 @@ class RecordingSocket:
 
 
 class TimedScheduler:
-    """Every call takes `decode_s` of wall time; records when each one started."""
+    """Fake scheduler with controlled worker times; records starts and finishes."""
 
-    def __init__(self, decode_s: float = 0.0) -> None:
+    def __init__(self, decode_s: float = 0.0, *, decode_times: list[float] | None = None) -> None:
         self.decode_s = decode_s
+        self.decode_times = list(decode_times or [])
         self.starts: list[float] = []
+        self.finishes: list[float] = []
         self.samples: list[int] = []
 
     async def transcribe(
@@ -50,9 +52,11 @@ class TimedScheduler:
         loop = asyncio.get_running_loop()
         self.starts.append(loop.time())
         self.samples.append(len(pcm) // 2)
-        if self.decode_s:
-            await asyncio.sleep(self.decode_s)
-        return {"text": "測試", "total_time_s": self.decode_s}, 0
+        decode_s = self.decode_times.pop(0) if self.decode_times else self.decode_s
+        if decode_s:
+            await asyncio.sleep(decode_s)
+        self.finishes.append(loop.time())
+        return {"text": "測試", "total_time_s": decode_s}, 0
 
 
 def revisable_session(scheduler: Any, **cadence: Any) -> StreamSession:
@@ -144,7 +148,7 @@ def test_interval_gate_retries_on_its_own_without_another_frame() -> None:
     assert 0.29 <= starts[1] - starts[0] < 0.6
 
 
-def test_preview_gap_is_the_floor_or_k_times_the_last_decode() -> None:
+def test_preview_gap_is_the_floor_or_capped_k_times_the_last_decode() -> None:
     session = revisable_session(
         TimedScheduler(), preview_min_interval_ms=300, preview_load_factor=2.0
     )
@@ -152,11 +156,51 @@ def test_preview_gap_is_the_floor_or_k_times_the_last_decode() -> None:
     assert session._preview_gap_s() == pytest.approx(0.3)
     session._preview_last_decode_s = 0.4
     assert session._preview_gap_s() == pytest.approx(0.8)
+    session._preview_last_decode_s = 5.0
+    assert session._preview_gap_s() == pytest.approx(1.5)
     unguarded = revisable_session(
         TimedScheduler(), preview_min_interval_ms=300, preview_load_factor=0.0
     )
     unguarded._preview_last_decode_s = 0.4
     assert unguarded._preview_gap_s() == pytest.approx(0.3)
+
+
+def test_one_slow_preview_does_not_starve_the_next_segments_first_preview() -> None:
+    async def scenario() -> tuple[float, float, float]:
+        scheduler = TimedScheduler(decode_times=[5.0, 0.05])
+        session = revisable_session(
+            scheduler,
+            preview_min_audio_ms=100,
+            preview_min_interval_ms=300,
+            preview_load_factor=2.0,
+        )
+        feed(session, 100)
+        slow_preview = session._preview_task
+        assert slow_preview is not None
+        await _until(lambda: len(scheduler.starts) == 1)
+
+        # Close segment A while its preview still occupies the fake worker,
+        # then accumulate enough audio for segment B's first preview.
+        old_segment = session._state.segment
+        assert old_segment is not None
+        session._settle_preview_soon(old_segment)
+        session._state.segment = None
+        session._state.pcm.clear()
+        feed(session, 100)
+
+        await slow_preview
+        await _until(lambda: len(scheduler.starts) == 2)
+        await settle(session)
+        return (
+            scheduler.starts[1] - scheduler.finishes[0],
+            scheduler.finishes[1] - scheduler.finishes[0],
+            session._preview_gap_s(),
+        )
+
+    start_after_idle_s, preview_done_after_idle_s, gap_s = asyncio.run(scenario())
+    assert gap_s == pytest.approx(0.3), "the following normal decode replaces the outlier"
+    assert start_after_idle_s <= 0.3 + 0.05
+    assert preview_done_after_idle_s <= 0.3 + 0.05 + 0.1
 
 
 def test_load_guard_keeps_one_sessions_previews_under_half_the_worker() -> None:
@@ -247,6 +291,27 @@ def test_another_sessions_final_runs_before_a_queued_preview() -> None:
         return worker.order
 
     assert asyncio.run(scenario()) == ["00", "fb", "pa"]
+
+
+def test_final_runs_after_an_active_preview_before_queued_previews() -> None:
+    async def scenario() -> list[str]:
+        worker = BlockingWorker()
+        scheduler = Scheduler(worker)
+        active_preview = asyncio.create_task(scheduler.transcribe(b"p0", kind="preview"))
+        await _until(lambda: scheduler.waiting_tasks == 1)
+        queued_previews = [
+            asyncio.create_task(scheduler.transcribe(label, kind="preview"))
+            for label in (b"p1", b"p2")
+        ]
+        final = asyncio.create_task(scheduler.transcribe(b"ff", kind="realtime"))
+        await _until(lambda: scheduler.waiting_tasks == 4)
+        worker.release.set()
+        await asyncio.gather(active_preview, final, *queued_previews)
+        return worker.order
+
+    # An active worker call cannot be preempted; the final is next, ahead of
+    # every preview that was still waiting.
+    assert asyncio.run(scenario()) == ["p0", "ff", "p1", "p2"]
 
 
 def test_stale_preview_is_dropped_instead_of_running_after_the_final() -> None:

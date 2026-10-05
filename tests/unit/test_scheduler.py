@@ -4,8 +4,10 @@ import asyncio
 
 import pytest
 
+from tea_asr import scheduler as scheduler_module
 from tea_asr.errors import ApiError
 from tea_asr.scheduler import Scheduler
+from tea_asr.worker.token_budget import max_tokens_for_pcm
 
 
 class BlockingWorker:
@@ -172,4 +174,35 @@ def test_next_worker_call_starts_after_finished_result_is_handled() -> None:
         "handled:final",
         "start:preview",
         "finish:preview",
+    ]
+
+
+def test_token_budget_hit_logs_audio_duration_kind_and_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def record_event(_logger: object, name: str, **fields: object) -> None:
+        events.append((name, fields))
+
+    monkeypatch.setattr(scheduler_module, "event", record_event, raising=False)
+
+    class RepeatingWorker:
+        state = "ready"
+
+        async def transcribe(self, pcm: bytes, *, language: str = "Chinese") -> dict[str, object]:
+            cap = max_tokens_for_pcm(pcm)
+            return {"text": "repeat" * cap, "generation_tokens": cap}
+
+    async def scenario() -> None:
+        await Scheduler(RepeatingWorker()).transcribe(  # type: ignore[arg-type]
+            b"\x00\x00" * 16_000, kind="preview"
+        )
+
+    asyncio.run(scenario())
+    assert events == [
+        (
+            "asr.max_tokens_hit",
+            {"audio_ms": 1_000, "kind": "preview", "max_tokens": 19},
+        )
     ]

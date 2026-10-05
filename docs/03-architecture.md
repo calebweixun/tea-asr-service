@@ -68,7 +68,7 @@ response 為 4-byte 長度＋JSON，最多 1MiB，含 request ID、worker genera
 
 對 v0.4.5 的 audio tower predicate 採模型卡建議的局部 override：只在 dedicated worker、載入這個 checkpoint 的 try/finally 範圍內改 class predicate，finally 還原。檢查 quantization overrides、8-bit tower、4-bit decoder 与 keys/shapes；不能只看到 `load_model` 無例外就視作成功。若 loader 路徑不符合預期，明確報 `model_incompatible`，不忽略缺權重或隨機初始化。相關依據見 [02](02-research.md)。
 
-第一版固定 `language="Chinese"`、`temperature=0`、`batch_size=1`；`max_tokens` 初始 512、上限 1024。碰到 token 上限標記 `possibly_truncated`，不能當完整轉錄。熱詞先只保留 adapter 能力欄位，未完成 system_prompt 驗證前拒絕請求。ITN／替換留給 client；raw text 不被全域字典改寫。
+第一版固定 `language="Chinese"`、`temperature=0`、`batch_size=1`；ASR 每次依完整 PCM 長度（含 carry）設定 `max_tokens=min(512, ceil(audio_s × 11) + 8)`。抵達上限時 server 記錄 `asr.max_tokens_hit`（`audio_ms`、`kind`、`max_tokens`）；輸出仍經過既有重複內容清理。`/v1/transcriptions` 最長 30 秒，該長度 budget 為 338 tokens；更長的直接 backend 輸入逐步增加至原有 512-token 上限。熱詞先只保留 adapter 能力欄位，未完成 system_prompt 驗證前拒絕請求。ITN／替換留給 client；raw text 不被全域字典改寫。
 
 upstream會為短於1秒音訊補零。公開sample範圍、audio_ms與RTF分母都使用原始有效樣本數；若記錄model_input_ms則另列padding後長度。不要直接轉貼upstream segment.end當來源終點。
 
