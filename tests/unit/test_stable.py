@@ -94,6 +94,54 @@ def test_trailing_punctuation_is_held_back() -> None:
     assert feed(tracker, "你好，我是", "你好，我是誰") == ["你好，我是"]
 
 
+def test_punctuation_flip_does_not_block_agreed_content() -> None:
+    tracker = StablePrefixTracker(2)
+    tracker.observe("今天，晚間直播")
+    update = tracker.observe("今天晚間直播預告")
+
+    assert update is not None
+    assert update.text == "今天晚間直播"
+    assert "，" not in update.text
+
+
+def test_punctuation_is_committed_only_when_voters_agree() -> None:
+    agreed = StablePrefixTracker(2)
+    agreed.observe("今天，晚間直播")
+    agreed_update = agreed.observe("今天，晚間直播預告")
+    assert agreed_update is not None and agreed_update.text == "今天，晚間直播"
+
+    disputed = StablePrefixTracker(3)
+    disputed.observe("今天，晚間直播")
+    disputed.observe("今天，晚間直播預告")
+    disputed_update = disputed.observe("今天晚間直播提醒")
+    assert disputed_update is not None
+    assert disputed_update.text == "今天晚間直播"
+    assert "，" not in disputed_update.text
+
+
+def test_width_case_space_and_simple_digit_variants_agree() -> None:
+    tracker = StablePrefixTracker(2)
+    tracker.observe("我們用 ＭＶ   三分之一 模式")
+    update = tracker.observe("我們用 mv 3分之1模式可以")
+
+    assert update is not None
+    assert update.text == "我們用 mv 3分之1模式"
+
+
+def test_normalized_final_reconciles_without_spurious_divergence() -> None:
+    tracker = StablePrefixTracker(2)
+    tracker.observe("我們很喜歡ＯＫ 模式。")
+    committed = tracker.observe("我們很喜歡ok模式，還不錯")
+    assert committed is not None
+    before_final = committed.text
+
+    final = tracker.finalize("我們很喜歡ＯＫ   模式！很好用。")
+
+    assert final.state == "final"
+    assert final.diverged_chars == 0
+    assert final.text.startswith(before_final)
+
+
 # -- grapheme and word safety ------------------------------------------------------
 
 

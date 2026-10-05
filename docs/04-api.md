@@ -513,11 +513,12 @@ session.start 加可選 `stable`，必須同時 `transcript_mode="revisable"`，
   partial 或 final 的 `revision`。`start_sample`／`end_sample` 同來源事件，sample clock 與 segment ID 沿用、不另分配。
 - **只增不改**：同一 `segment_id` 的後一則 `text` 一定以前一則開頭（也因此 UTF-8 bytes 以前一則 bytes 開頭），
   且結尾落在 grapheme cluster 邊界。client 只需把多出的尾巴接上，不需要也不應該做 diff。
-  partial 進入 stable tracker 前會先套用重複字串 guard；如果後續修訂因此短於已提交前綴，tracker 會保留舊前綴並忽略這次縮短，不重寫已提交的 stable 文字。普通 partial 仍可照常修訂。
+  stable 以比較 key 對齊：NFKC、casefold、移除空白與 Unicode 標點，並逐字折疊簡單的中文數字字元（`〇零一二三四五六七八九`）；不解析「十／百／千」等單位數字。
+  新提交的字形取自最新 hypothesis；已提交的原字形永不更換。標點只有在所有投票 hypothesis 都於同一 key 位置含有相同 NFKC 標點序列時才提交。partial 仍先套用重複字串 guard；若修訂與已提交 key 不相容，tracker 保留舊前綴並忽略這次縮短。
 - `state`：`open`＝之後可能還有；其餘三種是該 segment **最後一則** `transcript.stable`：
-  - `final`：`text` 與 `transcript.final.text` 完全相同。
-  - `diverged`：final 沒有延伸已提交的文字。`text`＝已提交文字＋final 在對齊點之後的部分，**不等於** final；
-    `diverged_chars` 是已提交文字中從第一個不一致處起算的字數。實測約 4% 的句子（n=2），逐字稿仍以 final 為準。
+  - `final`：final 的比較 key 以已提交 key 開頭。stable 保留已顯示的表面字形，並從 final 的等價 key 邊界追加尾段；若此前已有大小寫、字寬、空白或標點差異，stable 的表面文字可以不等於 `transcript.final.text`。
+  - `diverged`：final 的比較 key 不會延伸已提交 key。`text`＝已提交文字＋final 在對齊點之後的部分，**不等於** final；
+    `diverged_chars` 是從第一個不一致處起，已提交比較 key 中被 final 否定的 key 字元數。忽略的標點與空白不計入。
   - `abandoned`：segment 以 `segment.skipped` 或 `segment.error` 結束；`text` 維持最後已提交的值，從未被 final 確認。
     只有已經送過至少一則 `transcript.stable` 的 segment 才會收到它。
 - **時序**：每個 `transcript.final` 之後緊接著送該段的收尾 `transcript.stable`（`final` 或 `diverged`），中間沒有其他事件；
