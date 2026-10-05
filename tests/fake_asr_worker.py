@@ -14,6 +14,8 @@ Behaviour is chosen with environment variables:
 - `FAKE_ASR_MISMATCH_ONCE=<path>` — if `<path>` does not exist yet, create it
   and answer the first request with a wrong `request_id`. So only the first
   worker process misbehaves, and the one restarted after it is healthy.
+- `FAKE_ASR_LOOP_TO_CAP=1` — return repeated text and a token count at the
+  request's `max_tokens`, like a decoder that keeps repeating until capped.
 """
 
 from __future__ import annotations
@@ -54,19 +56,21 @@ def main() -> int:
             time.sleep(delay)
         samples = len(pcm) // 2
         request_id = str(header["request_id"])
+        max_tokens = int(header.get("max_tokens", 512))
         if mismatch and answered == 0:
             request_id = "not-" + request_id
         answered += 1
+        loop_to_cap = os.environ.get("FAKE_ASR_LOOP_TO_CAP") == "1"
         _write(
             {
                 "status": "ok",
                 "request_id": request_id,
-                "text": f"samples={samples}",
+                "text": "repeat" * max_tokens if loop_to_cap else f"samples={samples}",
                 "audio_samples": samples,
                 "model_input_samples": max(16_000, samples),
                 "total_time_s": delay,
                 "prompt_tokens": 10,
-                "generation_tokens": 3,
+                "generation_tokens": max_tokens if loop_to_cap else 3,
             }
         )
 

@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .errors import ApiError
+from .logs import event
 from .wire import SAMPLE_RATE
+from .worker.token_budget import max_tokens_for_pcm
+
+logger = logging.getLogger(__name__)
 
 #: docs/03-architecture.md: interactive first, then realtime, then preview work.
 #: Preview never delays a caller that is already waiting for an immutable final.
@@ -146,6 +151,7 @@ class Scheduler:
         """
 
         samples = len(pcm) // 2
+        max_tokens = max_tokens_for_pcm(pcm)
         self._admit(samples)
         waiter = _Waiter(
             priority=PRIORITY.get(kind, 0),
@@ -179,7 +185,17 @@ class Scheduler:
                 self._worker.transcribe(pcm, language=language, system_prompt=system_prompt)
             )
         work.add_done_callback(self._work_done)
-        return await asyncio.shield(work), queue_ms
+        response = await asyncio.shield(work)
+        generation_tokens = response.get("generation_tokens")
+        if isinstance(generation_tokens, int) and generation_tokens >= max_tokens:
+            event(
+                logger,
+                "asr.max_tokens_hit",
+                audio_ms=samples // 16,
+                kind=kind,
+                max_tokens=max_tokens,
+            )
+        return response, queue_ms
 
     def _work_done(self, work: asyncio.Future[dict[str, Any]]) -> None:
         if not work.cancelled():

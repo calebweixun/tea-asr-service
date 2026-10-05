@@ -19,6 +19,7 @@ import pytest
 from tea_asr.worker import supervisor as supervisor_module
 from tea_asr.worker.protocol import MAX_PCM_BYTES
 from tea_asr.worker.supervisor import WorkerError, WorkerSupervisor
+from tea_asr.worker.token_budget import max_tokens_for_pcm
 
 FAKE_WORKER = "tests.fake_asr_worker"
 
@@ -220,6 +221,28 @@ def test_inference_timeout_kills_and_reaps_a_hung_worker_immediately(
             await asyncio.wait_for(worker.stop(), 2)
 
     asyncio.run(asyncio.wait_for(scenario(), timeout=4.5))
+
+
+def test_repeating_fake_worker_stops_at_the_duration_scaled_token_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FAKE_ASR_LOOP_TO_CAP", "1")
+    audio = pcm(6 * 16_000)
+    cap = max_tokens_for_pcm(audio)
+
+    async def scenario() -> dict[str, object]:
+        worker = make()
+        await worker.start()
+        try:
+            return await worker.transcribe(audio)
+        finally:
+            await shutdown(worker)
+
+    response = asyncio.run(scenario())
+    assert cap == 74
+    assert cap < 512
+    assert response["generation_tokens"] == cap
+    assert response["text"] == "repeat" * cap
 
 
 def test_stop_waits_for_the_exchange_on_the_pipe(monkeypatch: pytest.MonkeyPatch) -> None:

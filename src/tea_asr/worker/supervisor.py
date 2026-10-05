@@ -15,6 +15,7 @@ from typing import Any
 from ..errors import ApiError
 from ..logs import event
 from .protocol import MAX_HEADER_BYTES, MAX_PCM_BYTES, read_response
+from .token_budget import max_tokens_for_pcm
 
 logger = logging.getLogger("tea_asr.worker")
 
@@ -201,7 +202,7 @@ class WorkerSupervisor:
         await self._lock.acquire()
         try:
             exchange = asyncio.get_running_loop().create_task(
-                self._exchange(pcm, language, system_prompt)
+                self._exchange(pcm, language, system_prompt, max_tokens_for_pcm(pcm))
             )
         except BaseException:
             self._lock.release()
@@ -216,7 +217,7 @@ class WorkerSupervisor:
             exchange.exception()
 
     async def _exchange(
-        self, pcm: bytes, language: str, system_prompt: str | None = None
+        self, pcm: bytes, language: str, system_prompt: str | None, max_tokens: int
     ) -> dict[str, Any]:
         """Write one request and read its response; the caller holds the lock."""
 
@@ -237,7 +238,7 @@ class WorkerSupervisor:
             "pcm_bytes": len(pcm),
             "sample_rate": 16_000,
             "language": language,
-            "max_tokens": 512,
+            "max_tokens": max_tokens,
         }
         if system_prompt is not None:
             request["system_prompt"] = system_prompt

@@ -5,6 +5,7 @@ import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -53,16 +54,14 @@ def main() -> int:
         try:
             audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
             system_prompt = header.get("system_prompt")
-            if system_prompt is None:
-                result = backend.transcribe(
-                    audio, language=str(header.get("language", "Chinese"))
-                )
-            else:
-                result = backend.transcribe(
-                    audio,
-                    language=str(header.get("language", "Chinese")),
-                    system_prompt=str(system_prompt),
-                )
+            options: dict[str, Any] = {
+                "language": str(header.get("language", "Chinese")),
+            }
+            if header.get("max_tokens") is not None:
+                options["max_tokens"] = int(header["max_tokens"])
+            if system_prompt is not None:
+                options["system_prompt"] = str(system_prompt)
+            result = backend.transcribe(audio, **options)
             payload = asdict(result)
             payload.update({"status": "ok", "request_id": request_id})
             _write(payload)
