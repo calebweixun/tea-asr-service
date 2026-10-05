@@ -188,23 +188,31 @@ partial→partial 有 78.8% 會改掉已顯示的字（忽略標點仍 44.7%）�
 所以另開一條**衍生**的事件 `transcript.stable`，契約在 [04](04-api.md)「只增不改的穩定字幕流」。
 
 **方法：LocalAgreement-n**（Whisper-Streaming）。每個 segment 各自保留最近 n 版已發布的 partial；
-n 版共同的開頭若比已提交的更長，就把多出的部分正式提交，之後永不更改。它只讀 client 已經收到的
-partial 文字（PUA 已過濾），不另跑推論、不改 partial／final 的任何欄位、不影響排程。n 預設 2、可選 3。
+比較時將每個 grapheme cluster 依 NFKC、casefold、再 NFKC 正規化，移除空白與 Unicode 標點，並逐字折疊
+`〇零一二三四五六七八九`。不解析「十／百／千」等單位數字，避免推測中文數字的算術意思。n 版比較 key
+的共同開頭若比已提交 key 更長，就從最新 partial 的表面文字投影多出的範圍，再正式提交，之後永不更改。
+它只讀 client 已經收到的 partial 文字（PUA 已過濾），不另跑推論、不改 partial／final 的欄位、不影響排程。
+n 預設 2、可選 3。
 
-**切點規則**（`src/tea_asr/stable.py`）：已提交文字的結尾必須同時在每一版 partial 裡都安全——
+**切點與標點規則**（`src/tea_asr/stable.py`）：key 邊界必須能映射回每一版 partial 的完整表面 grapheme，且切點安全——
 
 1. grapheme cluster 邊界：不切開 ZWJ emoji、國旗、keycap、膚色、base＋組合字、韓文字母組合。
    只用標準庫實作 UAX #29 的保守子集：可能拒絕某些合法切點（晚一版提交），但絕不接受 UAX #29 禁止的切點；
    測試以 `regex` 的 `\X` 交叉驗證。因為事件帶完整文字、且新值以舊值開頭，新值的 UTF-8 bytes 也一定以舊值的 bytes 開頭，
    C client 可以直接用 `strlen(舊值)` 取出新增部分，不會切壞多位元組字元。
 2. 不切在英數字詞中間（`iPh`／`202` 不提交，等整個詞）；結尾剛好是英數字詞且沒有下一版證明詞已結束時也不提交。
-3. 不以標點或空白結尾：截斷快照常以 `。` 收尾，後文一來就變 `，`。這條讓分歧率從 5.0% 降到 4.0%。
+3. key 結尾落在最後一個已同意的文字 grapheme；因此尾端標點與空白不會先被帶入提交範圍。比較 key 內的標點只有在每個投票 hypothesis 都於同一 key 位置含相同 NFKC 標點序列時才會輸出，標點不同或一方沒有時只略過標點、不阻擋後續文字。punctuation restore 仍在 stable 前執行；開啟時沿用其 partial 尾端 2 個非標點字元的 right-context holdback。
 
 **與 final 的關係。** 逐字稿、存檔、匯出、貼入與翻譯一律只認 `transcript.final`（docs/06 約束5）。
-穩定流在 final 之後收尾一次：final 延伸已提交文字就收成 final 原文；不延伸就保留已提交文字、接上 final 在
-對齊點之後的部分，並標 `diverged`。不收回是依數據決定的：分歧只佔 4.0% 的句子、約 2 成只差標點，而分歧句裡
+穩定流在 final 之後收尾一次：final 的比較 key 延伸已提交 key 時，以 `final` 收尾並保留已提交表面字形，接上
+final 在等價 key 邊界之後的部分；表面標點、空白、大小寫或字寬可能因此與 final 不同，但不會製造 spurious
+`diverged`。key 無法延伸時才保留已提交文字、接上 final 在對齊點之後的部分，並標 `diverged`。
+不收回是依數據決定的：原 1317 句離線語料的 n=2 分歧只佔 4.0% 的句子、約 2 成只差標點，而分歧句裡
 final 並不比較可靠（n=2 字幕流 CER 12.9% vs final 12.0%；n=3 為 8.3% vs 13.2%），整體字幕流 CER 與 final
 沒有顯著差異（差值 95% CI [−0.15, +0.21] 個百分點）。
+
+2026-10-05 的 punctuation/case/width/spacing/numeral 對照與 OBS trace replay 結果見
+[穩定前綴量測報告](benchmarks/stable-prefix-report.md)。事件名稱、欄位、sample clock、segment ID 與「完整文字、不是 offsets」契約不變。
 
 **跨 segment 隔離。** 每個 segment 各有自己的追蹤狀態，事件以 `segment_id` 為鍵；下一段的穩定文字可能早於
 上一段的 final 到達，兩者互不影響。

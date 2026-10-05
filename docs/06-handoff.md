@@ -3,6 +3,8 @@
 > 原始交付為文件。**2026-09-19更新：** P0–P3與P2a已完成並實測；P2一小時soak與N=1..4併發容量測試已完成，進度表見 [README](../README.md#實作進度)。
 > 以下各階段的完成條件仍然有效，勾選狀態寫在每節開頭。
 
+**2026-10-05｜穩定字幕比較 key：** `transcript.stable` 的 LocalAgreement-n 以 NFKC／casefold／移除空白與 Unicode 標點的 key 比較 partial，並逐字折疊簡單中文數字字元；新字沿用最新 partial 的表面字形，標點須所有投票版本在同一 key 位置一致才提交。final 與已提交 key 相容時保留舊字形並追加等價邊界後的 final 尾段，避免大小寫、字寬、空白與標點造成 spurious `diverged`；wire 事件與欄位不變。離線回放的 ON trace 中 ≥20 字 jump 9/26→5/26、p50 11.5→8 字、stall p50 3.48→1.56 秒；OFF 長 trace 最大 59 字仍未改善，最長 stall 11.85 秒。bounded first-word escape（T=3 s、N=3、head≤2 key chars）在三 trace 的 51 段中 0 段符合安全條件，因此未上線。aggregate-only 數據見 [穩定前綴報告](benchmarks/stable-prefix-report.md)。這是私人 OBS trace 的離線分析，沒有文字放入 repo；**實際 OBS 畫面與其他講者／場地仍待使用者驗收。**
+
 **2026-10-03 singing detection 狀態：** 改用 YAMNet（ONNX、Apache-2.0，釘版於 `models.lock.json`，`tea-asr model-prepare` 下載）；`singing.py`（特徵、logistic、session 遲滯、片段決策）與 `singing_session.py`（背景 executor，不阻塞收音）取代先前失敗的 DSP heuristic。`segment.audio_class` 與 `transcript.final.audio_class` 預設開啟，但只有 YAMNet 資產載入且 hash 符合時才送事件與宣告 `features.singing_detection`（約束 6）。Held-out 留一檔：speech 視窗誤判 0.0%（兩組 speech）、歌唱片段首判 83.1%／最終 94.9%、29 分鐘講道 0 誤判、首判 1.5 秒，達成目標；證據只有 3 首同一樂團的歌、1 段背景音樂下講話與 1 場講道，**真實 OBS 與其他敬拜團／場地未驗證**，詳見 [評估報告](benchmarks/singing-eval-report.md)。實作完成與實機驗收分開記錄：後者尚待使用者在真實 OBS 上確認。
 
 **2026-10-04 整場主日 SRT 評估（church-eval）：** 用使用者人工訂正的三場主日（各約 2 小時）量離線 CER、串流字幕與歌唱偵測，工具見 [docs/09](09-testing-guide.md)，數字與決策見 [報告](benchmarks/church-eval-2026-10.md)。結論：replacement 顯著有益（-0.10 pp）、prompt 在 4-bit 無效、carry 3 s 離線不顯著／串流略好、870 ms 句尾靜音優於 600 ms；**歌唱偵測的誤藏率約每個有字幕小時 3.1 次（目標近 0，未達成，門檻與遲滯無法在不損失偵測的情況下消除）**。串流延遲是兩個併發 session 下的上限（單 session 重跑 p95 0.7–1.8 秒）；真實 OBS 畫面未驗收。

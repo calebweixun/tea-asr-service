@@ -1,5 +1,32 @@
 # 只增不改的穩定字幕流（LocalAgreement-n）量測報告
 
+## 2026-10-05｜比較 key 與真實 partial trace replay
+
+**設計：** LocalAgreement 仍使用 n=2，改以比較 key 判斷共同前綴：NFKC → casefold → NFKC，移除 Unicode 標點與空白，並將 `〇零一二三四五六七八九` 逐字折成阿拉伯數字。保留 unit-based 中文數字原樣，不猜測「十／百／千」的數值。新提交部分取自最新 hypothesis；比較區間內的標點只有在所有投票版本於同一 key 位置都含有相同 NFKC 標點序列時才保留。未投票一致的標點略過，不會卡住後續文字。key 邊界仍映射到每個 hypothesis 的 grapheme 邊界，並套用原有英數字詞切點安全檢查。尾端標點由投影自然留在 key 邊界之外，不再以它縮短文字共同前綴。punctuation restore 開啟時，輸入仍沿用 stream.py 的 2 個非標點字元尾端 holdback。
+
+Final 若以相同比較 key 延伸已提交 key，收尾為 `final`：保留已顯示表面字形，從 final 的等價 key 邊界追加尾段。這避免大小寫、字寬、空白及標點差異造成 spurious `diverged`。若 key 不相容，維持 append-only 對齊收尾；`diverged_chars` 計算比較 key 字元，不把略過的標點與空白算成錯字。事件、欄位、sample clock、segment ID 與完整文字（非 offsets）契約不變。
+
+**離線重播：** 以 `benchmarks/stable_trace_replay.py` 讀取 2026-10-05 三份服務端 JSONL；每段只取記錄的 `transcript.partial` 與 `transcript.final`，依事件順序餵給舊的 surface tracker 與新 tracker。punctuation-on trace 套用既有 2 字尾端 holdback。兩份 punctuation-off trace 另移除所有 Unicode 標點後重播。報告僅保存 aggregate 數字，沒有逐字稿文字。jump＝final event 表面字元數 − 最後 open stable 表面字元數；stall＝從首個 partial 到 final 之間，各次 stable 成長間隔的最大值；p90 用 nearest-rank；punctuation count 只數 final 到達前最後一份 open stable。`diverged_chars` 是各 tracker closing update 的總和：Before 沿用舊的表面字元計數，After 是新定義的比較 key 字元計數，因此單位改變也反映標點／格式差異不再算分歧，數值不可當成純逐字錯誤率比較。
+
+| Trace | Replay | Segments | Jump p50 / p90 / max (chars) | Jump ≥20 | Stall p50 / p90 / max (s) | `diverged_chars` sum | Committed punctuation | Open ending in punctuation |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| OFF, 19 segments | Before | 19 | 3 / 57 / 59 | 3 | 2.33 / 11.07 / 11.85 | 144 | 5 | 0 |
+| OFF, 19 segments | After | 19 | 3 / 57 / 59 | 3 | 2.03 / 11.07 / 11.85 | 83 | 5 | 0 |
+| OFF, punctuation stripped | Before | 19 | 3 / 57 / 59 | 3 | 1.93 / 11.07 / 11.85 | 84 | 0 | 0 |
+| OFF, punctuation stripped | After | 19 | 3 / 57 / 59 | 3 | 2.03 / 11.07 / 11.85 | 83 | 0 | 0 |
+| OFF, short trace | Before | 6 | 11.5 / 41 / 41 | 2 | 2.79 / 9.61 / 9.61 | 18 | 0 | 0 |
+| OFF, short trace | After | 6 | 11.5 / 41 / 41 | 2 | 2.79 / 9.61 / 9.61 | 18 | 0 | 0 |
+| OFF short, punctuation stripped | Before | 6 | 10.5 / 41 / 41 | 1 | 2.79 / 9.61 / 9.61 | 18 | 0 | 0 |
+| OFF short, punctuation stripped | After | 6 | 10.5 / 41 / 41 | 1 | 2.79 / 9.61 / 9.61 | 18 | 0 | 0 |
+| ON, 26 segments | Before | 26 | 11.5 / 45 / 57 | 9 | 3.48 / 9.82 / 10.79 | 216 | 39 | 0 |
+| ON, 26 segments | After | 26 | 8 / 42 / 57 | 5 | 1.56 / 7.48 / 10.79 | 112 | 43 | 0 |
+
+標點補回開啟時，≥20 字的 final jump 從 9/26 降為 5/26；p50 11.5→8 字、stall p50 3.48→1.56 秒，max jump 仍為 57 字、max stall 仍為 10.79 秒。OFF 長 trace 的大跳沒有減少（3/19，max 59 字），表示首詞／內容分歧仍主導部分長 stall。所有 replay 版本都沒有以標點結尾的 open stable；比較 key 尾端不另提交標點。
+
+**First-word escape 評估（未上線）：** T=3.0 s、最近 N=3 版、最多跳過 2 個比較 key 字元、之後需至少 2 個共同 key 字元，且候選在所有投票版都符合既有安全切點並以前綴相容已提交文字。三份 trace 共 51 段，0 段符合條件；因此沒有可提前提交的字元、沒有量到 latency gain，也沒有資料支持承擔錯誤鎖定的風險。沒有新增 server setting 或 escape 行為。
+
+**範圍：** 這是既有 OBS session partial/final 的離線回放，不包含新模型推論。OBS 實際畫面、其他講者／場地，以及不同模型輸出分佈仍待使用者驗收。重跑時用相同 interpreter 執行 `PYTHONPATH=src python benchmarks/stable_trace_replay.py --trace <off.jsonl> --trace <short-off.jsonl> --punctuation-on <on.jsonl>`；工具只列 aggregate 指標，不列出 transcript。
+
 執行日期：2026-09-24。狀態：**通過，已實作為 opt-in 的 `transcript.stable`（預設 n=2）。**
 契約見 [04](../04-api.md)「只增不改的穩定字幕流」，設計見 [07](../07-contextual-streaming.md)「只增不改的穩定前綴」。
 

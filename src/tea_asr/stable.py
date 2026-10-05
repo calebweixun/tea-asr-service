@@ -19,8 +19,9 @@ hypothesis that voted for it:
 - not inside a run of narrow (non-CJK) letters or digits, so an English word or
   a number is committed whole, never ``iPh`` of ``iPhone`` or ``202`` of
   ``2026``.
-- not right after punctuation or whitespace: the model often closes a
-  truncated snapshot with ``。`` that becomes ``，`` once more audio arrives.
+- punctuation is ignored for agreement and emitted only when every voting
+  hypothesis has the same mark sequence at that text position. This lets
+  content pass a comma flip without committing a mark that may move.
 
 The wire contract keeps docs/07's "full text, never offsets" rule: events carry
 the whole committed prefix, and each new value starts with the previous one.
@@ -197,6 +198,121 @@ def is_safe_cut(hypotheses: list[str] | tuple[str, ...], index: int) -> bool:
     return continued or not _is_narrow_word_char(reference[index - 1])
 
 
+_CJK_DIGITS = dict(zip("〇零一二三四五六七八九", "00123456789", strict=True))
+
+
+@dataclass(frozen=True, slots=True)
+class _SurfacePart:
+    start: int
+    end: int
+    text: str
+    kind: Literal["content", "punctuation", "space"]
+    key_position: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ComparisonView:
+    key: str
+    parts: tuple[_SurfacePart, ...]
+    # A key boundary maps to a surface offset only when it does not split a
+    # grapheme cluster or a normalization expansion.
+    boundaries: tuple[int | None, ...]
+    punctuation: tuple[str, ...]
+
+
+def _comparison_form(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text)
+    return unicodedata.normalize("NFKC", normalized.casefold())
+
+
+def _is_space(char: str) -> bool:
+    return char.isspace() or unicodedata.category(char).startswith("Z")
+
+
+def _comparison_view(text: str) -> _ComparisonView:
+    """Build a punctuation-free comparison key with offsets into ``text``."""
+
+    clusters: list[tuple[int, int, str, str]] = []
+    start = 0
+    for end in range(1, len(text) + 1):
+        if is_grapheme_boundary(text, end):
+            surface = text[start:end]
+            clusters.append((start, end, surface, _comparison_form(surface)))
+            start = end
+
+    key_parts: list[str] = []
+    parts: list[_SurfacePart] = []
+    boundaries: list[int | None] = [0]
+    punctuation: list[list[str]] = [[]]
+
+    for start, end, surface, normalized in clusters:
+        position = len(key_parts)
+        if normalized and all(_is_space(char) for char in normalized):
+            parts.append(_SurfacePart(start, end, surface, "space", position))
+            continue
+        if normalized and all(unicodedata.category(char).startswith("P") for char in normalized):
+            parts.append(
+                _SurfacePart(start, end, surface, "punctuation", position)
+            )
+            punctuation[position].append(normalized)
+            continue
+
+        # Fold simple digit glyphs. Unit-based Chinese numbers (十、百、千…) are
+        # deliberately left alone rather than parsed with ambiguous rules.
+        fragment = "".join(
+            _CJK_DIGITS.get(char, char)
+            for char in normalized
+            if not _is_space(char) and not unicodedata.category(char).startswith("P")
+        )
+        parts.append(_SurfacePart(start, end, surface, "content", position))
+        if not fragment:
+            continue
+        key_parts.extend(fragment)
+        boundaries.extend([None] * (len(fragment) - 1))
+        boundaries.append(end)
+        punctuation.extend([] for _ in fragment)
+
+    return _ComparisonView(
+        key="".join(key_parts),
+        parts=tuple(parts),
+        boundaries=tuple(boundaries),
+        punctuation=tuple("".join(marks) for marks in punctuation),
+    )
+
+
+def comparison_key(text: str) -> str:
+    """Case/width/spacing/punctuation-insensitive key used by stable tracking."""
+
+    return _comparison_view(text).key
+
+
+def _project_surface(
+    view: _ComparisonView,
+    votes: tuple[_ComparisonView, ...],
+    start_key: int,
+    end_key: int,
+) -> str:
+    """Project an agreed key range into the latest voted surface text."""
+
+    start = view.boundaries[start_key]
+    end = view.boundaries[end_key]
+    if start is None or end is None:
+        return ""
+    projected: list[str] = []
+    for part in view.parts:
+        if part.end <= start or part.start >= end:
+            continue
+        if part.kind == "punctuation":
+            position = part.key_position
+            if not start_key <= position < end_key:
+                continue
+            signature = view.punctuation[position]
+            if any(vote.punctuation[position] != signature for vote in votes):
+                continue
+        projected.append(part.text)
+    return "".join(projected)
+
+
 def stable_cut(hypotheses: list[str] | tuple[str, ...], floor: int = 0) -> int:
     """Longest safe committed length the hypotheses agree on, or ``floor``."""
 
@@ -238,8 +354,8 @@ StableState = Literal["open", "final", "diverged", "abandoned"]
 class StableUpdate:
     text: str
     state: StableState
-    #: Committed characters that `transcript.final` does not have at the same
-    #: position (0 unless ``state == "diverged"``).
+    #: Committed comparison-key characters the final does not share from the
+    #: start (0 unless ``state == "diverged"``).
     diverged_chars: int = 0
 
 
@@ -269,37 +385,58 @@ class StablePrefixTracker:
         if len(self._history) < self.agreement:
             return None
         hypotheses = tuple(self._history)
-        floor = len(self.text)
-        if any(not text.startswith(self.text) for text in hypotheses):
+        views = tuple(_comparison_view(text) for text in hypotheses)
+        floor = comparison_key(self.text)
+        if any(not view.key.startswith(floor) for view in views):
             # The model moved away from what is already on screen. Nothing can
             # be retracted, so wait (the final decides how the line ends).
             return None
-        length = stable_cut(hypotheses, floor)
-        if length <= floor:
-            return None
-        self.text = hypotheses[0][:length]
-        return StableUpdate(self.text, "open")
+        common = common_prefix_length(tuple(view.key for view in views))
+        for length in range(common, len(floor), -1):
+            offsets = tuple(view.boundaries[length] for view in views)
+            if any(
+                offset is None or not is_safe_cut((hypothesis,), offset)
+                for hypothesis, offset in zip(hypotheses, offsets, strict=True)
+            ):
+                continue
+            addition = _project_surface(views[-1], views, len(floor), length)
+            if not addition:
+                return None
+            self.text += addition
+            return StableUpdate(self.text, "open")
+        return None
 
     def finalize(self, final: str) -> StableUpdate:
         """Close the segment with its `transcript.final` text.
 
-        If the final extends the committed text, the stable line becomes the
-        final exactly. Otherwise the committed text stays (it is already on
-        screen) and the part of the final after the aligned end of the committed
-        text is appended, so the line still ends with what was said last.
+        A final whose normalized key extends the committed key is reconciled
+        without a divergence, even if its case, width, spacing, or punctuation
+        differs. The visible committed surface is retained and the final suffix
+        is appended after the equivalent key boundary. A genuinely different
+        key keeps the existing append-only aligned-tail behavior.
         """
 
         self.closed = True
         committed = self.text
-        if final.startswith(committed):
-            self.text = final
-            return StableUpdate(final, "final")
-        shared = common_prefix_length((committed, final))
-        end = _alignment_end(committed, final)
-        while end < len(final) and not is_grapheme_boundary(final, end):
-            end += 1
+        committed_key = comparison_key(committed)
+        final_view = _comparison_view(final)
+        if final_view.key.startswith(committed_key):
+            end = final_view.boundaries[len(committed_key)]
+            if end is not None:
+                self.text = committed + final[end:]
+                return StableUpdate(self.text, "final")
+
+        shared = common_prefix_length((committed_key, final_view.key))
+        end_key = _alignment_end(committed_key, final_view.key)
+        while end_key < len(final_view.key) and final_view.boundaries[end_key] is None:
+            end_key += 1
+        end = final_view.boundaries[end_key]
+        if end is None:
+            end = len(final)
         self.text = committed + final[end:]
-        return StableUpdate(self.text, "diverged", diverged_chars=len(committed) - shared)
+        return StableUpdate(
+            self.text, "diverged", diverged_chars=len(committed_key) - shared
+        )
 
     def abandon(self) -> StableUpdate:
         """Close the segment without a final (skipped or failed)."""

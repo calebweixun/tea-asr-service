@@ -678,7 +678,7 @@ class TranscriptStable(SessionEvent):
     end_sample: int
     text: str
     state: StableState
-    #: Committed characters the final disagrees with; non-zero only if diverged.
+    #: Comparison-key characters contradicted by final; non-zero only if diverged.
     diverged_chars: int = Field(default=0, ge=0)
 
 
