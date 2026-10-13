@@ -26,17 +26,21 @@ class CharacterTokenizer:
 
 
 class RecordingModel:
-    def __init__(self) -> None:
+    def __init__(
+        self, *, text: str = "辨識文字", generation_tokens: int = 3
+    ) -> None:
         self._tokenizer = CharacterTokenizer()
         self.calls: list[dict[str, Any]] = []
+        self.text = text
+        self.generation_tokens = generation_tokens
 
     def generate(self, audio: np.ndarray, **kwargs: Any) -> SimpleNamespace:
         self.calls.append(kwargs)
         return SimpleNamespace(
-            text="辨識文字",
+            text=self.text,
             total_time=0.01,
             prompt_tokens=42,
-            generation_tokens=3,
+            generation_tokens=self.generation_tokens,
         )
 
 
@@ -86,6 +90,24 @@ def test_worker_supplied_budget_is_forwarded_to_model_generation() -> None:
 
     assert model.calls[0]["max_tokens"] == 79
     assert result.text == "辨識文字"
+
+
+@pytest.mark.parametrize(
+    ("model_text", "expected_text", "replacement_char_count"),
+    (
+        ("辨識文字 \ufffd", "辨識文字", 1),
+        ("辨\ufffd識\ufffd文字", "辨識文字", 2),
+    ),
+)
+def test_replacement_chars_are_removed_from_backend_text(
+    model_text: str, expected_text: str, replacement_char_count: int
+) -> None:
+    backend = _backend_with(RecordingModel(text=model_text))
+
+    result = backend.transcribe(np.ones(16_000, dtype=np.float32), max_tokens=19)
+
+    assert result.text == expected_text
+    assert result.replacement_char_count == replacement_char_count
 
 
 def test_close_clears_model_and_mlx_cache(monkeypatch: pytest.MonkeyPatch) -> None:

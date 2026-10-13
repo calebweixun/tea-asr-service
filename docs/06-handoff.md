@@ -19,6 +19,8 @@
 
 **2026-10-05｜ASR 輸出 token 上限：** 每個 worker request 依完整 PCM（preview、final 與 carry 一起計算）設定 `max_tokens=min(512, ceil(audio_s × 11) + 8)`；直接讀 Qwen tokenizer、未載入 MLX：`我`、`的`、`今天`、`國` 各 1 token，`你好世界` 2 tokens，`hello world` 2 tokens，10 位數字 10 tokens。`R=11` 比實際快語速 8–9 中文字／秒多約 22–38%，另加 8-token buffer；15 秒 audio budget 為 173，30 秒 HTTP one-shot 上限為 338，更長的 backend audio 逐步回到原本 512 上限。CER finals 最大輸出為 49 字／1.5 秒（32.67 字／秒，`20260704-0025`），遠高於人類語速，視為可能過度生成的輸出 outlier；36 組 aggregates 共 25,116 個 finals 的 p95 為 6.0 字／秒。6.413 秒 request 的 cap 為 79 tokens，按 80 tokens／秒約 0.99 秒。budget hit 記 `asr.max_tokens_hit`（`audio_ms`、`kind`、`max_tokens`），response 照常進入既有 repetition trim；HTTP route 對單次上傳限制 30 秒，schema 不變。
 
+Backend 會在 worker IPC 前移除輸出中的所有 U+FFFD；service process 記錄 `asr.replacement_char_stripped`（`count`、`token_cap_hit`）。Streaming 順序維持 PUA filter、repetition trim、replacements、punctuation。
+
 ## 開發方式
 
 採單一repo、Python package、逐階段垂直切片。每個階段都交付可重現結果，前一個關卡沒通過就不要把後續功能當成完成。使用專案的codebase-memory-mcp做程式探索；尚無程式時不需要硬建空索引，有程式後建立／更新索引。

@@ -288,6 +288,17 @@ class WorkerSupervisor:
                 str(response.get("code", "inference_failed")),
                 str(response.get("message", "Inference failed")),
             )
+        replacement_char_count = response.pop("replacement_char_count", 0)
+        if isinstance(replacement_char_count, int) and replacement_char_count > 0:
+            generation_tokens = response.get("generation_tokens")
+            event(
+                logger,
+                "asr.replacement_char_stripped",
+                count=replacement_char_count,
+                token_cap_hit=(
+                    isinstance(generation_tokens, int) and generation_tokens >= max_tokens
+                ),
+            )
         return response
 
     async def _resync(self, reason: str, *, expected: str, got: object) -> WorkerError:
