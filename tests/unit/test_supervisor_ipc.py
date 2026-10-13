@@ -245,6 +245,65 @@ def test_repeating_fake_worker_stops_at_the_duration_scaled_token_cap(
     assert response["text"] == "repeat" * cap
 
 
+@pytest.mark.parametrize(
+    ("generation_tokens", "expected_token_cap_hit"),
+    ((19, True), (3, False)),
+)
+def test_replacement_char_event_is_logged_in_the_service_process(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_log: Records,
+    generation_tokens: int,
+    expected_token_cap_hit: bool,
+) -> None:
+    class FakeWriter:
+        def write(self, _data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+    class FakeProcess:
+        returncode = None
+        stdin = FakeWriter()
+        stdout = object()
+
+    request_id = "replacement-request"
+
+    async def read_response(_stdout: object) -> dict[str, object]:
+        return {
+            "status": "ok",
+            "request_id": request_id,
+            "text": "辨識文字",
+            "generation_tokens": generation_tokens,
+            "replacement_char_count": 2,
+        }
+
+    monkeypatch.setattr(supervisor_module.uuid, "uuid4", lambda: request_id)
+    monkeypatch.setattr(supervisor_module, "read_response", read_response)
+    worker = make()
+    worker.process = FakeProcess()  # type: ignore[assignment]
+    worker.state = "ready"
+
+    response = asyncio.run(worker._exchange(pcm(16_000), "Chinese", None, 19))
+
+    assert response == {
+        "status": "ok",
+        "request_id": request_id,
+        "text": "辨識文字",
+        "generation_tokens": generation_tokens,
+    }
+    events = [
+        record
+        for record in worker_log.records
+        if record.getMessage() == "asr.replacement_char_stripped"
+    ]
+    assert len(events) == 1
+    assert events[0].fields == {  # type: ignore[attr-defined]
+        "count": 2,
+        "token_cap_hit": expected_token_cap_hit,
+    }
+
+
 def test_stop_waits_for_the_exchange_on_the_pipe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FAKE_ASR_DELAY_S", "0.2")
 

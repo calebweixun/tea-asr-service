@@ -25,6 +25,7 @@ class Transcription:
     total_time_s: float
     prompt_tokens: int
     generation_tokens: int
+    replacement_char_count: int = 0
 
 
 @contextlib.contextmanager
@@ -104,14 +105,17 @@ class TeaMlxBackend:
                 system_prompt, self._model._tokenizer
             )
         result = self._model.generate(samples, **options)
+        decoded_text = str(result.text)
+        replacement_char_count = decoded_text.count("\ufffd")
         model_samples = max(samples.size, 16_000)
         return Transcription(
-            text=str(result.text).strip(),
+            text=decoded_text.replace("\ufffd", "").strip(),
             audio_samples=int(samples.size),
             model_input_samples=model_samples,
             total_time_s=float(result.total_time),
             prompt_tokens=int(result.prompt_tokens),
             generation_tokens=int(result.generation_tokens),
+            replacement_char_count=replacement_char_count,
         )
 
     def close(self) -> None:
