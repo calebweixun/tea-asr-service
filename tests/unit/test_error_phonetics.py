@@ -1,3 +1,7 @@
+import pytest
+
+pytest.importorskip("pypinyin")  # optional benchmark dependency, absent in CI
+
 from benchmarks.cer_eval import normalize_for_scoring
 from benchmarks.error_phonetics import (
     analyze_normalized_item,
