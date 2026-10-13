@@ -121,6 +121,8 @@ say -v Meijia "這份 PR 已經 merge 了，我們下午跟 client 開會。" -o
 
 模型與 VAD 資產放在倉庫內的 `models/`（已 gitignore，可用 `TEA_ASR_MODELS_DIR` 改），**不放 `~/Library/Caches`**——macOS 會在磁碟吃緊時把那裡整個清掉，實際發生過一次。服務只監聽 `127.0.0.1:8327`（電話鍵盤上的 T-E-A；刻意避開 8765 那類 AI 工具常用的 port）。首次啟動會在 `~/Library/Application Support/TEA ASR/token` 建立權限0600的token。短音訊端點與WS utterance session都接受最多30秒、16 kHz mono PCM s16le；詳見 [API契約](docs/04-api.md)，機器可讀版本在 [docs/api/](docs/api/)（`uv run tea-asr export-schemas` 重新產生，測試會檢查是否過期）。本機結果見 [P0報告](docs/benchmarks/p0-report.md)。
 
+離線殘餘錯誤分析可用 `PYTHONPATH=src python -m benchmarks.error_phonetics` 執行，需在 Python 環境安裝 `pypinyin`；pair counts 與抽樣上下文只寫入本機 ignored `.soak/eval-services/work/error-phonetics/`。
+
 ## 實作進度
 
 | 階段 | 狀態 | 說明 |
