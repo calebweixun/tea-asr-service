@@ -193,8 +193,18 @@ def run_evaluation(
     args: argparse.Namespace,
     *,
     backend_factory: Callable[[Path], Any] | None = None,
+    selected_ids: set[str] | None = None,
+    seed_hypotheses: dict[str, str] | None = None,
+    cached_results: dict[str, dict[str, Any]] | None = None,
+    item_callback: Callable[[str, str, dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
     items = load_items(args.answers)
+    item_ids = {item["id"] for item in items}
+    if selected_ids is not None and not selected_ids <= item_ids:
+        raise ValueError("selected_ids contains an item not present in answers")
+    cached = cached_results or {}
+    if not set(cached) <= (selected_ids if selected_ids is not None else item_ids):
+        raise ValueError("cached_results contains an item outside the selected evaluation")
     samples = read_wav(args.wav)
     dictionary = None
     if args.dictionary is not None:
@@ -207,12 +217,31 @@ def run_evaluation(
     replacement_rules = dictionary.replacements if dictionary is not None else ()
 
     backend_class = backend_factory or TeaMlxBackend
-    backend = backend_class(args.model_path)
-    output: dict[str, str] = {}
+    needs_decode = any(
+        (selected_ids is None or item["id"] in selected_ids) and item["id"] not in cached
+        for item in items
+    )
+    backend = backend_class(args.model_path) if needs_decode else None
+    output = dict(seed_hypotheses or {})
     timings: dict[str, dict[str, Any]] = {}
     try:
-        backend.load()
+        if backend is not None:
+            backend.load()
         for index, item in enumerate(items):
+            item_id = item["id"]
+            if selected_ids is not None and item_id not in selected_ids:
+                if item_id not in output:
+                    raise ValueError(f"seed_hypotheses is missing unselected item {item_id}")
+                continue
+            if item_id in cached:
+                cached_result = cached[item_id]
+                text = cached_result.get("text")
+                timing = cached_result.get("timing", {})
+                if not isinstance(text, str) or not isinstance(timing, dict):
+                    raise ValueError(f"cached result for {item_id} is malformed")
+                output[item_id] = text
+                timings[item_id] = timing
+                continue
             segment_audio = _item_audio(
                 samples,
                 item,
@@ -227,6 +256,8 @@ def run_evaluation(
             def decode(audio: np.ndarray) -> Any:
                 nonlocal audio_attempted_samples, decode_s, model_time_s, attempts
                 started = time.perf_counter()
+                if backend is None:
+                    raise RuntimeError("evaluation requires a backend for uncached items")
                 result = backend.transcribe(audio, system_prompt=system_prompt)
                 decode_s += time.perf_counter() - started
                 audio_attempted_samples += audio.size
@@ -269,7 +300,6 @@ def run_evaluation(
                 text = _postprocess(raw_text, replacement_rules)
             else:
                 text, _ = apply_replacements(carried_decode_text, replacement_rules)
-            item_id = item["id"]
             output[item_id] = text
             timing = {
                 "decode_s": round(decode_s, 6),
@@ -284,8 +314,11 @@ def run_evaluation(
             if model_time_s:
                 timing["model_time_s"] = round(model_time_s, 6)
             timings[item_id] = timing
+            if item_callback is not None:
+                item_callback(item_id, text, timing)
     finally:
-        backend.close()
+        if backend is not None:
+            backend.close()
     return output, timings
 
 

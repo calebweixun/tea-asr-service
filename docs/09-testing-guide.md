@@ -113,7 +113,7 @@ Fake backend 使用 OBS 外掛 e2e harness 的 `tests/e2e/fake_asr_server.py`，
 ```bash
 mkdir -p .soak/fake/state .soak/traces
 ${PY:-.venv/bin/python} \
-  ${PLUGIN_ROOT:-../tea-live-subtitle}/tests/e2e/fake_asr_server.py \
+  ${OBS_PLUGIN_DIR:-../tea-live-subtitle}/tests/e2e/fake_asr_server.py \
   --service-dir "$PWD" --port 8422 \
   --state-dir "$PWD/.soak/fake/state" \
   --request-log "$PWD/.soak/fake/requests.jsonl" --revisable --emulate-segmentation
@@ -212,7 +212,7 @@ PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
 ```
 
 可用 `TEA_SOAK_TRACES=/path/to/traces` 或 `--trace-dir` 指定 trace 目錄。Replay 會從
-`${PLUGIN_ROOT:-../tea-live-subtitle}/tests/replay/` 編譯到 `.soak/build/`；不需要 OBS。
+`${OBS_PLUGIN_DIR:-../tea-live-subtitle}/tests/replay/` 編譯到 `.soak/build/`；不需要 OBS。
 硬門檻為 0 invalid_ipc、layout moves、mid-speech fade-outs、duplication lines，以及沒有超過 10 秒
 未出文字的 speech stretch。stable gap p95 > 3 秒與 final latency p95 > 1.5 秒只列 soft failure。
 
@@ -253,7 +253,7 @@ OpenCC 時才附上簡體轉繁體版本。加 `--fold-pronouns` 會同時回報
 使用本機預備好的模型執行全部 4-bit、8-bit、span、字典與 prompt 變體：
 
 ```bash
-$PWD/.soak/gold/run-offline-eval.sh
+.soak/gold/run-offline-eval.sh
 ```
 
 單獨測試 span 與兩秒前後文，並比較原分數、折疊分數及相對於第一個 hypothesis 的
@@ -262,16 +262,16 @@ paired bootstrap 95% 區間：
 ```bash
 PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/gold_offline_eval.py \
-  --answers $PWD/.soak/gold/answers/speakers-answers.json \
-  --wav $PWD/.soak/audio/church-30m-59m.wav \
+  --answers .soak/gold/answers/speakers-answers.json \
+  --wav .soak/audio/church-30m-59m.wav \
   --model-path $PWD/models/models--Alkd--TEA-ASR-1.1-MLX-4bit/snapshots/caee57a908b6d64be08a6462c7a21ececbd4d7cb \
   --mode span --pad-s 2 \
-  --output $PWD/.soak/gold/eval/span.json
+  --output .soak/gold/eval/span.json
 PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/cer_eval.py \
-  $PWD/.soak/gold/answers/speakers-answers.json \
-  $PWD/.soak/gold/eval/01-4bit-segment.json \
-  $PWD/.soak/gold/eval/span.json --fold-pronouns
+  .soak/gold/answers/speakers-answers.json \
+  .soak/gold/eval/01-4bit-segment.json \
+  .soak/gold/eval/span.json --fold-pronouns
 ```
 
 ## 整場主日 SRT 評估（church-eval，2026-10）
@@ -435,6 +435,58 @@ $PY -m pytest tests/unit/test_phonetic_rescore.py -q   # 沒有 pypinyin 時只�
 
 限制：teacher-forced 打分只做在 item 音訊（不含 carry 的 3 s）；模型原始輸出含私用區字元（PUA），
 過濾後的文字對模型來說略偏離分佈，但原稿與候選同樣被過濾，所以比較仍然公平。
+
+<a id="hotword-shallow-fusion-logit-bias-offline-experiment-2026-10"></a>
+
+## Hotword shallow fusion：logit bias（離線實驗，2026-10）
+
+這是純離線 benchmark；live server 不 import、不載入這段程式。mlx-audio 0.4.5 的
+Qwen3-ASR `Model.generate()` 會丟棄未知 `**kwargs`，因此 benchmark 從
+`_generate_single_chunk()` 傳入 `logits_processors`，使用既有 `stream_generate()` hook。
+Trie 每個有效 continuation 加 β；未完成的 prefix 一旦中斷，離開該 prefix 的 token 會扣回
+累積 bonus，完成的詞保留 bonus。遮罩依 trie state 預先建立，logits 用 `mx.where` 向量化。
+
+每個 held-out fold 的 targets 是 fold-safe dictionary 的 `to` 值與唯讀 live 字典的 13 個
+hotwords；可選名字只從另外兩場 references 挖掘。只保留全漢字且至少兩字的詞；本機模型
+tokenizer 產生獨立詞與前置空格兩種 tokenization。調參用另兩場的 reference／baseline exact
+或近音命中項，加每場固定隨機 300 個 control；預設搜尋 β = 0、0.5、1、2、3、5 與名字開關，
+目標為錯字數 + 4 × false-change items。每個 item 都快取到 git-excluded `$W/shallow-fusion/`，
+中斷後可續跑。A 是目前程式以 β=0 全量解碼的 hypotheses，寫到
+`$W/shallow-fusion/beta0/<service>.json`；B 是 A 加上該 fold 的字典替換。
+β=0 會回報與 `eval/m8-c3` 不同的 item 數量與 item ids，不會因差異失敗，也不會印出文字。
+只有 β=0 hypotheses 缺少時才回退到 `eval/m8-c3`，並印出警告。比較前會從所有解碼文字移除 U+FFFD。
+
+```bash
+ROOT=$PWD
+S=$ROOT
+PY=${PY:-$ROOT/.venv/bin/python}
+W=${SHALLOW_FUSION_WORK:-$S/.soak/church-eval/work}
+LIVE="$HOME/Library/Application Support/TEA ASR/dictionaries/church.toml"
+M8=$S/models/mlx-8bit-selfconv
+export PYTHONPATH="$ROOT/src:$ROOT" HF_HUB_OFFLINE=1
+
+# Materialize A from current-code beta=0 decodes; complete item caches resume in place.
+$PY $ROOT/benchmarks/shallow_fusion.py targets --work "$W" --model-path "$M8" --live-dictionary "$LIVE"
+$PY $ROOT/benchmarks/shallow_fusion.py decode --work "$W" --service 20260704 --fold 20260704 --beta 0 --system F --subset full
+# The runner performs this beta=0 step for all three services before tuning.
+$PY $ROOT/benchmarks/shallow_fusion.py tune --work "$W" --model-path "$M8"
+$PY $ROOT/benchmarks/shallow_fusion.py decode --work "$W" --service 20260704 --fold 20260704 --tuned "$W/shallow-fusion/tune/results.json" --system FB
+$PY $ROOT/benchmarks/shallow_fusion.py report --work "$W" --results "$W/shallow-fusion/tune/results.json" --markdown "$ROOT/docs/benchmarks/shallow-fusion-2026-10.md"
+```
+
+完整流程與 nohup log 在 [`benchmarks/run_shallow_fusion.sh`](../benchmarks/run_shallow_fusion.sh)。
+若要放到 service 的 `.soak/`，先複製後執行：
+
+```bash
+cp "$ROOT/benchmarks/run_shallow_fusion.sh" "$S/.soak/run-shallow-fusion.sh"
+nohup bash "$S/.soak/run-shallow-fusion.sh" >/dev/null 2>&1 &
+tail -f "$W/shallow-fusion/run.log"
+```
+
+`tune` 的近音子集沿用 `phonetic_rescore.py`，需要該 venv 已有的 optional `pypinyin`；CI 不需安裝。
+彙整用 `church_eval_report.py` 的 pronoun-folded CER 與 5 分鐘 cluster bootstrap，並檢查
+FB−B pooled CI、false changes/hour，以及相對 β=0 的每 final p50/p95 額外 decode 時間 ≤50 ms。
+數字與 GO/NO-GO 判斷只寫入 aggregate-only [報告骨架](benchmarks/shallow-fusion-2026-10.md)。
 
 ## EmbeddingGemma 2 audio↔text probe（離線實驗）
 

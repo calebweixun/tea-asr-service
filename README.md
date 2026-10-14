@@ -22,6 +22,7 @@
 | 實作 client 或 server 通訊 | [04 API 契約](docs/04-api.md) |
 | 執行模型驗證、效能與可靠性驗收 | [05 驗證計畫](docs/05-validation.md) |
 | 看真實語料的品質實測 | [P0 品質報告](docs/benchmarks/p0-quality-report.md) |
+| 複現離線 hotword shallow fusion 實驗（A = 目前程式 β=0 解碼） | [測試指南](docs/09-testing-guide.md#hotword-shallow-fusion-logit-bias-offline-experiment-2026-10)、[aggregate-only 報告](docs/benchmarks/shallow-fusion-2026-10.md) |
 | 看切段、長跑與串流預覽的實測 | [P2 切段](docs/benchmarks/p2-segmentation-report.md)、[P2 長跑](docs/benchmarks/p2-soak-report.md)、[P2a 預覽](docs/benchmarks/p2a-preview-report.md) |
 | 交給 Sol 或其他模型開始開發 | [06 開發交接](docs/06-handoff.md) |
 | 理解類似系統聽寫的預覽與上下文修訂 | [07 串流修訂規劃](docs/07-contextual-streaming.md) |
@@ -81,7 +82,7 @@ carry_context_max_gap_s = 1.5
 
 8-bit 檔案由 `JacobLinCool/TEA-ASR-1.1` revision `bda08df76d4fd6b487b4a1dd7f0bddf8541696f8` 以 `mlx 0.32.2`、`mlx-audio 0.4.5`、`mlx-lm 0.31.3` 本機轉換；每個輸出檔案 pin 與轉換命令記在 [`models.lock.json`](models.lock.json)。授權鏈是 TEA-ASR-1.1 的 MIT 授權衍生檔，並保留底層 `Qwen/Qwen3-ASR-1.7B` 的 Apache-2.0 通知，見 [`NOTICE`](NOTICE)。
 
-在使用者人工訂正的三場教會 SRT 離線評估中，8-bit + carry 3 秒相對 4-bit + carry 3 秒的 CER 低 **0.27 個百分點**（95% CI **−0.44 至 −0.10**）；模型檔大 **92%**。這不代表即時串流有同樣的速度或品質差異。真實 server 的 10 分鐘 8-bit／4-bit 對照尚未執行：load time、worker RSS、preview decode p50/p95、worker busy、final latency p95 與首 6 分鐘 CER **待填**。coordinator 的可重現檢查腳本為 [`/Users/c2leb/Codes/tea-asr-service/.soak/run-8bit-check.sh`](/Users/c2leb/Codes/tea-asr-service/.soak/run-8bit-check.sh)；結果與未驗證項目見 [church evaluation report](docs/benchmarks/church-eval-2026-10.md) 和 [06 handoff](docs/06-handoff.md)。
+在使用者人工訂正的三場教會 SRT 離線評估中，8-bit + carry 3 秒相對 4-bit + carry 3 秒的 CER 低 **0.27 個百分點**（95% CI **−0.44 至 −0.10**）；模型檔大 **92%**。這不代表即時串流有同樣的速度或品質差異。真實 server 的 10 分鐘 8-bit／4-bit 對照尚未執行：load time、worker RSS、preview decode p50/p95、worker busy、final latency p95 與首 6 分鐘 CER **待填**。coordinator 的可重現檢查腳本為 `.soak/run-8bit-check.sh`；結果與未驗證項目見 [church evaluation report](docs/benchmarks/church-eval-2026-10.md) 和 [06 handoff](docs/06-handoff.md)。
 
 服務啟動時會檢查 port 與 singleton lock，第二份實例會被拒絕並告訴你是誰占著。
 
