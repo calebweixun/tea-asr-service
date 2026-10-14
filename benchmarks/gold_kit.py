@@ -16,7 +16,7 @@ PAD_SECONDS = 0.3
 MIN_FINAL_SECONDS = 2.0
 MAX_GROUP_SECONDS = 12.0
 MAX_GAP_SECONDS = 2.0
-DEFAULT_SOAK_ROOT = Path("/Users/c2leb/Codes/tea-asr-service/.soak")
+DEFAULT_SOAK_ROOT = Path(__file__).resolve().parents[1] / ".soak"
 DEFAULT_OUTPUT = DEFAULT_SOAK_ROOT / "gold"
 
 

@@ -9,7 +9,7 @@
 
 調查日期：2026-09-20
 
-調查範圍：/Users/c2leb/Codes/tea-asr-service 的目前工作樹、HEAD、指定文件、codebase-memory graph、相關 Python/Swift 原始碼與 git history。
+調查範圍：<repo> 的目前工作樹、HEAD、指定文件、codebase-memory graph、相關 Python/Swift 原始碼與 git history。
 
 本文件是規劃，不是實作；調查期間沒有修改 repo 檔案，也沒有 commit 或 git 寫入。行號以本次調查時的工作樹為準；其他 agent 正在修改 clients/macos，後續派工時須重新讀取檔案與重跑 baseline。
 
@@ -453,5 +453,5 @@ P5a 的原文只把限制直接施加在 GUI：**「模型與 runtime 準備由 
 - **bearer token lifecycle 未定義**：目前已確認是 32 random bytes、0600 file、靜態 exact-match bearer；rotation、revocation、expiration、scope、多人/多 client provisioning 尚無產品決策。
 - **HTTP Host 驗證是文件與實作落差**：architecture 文件寫有 Host verification，但目前查到的 code 明確實作的是 WS Origin allowlist；是否為遺漏、設計變更或文件過期，需在 W1 決定。
 - **max_total_connections 的產品語意未定**：wire schema 宣告 4，但現有程式未見總連線 enforcement；需決定補 enforcement 或撤回該 capability。
-- **CLI help 的現場執行未完成**：uv run tea-asr --help / model-prepare --help 在本次環境因 uv cache /Users/c2leb/.cache/uv/sdists-v9/.git permission error 退出；CLI options 已由 src/tea_asr/cli.py:33-61,256-264 source 核對，但仍需在正常開發環境實跑。
+- **CLI help 的現場執行未完成**：uv run tea-asr --help / model-prepare --help 在本次環境因 uv cache ~/.cache/uv/sdists-v9/.git permission error 退出；CLI options 已由 src/tea_asr/cli.py:33-61,256-264 source 核對，但仍需在正常開發環境實跑。
 - **Mac 實機視覺與系統整合未證實**：排版是否跳動、overlay/focus、全域快捷鍵、TCC 權限、外部網路、真實模型延遲/辨識品質都不能由這份 CLI 唯讀調查標成 PASS，須依 AGENTS.md:81-88 列為 user acceptance。

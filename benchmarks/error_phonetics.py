@@ -30,8 +30,8 @@ from pypinyin import Style, pinyin
 from benchmarks.cer_eval import load_hypothesis, load_reference, normalize_for_scoring
 from benchmarks.dict_mine import align_characters
 
-DEFAULT_CACHE_DIR = Path(
-    "/Users/c2leb/Codes/tea-asr-service/.soak/eval-services/work/cache"
+DEFAULT_CACHE_DIR = (
+    Path(__file__).resolve().parents[1] / ".soak/eval-services/work/cache"
 )
 DEFAULT_OUTPUT_DIR = (
     Path(__file__).resolve().parents[1]

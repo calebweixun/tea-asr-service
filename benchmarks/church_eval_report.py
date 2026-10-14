@@ -23,7 +23,7 @@ import numpy as np
 from benchmarks.cer_eval import edit_counts, normalize_for_scoring
 from benchmarks.gold_offline_eval import count_duplicate_prefix_items
 
-DEFAULT_WORK = Path("/Users/c2leb/Codes/tea-asr-service/.soak/church-eval/work")
+DEFAULT_WORK = Path(__file__).resolve().parents[1] / ".soak/church-eval/work"
 SERVICES = ("20260704", "20260822", "20260912")
 BLOCK_S = 300.0
 
