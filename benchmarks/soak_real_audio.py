@@ -22,7 +22,10 @@ ROOT = HERE.parent
 SOAK_ROOT = Path(os.environ.get("TEA_SOAK_ROOT", ROOT / ".soak"))
 # The source recording is private: pass --input, or set TEA_SOAK_AUDIO.
 DEFAULT_AUDIO = Path(os.environ.get("TEA_SOAK_AUDIO", ROOT / ".soak" / "source.m4a"))
-DEFAULT_PLUGIN = Path("/Users/c2leb/Codes/obs-plugins/tea-live-subtitle")
+# The OBS plugin checkout: a sibling of this repo by default, or set TEA_OBS_PLUGIN_DIR.
+DEFAULT_PLUGIN = Path(
+    os.environ.get("TEA_OBS_PLUGIN_DIR", ROOT.parent / "obs-plugins" / "tea-live-subtitle")
+)
 FFMPEG = Path("/opt/homebrew/bin/ffmpeg")
 REPLAY_FLAGS = (
     "--fade-delay-ms",
@@ -690,7 +693,12 @@ def _add_trace_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("trace", type=Path)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--server-log", type=Path)
-    parser.add_argument("--plugin-dir", type=Path, default=DEFAULT_PLUGIN)
+    parser.add_argument(
+        "--plugin-dir",
+        type=Path,
+        default=DEFAULT_PLUGIN,
+        help="OBS plugin checkout (default: $TEA_OBS_PLUGIN_DIR or ../obs-plugins/tea-live-subtitle)",
+    )
     parser.add_argument("--build-dir", type=Path, default=SOAK_ROOT / "build")
     parser.add_argument(
         "--replay-binary",

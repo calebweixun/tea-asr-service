@@ -19,7 +19,8 @@ Three steps; derived audio, traces and reports stay under the git-excluded work 
 The reference for a window is the SRT cues starting inside it.  Segments are mapped to the
 service timeline by their sample positions; those mostly inside an uncaptioned span are not
 scored for CER (the user does not caption them) and are counted as *missed singing* when a
-caption would have been shown.  Only metrics are printed or written.
+caption would have been shown.  Only metrics are printed or written.  The caption replay
+builds from the OBS plugin checkout (``TEA_OBS_PLUGIN_DIR``, default ``../obs-plugins/tea-live-subtitle``).
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ import wave
 from pathlib import Path
 from typing import Any
 
-SERVICE_ROOT = Path("/Users/c2leb/Codes/tea-asr-service")
+SERVICE_ROOT = Path(__file__).resolve().parents[1]
 WORK = SERVICE_ROOT / ".soak/church-eval/work"
 
 HERE = Path(__file__).resolve().parent
@@ -51,7 +52,6 @@ WINDOWS = {
     "sermon": (3000.0, 4200.0, "sermon"),
     "close": (6300.0, 7500.0, "response prayer, closing, singing boundary"),
 }
-PLUGIN = Path("/Users/c2leb/Codes/obs-plugins/tea-live-subtitle")
 
 
 def levenshtein(a: str, b: str) -> int:
@@ -322,7 +322,8 @@ def replay_metrics(trace: Path) -> dict[str, Any]:
     import soak_real_audio
 
     binary = WORK / "build" / "caption-replay"
-    metrics, _ = soak_real_audio.run_replay(trace, None, PLUGIN, WORK / "build", binary=binary, only_overall=True)
+    plugin = soak_real_audio.DEFAULT_PLUGIN
+    metrics, _ = soak_real_audio.run_replay(trace, None, plugin, WORK / "build", binary=binary, only_overall=True)
     return metrics["overall"]
 
 

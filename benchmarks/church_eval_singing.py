@@ -48,7 +48,7 @@ from tea_asr.yamnet import (
     locate_yamnet,
 )
 
-DEFAULT_WORK = Path("/Users/c2leb/Codes/tea-asr-service/.soak/church-eval/work")
+DEFAULT_WORK = Path(__file__).resolve().parents[1] / ".soak/church-eval/work"
 SERVICES = ("20260704", "20260822", "20260912")
 #: Mean YAMNet speech feature at or above which an uncaptioned segment counts as talking.
 SPEECH_LIKE_SCORE = 0.5

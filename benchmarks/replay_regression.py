@@ -11,11 +11,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 SOAK_ROOT = ROOT / ".soak"
-PLUGIN_DIR = Path("/Users/c2leb/Codes/obs-plugins/tea-live-subtitle")
 sys.path.insert(0, str(HERE))
 
 from soak_metrics import analyze_trace, hard_failures, soft_failures
-from soak_real_audio import _build_replay, run_replay
+from soak_real_audio import DEFAULT_PLUGIN, _build_replay, run_replay
 
 
 def main() -> int:
@@ -25,7 +24,12 @@ def main() -> int:
         type=Path,
         default=Path(os.environ.get("TEA_SOAK_TRACES", SOAK_ROOT / "traces")),
     )
-    parser.add_argument("--plugin-dir", type=Path, default=PLUGIN_DIR)
+    parser.add_argument(
+        "--plugin-dir",
+        type=Path,
+        default=DEFAULT_PLUGIN,
+        help="OBS plugin checkout (default: $TEA_OBS_PLUGIN_DIR or ../obs-plugins/tea-live-subtitle)",
+    )
     parser.add_argument("--build-dir", type=Path, default=SOAK_ROOT / "build")
     args = parser.parse_args()
     trace_dir = args.trace_dir.expanduser().resolve()

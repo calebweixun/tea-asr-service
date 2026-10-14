@@ -22,7 +22,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-SERVICE_ROOT = Path("/Users/c2leb/Codes/tea-asr-service")
+SERVICE_ROOT = ROOT
 DEFAULT_WORK = SERVICE_ROOT / ".soak/church-eval/work"
 MODELS = {
     "4": SERVICE_ROOT
