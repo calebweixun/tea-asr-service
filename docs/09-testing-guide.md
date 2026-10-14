@@ -279,7 +279,7 @@ PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
 用使用者人工訂正過的整場 SRT 當答案，量三場主日（各約 2 小時）的離線 CER、串流字幕行為與歌唱偵測。
 結果與決策見 [church-eval 報告](benchmarks/church-eval-2026-10.md)。音訊、SRT、逐字稿、trace 全部留在
 git-excluded 的 `.soak/church-eval/`（衍生檔在 `work/`），報告只含數字。下面的路徑以
-`S=$PWD`、`W=${SHALLOW_FUSION_WORK:-$S/.soak/church-eval/work}`、`PY=${PY:-$S/.venv/bin/python}` 表示，
+`S=$PWD`、`W=$S/.soak/church-eval/work`、`PY=$S/.venv/bin/python` 表示，
 指令都在 worktree 根目錄用 `export PYTHONPATH=$PWD/src:$PWD HF_HUB_OFFLINE=1` 執行。
 
 ```bash
@@ -487,3 +487,30 @@ tail -f "$W/shallow-fusion/run.log"
 彙整用 `church_eval_report.py` 的 pronoun-folded CER 與 5 分鐘 cluster bootstrap，並檢查
 FB−B pooled CI、false changes/hour，以及相對 β=0 的每 final p50/p95 額外 decode 時間 ≤50 ms。
 數字與 GO/NO-GO 判斷只寫入 aggregate-only [報告骨架](benchmarks/shallow-fusion-2026-10.md)。
+
+## EmbeddingGemma 2 audio↔text probe（離線實驗）
+
+EmbeddingGemma 2 只產生 embedding，不能取代會生成文字的 ASR。Probe 會測 closed-set retrieval、錯字 pairwise discrimination 與 embedding 成本；快取和報告只包含向量、索引與 aggregate metrics，不保存 reference、hypothesis 或 item ID。模型由本機 checkpoint 載入，設為 offline，不會下載資產，也不會呼叫 live server。
+
+CPU smoke（20260704 前 40 筆）：
+
+```bash
+OUT=/private/tmp/embeddinggemma-probe-smoke
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+export PYTHONPATH="$PWD/src:$PWD"
+${PY:-.venv-emb/bin/python} \
+  benchmarks/embedding_asr_probe.py embed --service 20260704 --device cpu --limit 40 --output-dir "$OUT"
+${PY:-.venv-emb/bin/python} \
+  benchmarks/embedding_asr_probe.py evaluate --service 20260704 --device cpu --limit 40 --output-dir "$OUT"
+${PY:-.venv-emb/bin/python} \
+  benchmarks/embedding_asr_probe.py report --services 20260704 --output-dir "$OUT"
+```
+
+完整 MPS run（三個服務）：
+
+```bash
+./benchmarks/run_embedding_probe.sh
+```
+
+Coordinator 預設把 resumable `.npy` 快取、aggregate JSON/Markdown 與 `run.log` 寫入
+`$PWD/.soak/church-eval/work/embedding-probe/`；可用 `W` 覆寫 work 根目錄。中斷後可重跑同一命令續做；該資料夾含私有資料衍生 embedding，請留在 git 外。
