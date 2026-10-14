@@ -93,7 +93,7 @@ metrics report 不含逐字稿。
 準備 30:00–59:09 的預設區間與三個說話者 sections：
 
 ```bash
-PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/soak_real_audio.py extract
 ```
 
@@ -102,7 +102,7 @@ PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
 最後一段的 END 可寫 `end`）。兩分鐘 fake-backend smoke cut：
 
 ```bash
-PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/soak_real_audio.py extract --start 00:30:00 --end 00:32:00 \
   --out .soak/audio/fake-2m.wav --manifest .soak/audio/fake-2m.sections.json
 ```
@@ -112,8 +112,8 @@ Fake backend 使用 OBS 外掛 e2e harness 的 `tests/e2e/fake_asr_server.py`，
 
 ```bash
 mkdir -p .soak/fake/state .soak/traces
-/Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
-  /Users/c2leb/Codes/obs-plugins/tea-live-subtitle/tests/e2e/fake_asr_server.py \
+${PY:-.venv/bin/python} \
+  ${PLUGIN_ROOT:-../tea-live-subtitle}/tests/e2e/fake_asr_server.py \
   --service-dir "$PWD" --port 8422 \
   --state-dir "$PWD/.soak/fake/state" \
   --request-log "$PWD/.soak/fake/requests.jsonl" --revisable --emulate-segmentation
@@ -122,7 +122,7 @@ mkdir -p .soak/fake/state .soak/traces
 另一個終端機以 fake server 建立的 token 做 1x capture：
 
 ```bash
-PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/soak_real_audio.py capture --wav .soak/audio/fake-2m.wav \
   --url ws://127.0.0.1:8422/v1/stream \
   --token-file .soak/fake/state/token --end-silence 300 \
@@ -134,11 +134,11 @@ PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
 Fake server 結束後，重播、分析並產生報告：
 
 ```bash
-PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/soak_real_audio.py replay .soak/traces/fake-2m-300.jsonl
-PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/soak_real_audio.py analyze .soak/traces/fake-2m-300.jsonl
-PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/soak_real_audio.py report .soak/traces/fake-2m-300.jsonl
 ```
 
@@ -151,7 +151,7 @@ Replay 的每條重複字幕行會對照該 segment 的 server partial/final 分
 已有 `caption-replay` binary 時可透過 `--replay-binary` 重用，避免建置 plugin：
 
 ```bash
-PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/soak_real_audio.py analyze .soak/traces/fake-2m-300.jsonl \
   --replay-binary .soak/build/caption-replay
 ```
@@ -161,9 +161,9 @@ PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
 ```bash
 SOAK_HOME="$PWD/.soak/real-home"
 mkdir -p "$SOAK_HOME" .soak/traces
-HOME="$SOAK_HOME" TEA_ASR_MODELS_DIR=/Users/c2leb/Codes/tea-asr-service/models \
+HOME="$SOAK_HOME" TEA_ASR_MODELS_DIR=$PWD/models \
   HF_HUB_OFFLINE=1 PYTHONPATH="$PWD/src" \
-  /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  ${PY:-.venv/bin/python} \
   -c 'from tea_asr.cli import main; raise SystemExit(main())' serve --port 8421
 ```
 
@@ -173,7 +173,7 @@ capture；每次完成後跑同一組 `replay`、`analyze`、`report`：
 
 ```bash
 SOAK_HOME="$PWD/.soak/real-home"
-PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/soak_real_audio.py capture --wav .soak/audio/church-30m-59m.wav \
   --url ws://127.0.0.1:8421/v1/stream \
   --token-file "$SOAK_HOME/Library/Application Support/TEA ASR/token" \
@@ -181,7 +181,7 @@ PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
   --manifest .soak/audio/church-30m-59m.sections.json --end-silence 300 \
   --out .soak/traces/church-300.jsonl
 
-PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/soak_real_audio.py capture --wav .soak/audio/church-30m-59m.wav \
   --url ws://127.0.0.1:8421/v1/stream \
   --token-file "$SOAK_HOME/Library/Application Support/TEA ASR/token" \
@@ -195,11 +195,11 @@ Capture 結束後，對兩個 run 產生各自的 metrics 與 review：
 ```bash
 for run in church-300 church-600; do
   trace=".soak/traces/${run}.jsonl"
-  PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
     benchmarks/soak_real_audio.py replay "$trace"
-  PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
     benchmarks/soak_real_audio.py analyze "$trace"
-  PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
     benchmarks/soak_real_audio.py report "$trace"
 done
 ```
@@ -207,12 +207,12 @@ done
 完成後在 server terminal 按 Ctrl-C。對所有已保存 trace 重做 plugin replay 與 hard-threshold 檢查：
 
 ```bash
-PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/replay_regression.py
 ```
 
 可用 `TEA_SOAK_TRACES=/path/to/traces` 或 `--trace-dir` 指定 trace 目錄。Replay 會從
-`/Users/c2leb/Codes/obs-plugins/tea-live-subtitle/tests/replay/` 編譯到 `.soak/build/`；不需要 OBS。
+`${PLUGIN_ROOT:-../tea-live-subtitle}/tests/replay/` 編譯到 `.soak/build/`；不需要 OBS。
 硬門檻為 0 invalid_ipc、layout moves、mid-speech fade-outs、duplication lines，以及沒有超過 10 秒
 未出文字的 speech stretch。stable gap p95 > 3 秒與 final latency p95 > 1.5 秒只列 soft failure。
 
@@ -225,7 +225,7 @@ PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
 從 soak 音訊與 trace 建立本機校稿頁；沒有下載或連線需求：
 
 ```bash
-PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/gold_kit.py build
 ```
 
@@ -236,7 +236,7 @@ localStorage 自動保存；完成後按「下載答案 JSON」，把檔案放�
 用校正答案比較 trace 或 `{ "item-id": "辨識文字" }` 格式的 JSON hypothesis：
 
 ```bash
-PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/cer_eval.py .soak/gold/answers/speakers-answers.json \
   .soak/traces/system-a.jsonl .soak/gold/answers/system-b.json
 ```
@@ -253,25 +253,25 @@ OpenCC 時才附上簡體轉繁體版本。加 `--fold-pronouns` 會同時回報
 使用本機預備好的模型執行全部 4-bit、8-bit、span、字典與 prompt 變體：
 
 ```bash
-/Users/c2leb/Codes/tea-asr-service/.soak/gold/run-offline-eval.sh
+$PWD/.soak/gold/run-offline-eval.sh
 ```
 
 單獨測試 span 與兩秒前後文，並比較原分數、折疊分數及相對於第一個 hypothesis 的
 paired bootstrap 95% 區間：
 
 ```bash
-PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/gold_offline_eval.py \
-  --answers /Users/c2leb/Codes/tea-asr-service/.soak/gold/answers/speakers-answers.json \
-  --wav /Users/c2leb/Codes/tea-asr-service/.soak/audio/church-30m-59m.wav \
-  --model-path /Users/c2leb/Codes/tea-asr-service/models/models--Alkd--TEA-ASR-1.1-MLX-4bit/snapshots/caee57a908b6d64be08a6462c7a21ececbd4d7cb \
+  --answers $PWD/.soak/gold/answers/speakers-answers.json \
+  --wav $PWD/.soak/audio/church-30m-59m.wav \
+  --model-path $PWD/models/models--Alkd--TEA-ASR-1.1-MLX-4bit/snapshots/caee57a908b6d64be08a6462c7a21ececbd4d7cb \
   --mode span --pad-s 2 \
-  --output /Users/c2leb/Codes/tea-asr-service/.soak/gold/eval/span.json
-PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
+  --output $PWD/.soak/gold/eval/span.json
+PYTHONPATH="$PWD/src" ${PY:-.venv/bin/python} \
   benchmarks/cer_eval.py \
-  /Users/c2leb/Codes/tea-asr-service/.soak/gold/answers/speakers-answers.json \
-  /Users/c2leb/Codes/tea-asr-service/.soak/gold/eval/01-4bit-segment.json \
-  /Users/c2leb/Codes/tea-asr-service/.soak/gold/eval/span.json --fold-pronouns
+  $PWD/.soak/gold/answers/speakers-answers.json \
+  $PWD/.soak/gold/eval/01-4bit-segment.json \
+  $PWD/.soak/gold/eval/span.json --fold-pronouns
 ```
 
 ## 整場主日 SRT 評估（church-eval，2026-10）
@@ -279,7 +279,7 @@ PYTHONPATH="$PWD/src" /Users/c2leb/Codes/tea-asr-service/.venv/bin/python \
 用使用者人工訂正過的整場 SRT 當答案，量三場主日（各約 2 小時）的離線 CER、串流字幕行為與歌唱偵測。
 結果與決策見 [church-eval 報告](benchmarks/church-eval-2026-10.md)。音訊、SRT、逐字稿、trace 全部留在
 git-excluded 的 `.soak/church-eval/`（衍生檔在 `work/`），報告只含數字。下面的路徑以
-`S=/Users/c2leb/Codes/tea-asr-service`、`W=$S/.soak/church-eval/work`、`PY=$S/.venv/bin/python` 表示，
+`S=$PWD`、`W=$S/.soak/church-eval/work`、`PY=$S/.venv/bin/python` 表示，
 指令都在 worktree 根目錄用 `export PYTHONPATH=$PWD/src:$PWD HF_HUB_OFFLINE=1` 執行。
 
 ```bash
@@ -435,3 +435,30 @@ $PY -m pytest tests/unit/test_phonetic_rescore.py -q   # 沒有 pypinyin 時只�
 
 限制：teacher-forced 打分只做在 item 音訊（不含 carry 的 3 s）；模型原始輸出含私用區字元（PUA），
 過濾後的文字對模型來說略偏離分佈，但原稿與候選同樣被過濾，所以比較仍然公平。
+
+## EmbeddingGemma 2 audio↔text probe（離線實驗）
+
+EmbeddingGemma 2 只產生 embedding，不能取代會生成文字的 ASR。Probe 會測 closed-set retrieval、錯字 pairwise discrimination 與 embedding 成本；快取和報告只包含向量、索引與 aggregate metrics，不保存 reference、hypothesis 或 item ID。模型由本機 checkpoint 載入，設為 offline，不會下載資產，也不會呼叫 live server。
+
+CPU smoke（20260704 前 40 筆）：
+
+```bash
+OUT=/private/tmp/embeddinggemma-probe-smoke
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+export PYTHONPATH="$PWD/src:$PWD"
+${PY:-.venv-emb/bin/python} \
+  benchmarks/embedding_asr_probe.py embed --service 20260704 --device cpu --limit 40 --output-dir "$OUT"
+${PY:-.venv-emb/bin/python} \
+  benchmarks/embedding_asr_probe.py evaluate --service 20260704 --device cpu --limit 40 --output-dir "$OUT"
+${PY:-.venv-emb/bin/python} \
+  benchmarks/embedding_asr_probe.py report --services 20260704 --output-dir "$OUT"
+```
+
+完整 MPS run（三個服務）：
+
+```bash
+./benchmarks/run_embedding_probe.sh
+```
+
+Coordinator 預設把 resumable `.npy` 快取、aggregate JSON/Markdown 與 `run.log` 寫入
+`$PWD/.soak/church-eval/work/embedding-probe/`；可用 `W` 覆寫 work 根目錄。中斷後可重跑同一命令續做；該資料夾含私有資料衍生 embedding，請留在 git 外。
