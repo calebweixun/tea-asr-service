@@ -15,6 +15,7 @@
 | Server（`src/tea_asr/`） | P0–P3、P2a 完成並實測；recognition hints 預設關閉，deterministic replacements 審閱後建議使用，model prompt experimental 且預設關閉。明確模型變體設定已實作：4-bit 維持預設，8-bit 為本機 hash-pinned 衍生檔，載入失敗不替換模型；字典讀寫 API 加入後 `pytest -q` 通過 727 tests（2026-10-05，Python 3.12 fallback venv），`ruff check .` 與 schema check 通過。 |
 | ASR generation budget | **2026-10-05**：preview／final 每次依完整 PCM 長度（包含 carry）使用 `min(512, ceil(audio_s × 11) + 8)`。30 秒 HTTP one-shot 上限對應 338 tokens；更長的直接 backend 輸入逐步增加至原有 512-token 上限。達上限時記 `asr.max_tokens_hit`。 |
 | ASR model variant | 8-bit + carry 3 s 在三場人工訂正 SRT 離線評估中比 4-bit + carry 3 s 低 0.27 pp CER（95% CI −0.44 至 −0.10），模型檔大 92%。這不是即時延遲或記憶體證據；10 分鐘真模型比較與 RSS、decode、busy、final latency 結果待 coordinator 執行 `.soak/run-8bit-check.sh`。 |
+| Offline shallow fusion benchmark | **2026-10-13 實作完成，真模型未驗證**：A 是目前程式 β=0 全量解碼，B 是 A 加 fold-safe 字典替換；β=0 對 m8-c3 的差異只回報數量與 item ids。20260704 的 658-item cache 沿用 version 1；缺 β=0 hypotheses 時才警告並回退 m8-c3。所有解碼文字先移除 U+FFFD。grid tuning、held-out full decode、latency 與 GO/NO-GO 由 coordinator 執行 [`benchmarks/run_shallow_fusion.sh`](../benchmarks/run_shallow_fusion.sh)，數字寫入 aggregate-only 報告。 |
 | 離線 phonetic error analysis | `PYTHONPATH=src python -m benchmarks.error_phonetics` 依 CER 的正規化與 pronoun folding 比較 raw／dictionary hypotheses；排除 unclear、保留 music。需要 `pypinyin`；樣例與 top confusion pairs 寫入本機 ignored `.soak/eval-services/work/error-phonetics/`。 |
 | Mac client（`clients/macos/`） | 可用：聽寫、會議記錄、選單列狀態、服務啟停。P5a 的收音裝置／聲道、可設定快捷鍵／PTT、feedback、non-activating overlay 與 deterministic 後處理都已實作。主視窗已做過一輪原生 macOS 設計整理（拿掉每頁大標與描邊卡片、設定頁走 NSGridView、間距收斂成 Metrics 常數），右欄改為 build-once + update 閉包、不再每次狀態更新重建整欄，側欄固定寬度不可收折。「權限」已併入「診斷與權限」頁；macOS 26 起的「裝置控制和資料取用」改名已依 runtime 版本處理。輸入裝置改為嚴格依 UID 路由並 read-back 驗證，附獨立於 session 的電平監看元件。`swift build` 無 warning、93 個 client 測試通過。**仍待實機驗收**：overlay 焦點、跨 app key-up、熱鍵衝突、實際收音品質。P5b 尚未開始 |
 | OBS 外掛（`calebweixun/tea-live-subtitle`，本機 `~/Codes/obs-plugins/tea-live-subtitle`） | **2026-09-25 可接目前的 server 提供 live subtitle。** 相容性修正（tea-live-subtitle#1）：帶 token 的 preflight、退避上限且每來源每 60 秒最多 2 次認證失敗（低於 server 的 10 次門檻）、server 重啟後會重連；原版 partial 永遠不出現、token 錯 5 秒自鎖、重啟後不再重連，e2e 僅 1/11。穩定字幕（tea-live-subtitle#2）：使用 server 的 `transcript.stable`，預設開啟，畫面只增不改，斷線凍結 10 秒。e2e 17/17、CI 三平台建置通過。**尚未在真實 OBS 裡實機驗收**；本機 Xcode 27 的 `cmake --preset macos` 無法 configure，正式 bundle 請用 CI artifact。設定標籤仍是英文 fallback |
@@ -49,7 +50,7 @@
 啟動服務：
 
 ```bash
-cd /Users/c2leb/Codes/tea-asr-service && uv run tea-asr serve
+cd <repo-root> && uv run tea-asr serve
 ```
 
 健康檢查端點是 **`/healthz`**（不是 `/health`）。服務只聽 `127.0.0.1:8327`。
@@ -171,12 +172,12 @@ macOS 曾經把 `~/Library/Caches/TEA ASR/` 整個清掉（1.2 GB 模型消失�
 
 ### 4.1 OBS 外掛：4029／CJK 預設字型修復送 CI ★最高
 
-倉庫 `/Users/c2leb/Codes/obs-plugins/tea-live-subtitle`（`git@github.com:calebweixun/tea-live-subtitle.git`）。
+倉庫 `<OBS plugin repo>`（`git@github.com:calebweixun/tea-live-subtitle.git`）。
 
 M1 已實機確認載入（OBS 32.2.2 log 出現 `[tea-live-subtitle] loaded version 0.1.0`，
 外掛以 `pkgutil --expand-full` 取出 bundle 放進 `~/Library/Application Support/obs-studio/plugins/`，
 不需要 sudo）。2026-09-19 後續已下載 workflow run `35423344854`、commit `36c5f12`
-的 macOS artifact，使用 `/Users/c2leb/tea-asr-takes/take1.wav`（16 kHz mono，約 75 秒）
+的 macOS artifact，使用 `<take1.wav>`（16 kHz mono，約 75 秒）
 實機驗證。OBS 畫布最後以 `Heiti TC Light` 顯示出可讀字幕：
 「這個 pr 已經 merge 了，我要 take 一個 release。」證據截圖在
 `/tmp/tea-obs-heiti-tc-20260919.png` 與 `/tmp/tea-obs-heiti-caption-large.png`，log 是
